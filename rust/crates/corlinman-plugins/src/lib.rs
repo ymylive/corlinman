@@ -15,6 +15,7 @@ pub mod registry;
 pub mod runtime;
 pub mod sandbox;
 
+pub use async_task::{AsyncTaskRegistry, CompleteError};
 pub use discovery::{
     discover, roots_from_env_var, DiscoveredPlugin, DiscoveryDiagnostic, Origin, SearchRoot,
 };

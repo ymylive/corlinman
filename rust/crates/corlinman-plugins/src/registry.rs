@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::async_task::AsyncTaskRegistry;
 use crate::discovery::{discover, DiscoveredPlugin, DiscoveryDiagnostic, Origin, SearchRoot};
 use crate::manifest::PluginManifest;
 
@@ -56,11 +57,28 @@ pub enum Diagnostic {
 ///
 /// For M3 the registry is immutable after construction; hot reload via
 /// `notify` arrives with the service runtime work.
-#[derive(Debug, Clone, Default)]
+///
+/// Carries a process-wide [`AsyncTaskRegistry`] so the gateway can park
+/// `AcceptedForLater` tool_calls and resolve them from the
+/// `/plugin-callback/:task_id` HTTP route.
+#[derive(Debug, Clone)]
 pub struct PluginRegistry {
     entries: HashMap<String, PluginEntry>,
     diagnostics: Vec<Diagnostic>,
     roots: Vec<SearchRoot>,
+    /// Shared parking lot for async plugin task ids. Cheap to clone.
+    async_tasks: Arc<AsyncTaskRegistry>,
+}
+
+impl Default for PluginRegistry {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            diagnostics: Vec::new(),
+            roots: Vec::new(),
+            async_tasks: Arc::new(AsyncTaskRegistry::new()),
+        }
+    }
 }
 
 impl PluginRegistry {
@@ -87,7 +105,15 @@ impl PluginRegistry {
             entries,
             diagnostics,
             roots,
+            async_tasks: Arc::new(AsyncTaskRegistry::new()),
         }
+    }
+
+    /// Shared async-task parking lot. The gateway's tool executor parks
+    /// `AcceptedForLater` task ids here; the `/plugin-callback/:task_id`
+    /// HTTP handler resolves them.
+    pub fn async_tasks(&self) -> Arc<AsyncTaskRegistry> {
+        self.async_tasks.clone()
     }
 
     /// All registered plugins sorted alphabetically by name (stable output

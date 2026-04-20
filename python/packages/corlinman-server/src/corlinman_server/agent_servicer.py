@@ -17,6 +17,8 @@ full wait-for-ToolResult loop.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 from collections.abc import AsyncIterator
 from typing import Any
@@ -32,6 +34,7 @@ from corlinman_agent.reasoning_loop import (
     ReasoningLoop,
     TokenEvent,
     ToolCallEvent,
+    ToolResult,
 )
 from corlinman_grpc import agent_pb2, agent_pb2_grpc, common_pb2
 from corlinman_providers import registry as provider_registry
@@ -101,7 +104,18 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
             yield _error_frame("model_not_found", str(exc))
             return
 
-        loop = ReasoningLoop(provider)
+        # Bump the tool-result timeout above the M2 default (0.05s) so the
+        # loop actually waits long enough for the gateway to round-trip a
+        # ToolResult frame back. The servicer is now the real feedback
+        # channel — the ``awaiting_plugin_runtime`` placeholder short-circuit
+        # still protects us against runaway loops.
+        loop = ReasoningLoop(provider, tool_result_timeout=30.0)
+
+        inbound_task = asyncio.create_task(
+            _pump_inbound(request_iterator, loop),
+            name="agent.chat.pump_inbound",
+        )
+
         seq = 0
         try:
             async for event in loop.run(start):
@@ -136,6 +150,10 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
         except Exception as exc:
             logger.exception("agent.chat.fatal", error=str(exc))
             yield _error_frame("unknown", str(exc))
+        finally:
+            inbound_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await inbound_task
 
 
 async def _expect_start(
@@ -148,6 +166,52 @@ async def _expect_start(
             return frame
         return None
     return None
+
+
+async def _pump_inbound(
+    iterator: AsyncIterator[agent_pb2.ClientFrame],
+    loop: ReasoningLoop,
+) -> None:
+    """Forward post-ChatStart :class:`ClientFrame` messages to the loop.
+
+    * ``tool_result`` → :meth:`ReasoningLoop.feed_tool_result`
+    * ``cancel`` → :meth:`ReasoningLoop.cancel` and return
+    * ``approval`` → logged only (S5 wires this into an approval gate)
+    * duplicate ``start`` / unknown kinds → ignored
+    """
+    async for frame in iterator:
+        kind = frame.WhichOneof("kind")
+        if kind == "tool_result":
+            tr = frame.tool_result
+            content = tr.result_json.decode("utf-8", errors="replace")
+            loop.feed_tool_result(
+                ToolResult(
+                    call_id=tr.call_id,
+                    content=content,
+                    is_error=tr.is_error,
+                )
+            )
+            logger.debug(
+                "agent.chat.tool_result_in",
+                call_id=tr.call_id,
+                is_error=tr.is_error,
+                duration_ms=tr.duration_ms,
+            )
+        elif kind == "cancel":
+            reason = frame.cancel.reason or "client_cancel"
+            logger.info("agent.chat.cancel_in", reason=reason)
+            loop.cancel(reason=reason)
+            return
+        elif kind == "approval":
+            # S5 will wire this into an approval gate; today we just log.
+            logger.debug(
+                "agent.chat.approval_received_but_not_wired",
+                call_id=frame.approval.call_id,
+                approved=frame.approval.approved,
+            )
+        elif kind == "start":
+            logger.warning("agent.chat.duplicate_start_ignored")
+        # Unknown kinds silently ignored — protobuf forward compatibility.
 
 
 def _to_agent_start(pb_start: agent_pb2.ChatStart) -> AgentChatStart:

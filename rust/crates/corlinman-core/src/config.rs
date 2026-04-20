@@ -62,6 +62,10 @@ pub struct ServerConfig {
     #[validate(length(min = 1))]
     pub bind: String,
     pub data_dir: PathBuf,
+    /// Maximum number of messages retained per session after each chat turn.
+    /// Older messages are trimmed asynchronously by the gateway.
+    #[validate(range(min = 1, max = 10000))]
+    pub session_max_messages: usize,
 }
 
 impl Default for ServerConfig {
@@ -70,8 +74,13 @@ impl Default for ServerConfig {
             port: default_port(),
             bind: default_bind(),
             data_dir: default_data_dir(),
+            session_max_messages: default_session_max_messages(),
         }
     }
+}
+
+fn default_session_max_messages() -> usize {
+    100
 }
 
 fn default_port() -> u16 {

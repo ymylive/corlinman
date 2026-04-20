@@ -50,6 +50,7 @@ argon2 = { workspace = true }
 walkdir = { workspace = true }
 time = { workspace = true }
 toml = { workspace = true }
+dirs = { workspace = true }
 base64 = "0.22"
 
 [dev-dependencies]

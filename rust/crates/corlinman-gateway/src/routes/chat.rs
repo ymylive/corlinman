@@ -30,7 +30,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse, Response,
@@ -39,6 +39,7 @@ use axum::{
     Json, Router,
 };
 use corlinman_agent_client::tool_callback::{PlaceholderExecutor, ToolExecutor};
+use corlinman_core::session::{SessionMessage, SessionRole, SessionStore};
 use corlinman_core::CorlinmanError;
 use corlinman_plugins::runtime::jsonrpc_stdio::{execute as stdio_execute, DEFAULT_TIMEOUT_MS};
 use corlinman_plugins::runtime::PluginOutput;
@@ -74,6 +75,12 @@ pub struct ChatRequest {
     /// Opaque `tools` array (OpenAI shape). We pass it through to Python as JSON.
     #[serde(default)]
     pub tools: Option<Value>,
+    /// Optional session identifier. When present, the gateway loads prior
+    /// history for this key and persists the new user + assistant messages on
+    /// completion. Clients may also supply this via the `X-Session-Key`
+    /// header; the body takes precedence. Absent = stateless single-turn.
+    #[serde(default)]
+    pub session_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -154,6 +161,92 @@ pub trait ChatBackend: Send + Sync {
 /// Boxed stream of `ServerFrame`s yielded by the backend.
 pub type BackendRx = Pin<Box<dyn Stream<Item = Result<ServerFrame, CorlinmanError>> + Send>>;
 
+// ---- Model redirect -----------------------------------------------------------
+
+/// Lightweight slice of `config.models` the chat handler needs to resolve a
+/// request's `model` field. We keep this detached from `CorlinmanConfig` so
+/// `ChatState` doesn't depend on the full config graph (and so tests can
+/// script remap behaviour without building a Config tree).
+///
+/// Resolution order per roadmap §3 T3:
+///   1. If `model` is a key in `aliases`, rewrite to `aliases[model]`.
+///   2. Else if `known_models` is non-empty and `model` is absent from it,
+///      fall back to `default` (when set) and log a warning.
+///   3. Else return the model verbatim (stateless pass-through).
+#[derive(Debug, Clone, Default)]
+pub struct ModelRedirect {
+    /// Alias map: request model → resolved model.
+    pub aliases: std::collections::HashMap<String, String>,
+    /// Fallback target when the request model is unknown. Empty = no fallback.
+    pub default: String,
+    /// Known models (typically provider `supports` union). Empty = skip the
+    /// fallback check entirely (treat every model as known).
+    pub known_models: std::collections::HashSet<String>,
+}
+
+impl ModelRedirect {
+    /// Convenience constructor for tests / boot code.
+    pub fn new(
+        aliases: std::collections::HashMap<String, String>,
+        default: String,
+        known_models: std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            aliases,
+            default,
+            known_models,
+        }
+    }
+}
+
+/// Resolution outcome — separated from [`apply_model_aliases`] so the handler
+/// can tell "unknown + no default" (→ 400) from the happy paths.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ResolvedModel {
+    /// Alias hit → `resolved` is the aliased target.
+    Aliased { resolved: String },
+    /// Model is known verbatim (or known-models list is empty / disabled).
+    Passthrough { resolved: String },
+    /// Model is unknown and a non-empty default was applied.
+    FallbackDefault { resolved: String },
+    /// Model is unknown and no default is configured — handler returns 400.
+    UnknownNoDefault,
+}
+
+impl ResolvedModel {
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            Self::Aliased { resolved }
+            | Self::Passthrough { resolved }
+            | Self::FallbackDefault { resolved } => Some(resolved.as_str()),
+            Self::UnknownNoDefault => None,
+        }
+    }
+}
+
+/// Apply the alias map + unknown-model fallback to a request model string.
+/// Pure function — no logging, no I/O — so the handler can log once with the
+/// right level after inspecting the outcome.
+pub fn apply_model_aliases(model: &str, redirect: &ModelRedirect) -> ResolvedModel {
+    if let Some(target) = redirect.aliases.get(model) {
+        return ResolvedModel::Aliased {
+            resolved: target.clone(),
+        };
+    }
+    // Empty known_models = caller opted out of the unknown-model check.
+    if redirect.known_models.is_empty() || redirect.known_models.contains(model) {
+        return ResolvedModel::Passthrough {
+            resolved: model.to_string(),
+        };
+    }
+    if !redirect.default.is_empty() {
+        return ResolvedModel::FallbackDefault {
+            resolved: redirect.default.clone(),
+        };
+    }
+    ResolvedModel::UnknownNoDefault
+}
+
 // ---- Router + handler ---------------------------------------------------------
 
 /// State holder for the chat route: any [`ChatBackend`] impl + the tool executor.
@@ -161,7 +254,21 @@ pub type BackendRx = Pin<Box<dyn Stream<Item = Result<ServerFrame, CorlinmanErro
 pub struct ChatState {
     pub backend: Arc<dyn ChatBackend>,
     pub tool_executor: Arc<dyn ToolExecutor>,
+    /// Cross-request session history store. `None` = stateless (no history
+    /// load / append / trim). Wired from `AppState::session_store`.
+    pub session_store: Option<Arc<dyn SessionStore>>,
+    /// Maximum messages retained per session after each turn; older ones are
+    /// trimmed asynchronously post-response. Mirrors
+    /// `config.server.session_max_messages`.
+    pub session_max_messages: usize,
+    /// Model alias + fallback configuration. Default = pass-through for every
+    /// model (empty aliases + empty known_models).
+    pub model_redirect: Arc<ModelRedirect>,
 }
+
+/// Default cap used when [`ChatState`] is constructed without an explicit
+/// `session_max_messages`. Matches `ServerConfig::default().session_max_messages`.
+pub const DEFAULT_SESSION_MAX_MESSAGES: usize = 100;
 
 impl ChatState {
     /// Bundle a backend with the default M1 placeholder tool executor.
@@ -174,6 +281,9 @@ impl ChatState {
         Self {
             backend,
             tool_executor: Arc::new(PlaceholderExecutor),
+            session_store: None,
+            session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
+            model_redirect: Arc::new(ModelRedirect::default()),
         }
     }
 
@@ -184,7 +294,23 @@ impl ChatState {
         Self {
             backend,
             tool_executor: Arc::new(RegistryToolExecutor::new(registry)),
+            session_store: None,
+            session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
+            model_redirect: Arc::new(ModelRedirect::default()),
         }
+    }
+
+    /// Attach a session store so subsequent requests with a `session_key` load
+    /// prior history and persist their new user+assistant turns.
+    pub fn with_session_store(mut self, store: Arc<dyn SessionStore>) -> Self {
+        self.session_store = Some(store);
+        self
+    }
+
+    /// Override the session message cap (default 100).
+    pub fn with_session_max_messages(mut self, max: usize) -> Self {
+        self.session_max_messages = max.max(1);
+        self
     }
 
     /// Escape hatch for tests / alternate composition (e.g. custom executors).
@@ -195,7 +321,18 @@ impl ChatState {
         Self {
             backend,
             tool_executor,
+            session_store: None,
+            session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
+            model_redirect: Arc::new(ModelRedirect::default()),
         }
+    }
+
+    /// Attach a model-redirect bundle so `/v1/chat/completions` rewrites the
+    /// request `model` field through `config.models.aliases` + optional
+    /// unknown-model fallback to `config.models.default`.
+    pub fn with_model_redirect(mut self, redirect: ModelRedirect) -> Self {
+        self.model_redirect = Arc::new(redirect);
+        self
     }
 }
 
@@ -213,14 +350,31 @@ pub struct RegistryToolExecutor {
     /// Global fallback deadline when neither manifest nor request specifies one.
     #[allow(dead_code)]
     timeout_default: std::time::Duration,
+    /// Deadline for async plugin callbacks. Tests override this via
+    /// [`Self::with_async_timeout`] to avoid 5-minute waits.
+    async_callback_timeout: std::time::Duration,
 }
+
+/// Default deadline we wait for a `/plugin-callback/:task_id` HTTP hit
+/// before giving up on an async tool call. Roadmap §3 specifies 5 minutes.
+pub const DEFAULT_ASYNC_CALLBACK_TIMEOUT_SECS: u64 = 300;
 
 impl RegistryToolExecutor {
     pub fn new(registry: Arc<PluginRegistry>) -> Self {
         Self {
             registry,
             timeout_default: std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS),
+            async_callback_timeout: std::time::Duration::from_secs(
+                DEFAULT_ASYNC_CALLBACK_TIMEOUT_SECS,
+            ),
         }
+    }
+
+    /// Override the async callback timeout. Only used by tests that need
+    /// to exercise the timeout path quickly.
+    pub fn with_async_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.async_callback_timeout = timeout;
+        self
     }
 }
 
@@ -299,19 +453,63 @@ impl ToolExecutor for RegistryToolExecutor {
                 task_id,
                 duration_ms,
             }) => {
-                // Async plugin callback lands with the /plugin-callback route.
-                // Until then, surface a structured "pending" payload so the
-                // loop doesn't stall waiting for a result we cannot produce.
-                Ok(PbToolResult {
-                    call_id: call.call_id.clone(),
-                    result_json: serde_json::to_vec(&json!({
-                        "status": "pending_async_callback",
-                        "task_id": task_id,
-                    }))
-                    .unwrap_or_default(),
-                    is_error: false,
-                    duration_ms,
-                })
+                // Async plugin: park on the async task registry, wait up to
+                // `async_callback_timeout` for `/plugin-callback/:task_id` to
+                // deliver the real result. Timeout / disconnect folds into a
+                // structured `is_error=true` payload so the reasoning loop
+                // never hangs indefinitely.
+                let async_tasks = self.registry.async_tasks();
+                let rx = async_tasks.register(task_id.clone());
+                let wait_started = std::time::Instant::now();
+                let wait = tokio::time::timeout(self.async_callback_timeout, rx).await;
+                let total_ms =
+                    duration_ms.saturating_add(wait_started.elapsed().as_millis() as u64);
+                match wait {
+                    Ok(Ok(payload)) => {
+                        let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+                        Ok(PbToolResult {
+                            call_id: call.call_id.clone(),
+                            result_json: bytes,
+                            is_error: false,
+                            duration_ms: total_ms,
+                        })
+                    }
+                    Ok(Err(_recv_err)) => {
+                        // Sender dropped without calling complete — treat as
+                        // an upstream plugin failure so the model retries.
+                        Ok(PbToolResult {
+                            call_id: call.call_id.clone(),
+                            result_json: serde_json::to_vec(&json!({
+                                "code": "async_cancelled",
+                                "task_id": task_id,
+                                "message": "async plugin task cancelled before callback",
+                            }))
+                            .unwrap_or_default(),
+                            is_error: true,
+                            duration_ms: total_ms,
+                        })
+                    }
+                    Err(_elapsed) => {
+                        // Drop the pending registration so a late callback
+                        // gets `NotFound` instead of trying to send into a
+                        // closed channel.
+                        async_tasks.cancel(&task_id);
+                        Ok(PbToolResult {
+                            call_id: call.call_id.clone(),
+                            result_json: serde_json::to_vec(&json!({
+                                "code": "timeout",
+                                "task_id": task_id,
+                                "message": format!(
+                                    "async plugin callback timed out after {}s",
+                                    self.async_callback_timeout.as_secs()
+                                ),
+                            }))
+                            .unwrap_or_default(),
+                            is_error: true,
+                            duration_ms: total_ms,
+                        })
+                    }
+                }
             }
             Err(err) => {
                 let mut r =
@@ -370,7 +568,11 @@ pub fn router_with_state(state: ChatState) -> Router {
         .with_state(state)
 }
 
-async fn handle_chat(State(state): State<ChatState>, Json(req): Json<ChatRequest>) -> Response {
+async fn handle_chat(
+    State(state): State<ChatState>,
+    headers: HeaderMap,
+    Json(mut req): Json<ChatRequest>,
+) -> Response {
     if req.model.is_empty() {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -386,19 +588,195 @@ async fn handle_chat(State(state): State<ChatState>, Json(req): Json<ChatRequest
         );
     }
 
-    let start = build_chat_start(&req);
+    // Model alias / unknown-model fallback. Resolution happens BEFORE history
+    // load so the request `model` field is final by the time we build the
+    // `ChatStart` frame and run downstream provider routing.
+    let original_model = req.model.clone();
+    match apply_model_aliases(&req.model, &state.model_redirect) {
+        ResolvedModel::Aliased { resolved } => {
+            tracing::debug!(
+                requested = %original_model,
+                resolved = %resolved,
+                "chat.model.alias_applied"
+            );
+            req.model = resolved;
+        }
+        ResolvedModel::Passthrough { .. } => {
+            // No rewrite — pass model through verbatim.
+        }
+        ResolvedModel::FallbackDefault { resolved } => {
+            warn!(
+                requested = %original_model,
+                fallback = %resolved,
+                "chat.model.unknown_model_fallback_to_default"
+            );
+            req.model = resolved;
+        }
+        ResolvedModel::UnknownNoDefault => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "unknown_model",
+                &format!(
+                    "model `{original_model}` is not a known alias or provider model, and no `models.default` fallback is configured"
+                ),
+            );
+        }
+    }
+
+    // Resolve session_key. Body takes precedence; header `X-Session-Key`
+    // is the fallback (mirrors the convention we use for trace headers).
+    let session_key = resolve_session_key(&req, &headers);
+
+    // Prepend stored history for this session (if any). Runs BEFORE ChatStart
+    // is built so Python sees a single well-ordered messages list. Agent B's
+    // model-alias rewrite runs earlier in this same handler (on `req.model`),
+    // so the order is: alias apply → load history → prepend → build ChatStart.
+    let history_loaded = if let (Some(key), Some(store)) = (&session_key, &state.session_store) {
+        match store.load(key).await {
+            Ok(msgs) => msgs,
+            Err(err) => {
+                warn!(session_key = %key, error = %err, "session history load failed; proceeding stateless");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Remember the most-recent user message for append (if any). We only
+    // persist the trailing user turn the client added this round — earlier
+    // user messages in the payload are assumed to already be in history.
+    let new_user_message = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .cloned();
+
+    if !history_loaded.is_empty() {
+        let mut prepended: Vec<ChatMessage> = history_loaded
+            .iter()
+            .map(session_message_to_chat_message)
+            .collect();
+        prepended.append(&mut req.messages);
+        req.messages = prepended;
+    }
+
+    let start = build_chat_start(&req, session_key.as_deref());
+
+    // Build the SSE persist context up front (only for streamed requests with
+    // a session store + key). The stream's tail closure drains accumulators
+    // and writes to the store just before `[DONE]` so callers that consume the
+    // full body observe durable history.
+    let persist_ctx = if req.stream {
+        match (session_key.as_deref(), state.session_store.as_ref()) {
+            (Some(key), Some(store)) => Some(SsePersistCtx {
+                store: store.clone(),
+                session_key: key.to_string(),
+                session_max_messages: state.session_max_messages,
+                new_user: new_user_message.clone(),
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     if req.stream {
-        match chat_stream(state, start, req.model).await {
+        match chat_stream(state.clone(), start, req.model, persist_ctx).await {
             Ok(sse) => sse.into_response(),
             Err(err) => upstream_error(err),
         }
     } else {
-        match chat_nonstream(state, start, req.model).await {
-            Ok(resp) => Json(resp).into_response(),
+        match chat_nonstream(state.clone(), start, req.model).await {
+            Ok((resp, assistant_text, tool_calls_json)) => {
+                persist_turn(
+                    &state,
+                    session_key.as_deref(),
+                    new_user_message.as_ref(),
+                    assistant_text,
+                    tool_calls_json,
+                )
+                .await;
+                Json(resp).into_response()
+            }
             Err(err) => upstream_error(err),
         }
     }
+}
+
+/// Resolve the effective session key from (1) the request body, (2) the
+/// `X-Session-Key` header. Empty / whitespace-only strings are treated as
+/// absent so a client can't "poison" history by sending `""`.
+fn resolve_session_key(req: &ChatRequest, headers: &HeaderMap) -> Option<String> {
+    let from_body = req
+        .session_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if from_body.is_some() {
+        return from_body;
+    }
+    headers
+        .get("x-session-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Convert a persisted [`SessionMessage`] back to the wire-format [`ChatMessage`]
+/// we hand to Python. Tool-calls metadata on assistant messages is not currently
+/// forwarded through the gRPC frame (proto lacks a slot) — downstream providers
+/// reconstruct the reasoning loop from the paired `tool` role messages that
+/// follow in history.
+fn session_message_to_chat_message(m: &SessionMessage) -> ChatMessage {
+    ChatMessage {
+        role: match m.role {
+            SessionRole::User => "user".into(),
+            SessionRole::Assistant => "assistant".into(),
+            SessionRole::System => "system".into(),
+            SessionRole::Tool => "tool".into(),
+        },
+        content: m.content.clone(),
+        name: None,
+        tool_call_id: m.tool_call_id.clone(),
+    }
+}
+
+/// Append the new user + assistant messages for this turn and schedule an
+/// async trim. No-op when session_key or store is absent.
+async fn persist_turn(
+    state: &ChatState,
+    session_key: Option<&str>,
+    new_user: Option<&ChatMessage>,
+    assistant_text: String,
+    tool_calls_json: Option<Value>,
+) {
+    let (Some(key), Some(store)) = (session_key, state.session_store.as_ref()) else {
+        return;
+    };
+    if let Some(user) = new_user {
+        let msg = SessionMessage::user(user.content.clone());
+        if let Err(err) = store.append(key, msg).await {
+            warn!(session_key = %key, error = %err, "session append(user) failed");
+        }
+    }
+    let assistant = SessionMessage::assistant(assistant_text, tool_calls_json);
+    if let Err(err) = store.append(key, assistant).await {
+        warn!(session_key = %key, error = %err, "session append(assistant) failed");
+    }
+    // Trim asynchronously — it's a background maintenance op and must not
+    // block the response.
+    let store = store.clone();
+    let key = key.to_string();
+    let keep = state.session_max_messages;
+    tokio::spawn(async move {
+        if let Err(err) = store.trim(&key, keep).await {
+            warn!(session_key = %key, error = %err, "session trim failed");
+        }
+    });
 }
 
 // ---- Non-streaming ------------------------------------------------------------
@@ -407,7 +785,7 @@ async fn chat_nonstream(
     state: ChatState,
     start: ChatStart,
     model: String,
-) -> Result<ChatResponse, CorlinmanError> {
+) -> Result<(ChatResponse, String, Option<Value>), CorlinmanError> {
     let (tx, mut rx) = state.backend.start(start).await?;
 
     let mut content = String::new();
@@ -459,7 +837,14 @@ async fn chat_nonstream(
         }
     }
 
-    Ok(ChatResponse {
+    let tool_calls_json = if tool_calls.is_empty() {
+        None
+    } else {
+        serde_json::to_value(&tool_calls).ok()
+    };
+    let assistant_text = content.clone();
+
+    let response = ChatResponse {
         id: format!("chatcmpl-{}", Uuid::new_v4()),
         object: "chat.completion",
         model,
@@ -473,21 +858,35 @@ async fn chat_nonstream(
             finish_reason,
         }],
         usage,
-    })
+    };
+    Ok((response, assistant_text, tool_calls_json))
 }
 
 // ---- Streaming (SSE) ----------------------------------------------------------
+
+/// Parameters for persisting a streamed turn after the SSE stream drains.
+/// `None` = no session persistence for this request.
+#[derive(Clone)]
+struct SsePersistCtx {
+    store: Arc<dyn SessionStore>,
+    session_key: String,
+    session_max_messages: usize,
+    /// The user message this turn added (persisted first, before the
+    /// assistant response, so the ordering matches non-stream).
+    new_user: Option<ChatMessage>,
+}
 
 async fn chat_stream(
     state: ChatState,
     start: ChatStart,
     model: String,
+    persist: Option<SsePersistCtx>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, CorlinmanError> {
     let (tx, rx) = state.backend.start(start).await?;
     let executor = state.tool_executor.clone();
     let id = format!("chatcmpl-{}", Uuid::new_v4());
 
-    let sse_stream = build_sse_stream(rx, tx, executor, id, model);
+    let sse_stream = build_sse_stream(rx, tx, executor, id, model, persist);
     Ok(Sse::new(sse_stream).keep_alive(KeepAlive::default()))
 }
 
@@ -497,8 +896,18 @@ fn build_sse_stream(
     executor: Arc<dyn ToolExecutor>,
     id: String,
     model: String,
+    persist: Option<SsePersistCtx>,
 ) -> impl Stream<Item = Result<SseEvent, Infallible>> + Send {
     use futures::StreamExt;
+
+    // Accumulators shared between the unfold body (which appends as frames
+    // arrive) and the tail closure (which persists the finished assistant
+    // message). A single async `Mutex` is plenty — the SSE pump is driven by
+    // one task so there is no contention, and both accessors are `await`-safe.
+    let accum_text: Arc<tokio::sync::Mutex<String>> =
+        Arc::new(tokio::sync::Mutex::new(String::new()));
+    let accum_tool_calls: Arc<tokio::sync::Mutex<Vec<Value>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
     // State threaded through the stream as it folds.
     struct StreamState {
@@ -514,6 +923,10 @@ fn build_sse_stream(
         /// True once at least one tool_call was surfaced — used to override a
         /// blank `finish_reason` to `"tool_calls"` when appropriate.
         tool_calls_seen: bool,
+        /// Shared accumulator for the assistant text (token deltas
+        /// concatenated). Read by the tail closure for session persistence.
+        accum_text: Arc<tokio::sync::Mutex<String>>,
+        accum_tool_calls: Arc<tokio::sync::Mutex<Vec<Value>>>,
     }
 
     let state = StreamState {
@@ -525,6 +938,8 @@ fn build_sse_stream(
         next_tool_index: 0,
         done: false,
         tool_calls_seen: false,
+        accum_text: accum_text.clone(),
+        accum_tool_calls: accum_tool_calls.clone(),
     };
 
     stream::unfold(state, |mut s| async move {
@@ -535,6 +950,7 @@ fn build_sse_stream(
             match s.rx.next().await {
                 Some(Ok(frame)) => match frame.kind {
                     Some(server_frame::Kind::Token(t)) => {
+                        s.accum_text.lock().await.push_str(&t.text);
                         let chunk = token_delta_chunk(&s.id, &s.model, &t.text);
                         let ev = SseEvent::default().data(chunk.to_string());
                         return Some((Ok(ev), s));
@@ -543,6 +959,9 @@ fn build_sse_stream(
                         let idx = s.next_tool_index;
                         s.next_tool_index += 1;
                         s.tool_calls_seen = true;
+                        if let Ok(val) = serde_json::to_value(pb_tool_call_to_openai(&tc)) {
+                            s.accum_tool_calls.lock().await.push(val);
+                        }
 
                         // Echo placeholder result back so Python isn't stuck.
                         // The placeholder body never reaches the SSE stream.
@@ -607,14 +1026,59 @@ fn build_sse_stream(
             }
         }
     })
-    .chain(stream::once(async {
+    .chain(stream::once(async move {
+        // Persist after the core stream drained — runs before the `[DONE]`
+        // sentinel so a client that consumes the whole body can rely on
+        // history being durable.
+        if let Some(ctx) = persist {
+            let text = std::mem::take(&mut *accum_text.lock().await);
+            let calls = std::mem::take(&mut *accum_tool_calls.lock().await);
+            let tool_calls_json = if calls.is_empty() {
+                None
+            } else {
+                Some(Value::Array(calls))
+            };
+            persist_stream_turn(ctx, text, tool_calls_json).await;
+        }
         Ok::<_, Infallible>(SseEvent::default().data("[DONE]"))
     }))
 }
 
+/// Persist the streamed turn's user + assistant messages. Mirrors the
+/// non-stream `persist_turn` — factored separately because the stream path
+/// doesn't have `ChatState` handy at the point of invocation.
+async fn persist_stream_turn(
+    ctx: SsePersistCtx,
+    assistant_text: String,
+    tool_calls_json: Option<Value>,
+) {
+    let SsePersistCtx {
+        store,
+        session_key,
+        session_max_messages,
+        new_user,
+    } = ctx;
+    if let Some(user) = new_user.as_ref() {
+        let msg = SessionMessage::user(user.content.clone());
+        if let Err(err) = store.append(&session_key, msg).await {
+            warn!(session_key = %session_key, error = %err, "session append(user) failed");
+        }
+    }
+    let assistant = SessionMessage::assistant(assistant_text, tool_calls_json);
+    if let Err(err) = store.append(&session_key, assistant).await {
+        warn!(session_key = %session_key, error = %err, "session append(assistant) failed");
+    }
+    let key = session_key;
+    tokio::spawn(async move {
+        if let Err(err) = store.trim(&key, session_max_messages).await {
+            warn!(session_key = %key, error = %err, "session trim failed");
+        }
+    });
+}
+
 // ---- Helpers ------------------------------------------------------------------
 
-fn build_chat_start(req: &ChatRequest) -> ChatStart {
+fn build_chat_start(req: &ChatRequest, session_key: Option<&str>) -> ChatStart {
     let messages = req
         .messages
         .iter()
@@ -635,7 +1099,7 @@ fn build_chat_start(req: &ChatRequest) -> ChatStart {
         model: req.model.clone(),
         messages,
         tools_json,
-        session_key: String::new(),
+        session_key: session_key.unwrap_or("").to_string(),
         binding: None,
         placeholders: Default::default(),
         temperature: req.temperature.unwrap_or(0.0),
@@ -886,6 +1350,10 @@ mod mock {
     pub struct MockBackend {
         pub frames: Arc<tokio::sync::Mutex<Vec<ServerFrame>>>,
         pub captured_tx: Arc<tokio::sync::Mutex<Option<mpsc::Sender<ClientFrame>>>>,
+        /// Captures the last `ChatStart` passed to `start()` so tests can
+        /// assert on model-redirect rewrites without introducing a second
+        /// mock impl.
+        pub captured_start: Arc<tokio::sync::Mutex<Option<ChatStart>>>,
         /// When true, `start()` returns a ready-made error — simulates a dead
         /// gRPC peer.
         pub fail_on_start: bool,
@@ -904,7 +1372,7 @@ mod mock {
     impl ChatBackend for MockBackend {
         async fn start(
             &self,
-            _start: ChatStart,
+            start: ChatStart,
         ) -> Result<(mpsc::Sender<ClientFrame>, BackendRx), CorlinmanError> {
             if self.fail_on_start {
                 return Err(CorlinmanError::Upstream {
@@ -912,6 +1380,7 @@ mod mock {
                     message: "mock backend refused".into(),
                 });
             }
+            *self.captured_start.lock().await = Some(start);
             let (tx, _rx) = mpsc::channel::<ClientFrame>(16);
             *self.captured_tx.lock().await = Some(tx.clone());
             let frames: Vec<_> = std::mem::take(&mut *self.frames.lock().await)
@@ -1358,5 +1827,163 @@ mod tests {
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    // ---- Model redirect (T3) ----------------------------------------------
+
+    fn app_with_redirect(backend: Arc<dyn ChatBackend>, redirect: ModelRedirect) -> Router {
+        router_with_state(ChatState::new(backend).with_model_redirect(redirect))
+    }
+
+    #[tokio::test]
+    async fn model_redirect_alias_rewrites_requested_model() {
+        // Alias "sonnet" → "claude-sonnet-4-5" must flow through to the
+        // ChatStart frame the backend observes.
+        let backend = Arc::new(MockBackend::with_frames(vec![token("ok"), done("stop")]));
+        let captured_start = backend.captured_start.clone();
+        let mut aliases = std::collections::HashMap::new();
+        aliases.insert("sonnet".into(), "claude-sonnet-4-5".into());
+        let redirect = ModelRedirect::new(aliases, String::new(), Default::default());
+        let app = app_with_redirect(backend, redirect);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "model": "sonnet",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": false
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The backend must have observed the rewritten model.
+        let captured = captured_start.lock().await.clone().expect("start captured");
+        assert_eq!(captured.model, "claude-sonnet-4-5");
+
+        // The OpenAI response `model` echo also reflects the rewrite — the
+        // handler forwards `req.model` (post-redirect) to `chat_nonstream`.
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["model"], "claude-sonnet-4-5");
+    }
+
+    #[tokio::test]
+    async fn model_redirect_unknown_model_falls_back_to_default() {
+        // Unknown model + non-empty known_models + default set → warn + swap
+        // in `default`.
+        let backend = Arc::new(MockBackend::with_frames(vec![token("ok"), done("stop")]));
+        let captured_start = backend.captured_start.clone();
+        let mut known = std::collections::HashSet::new();
+        known.insert("claude-sonnet-4-5".to_string());
+        let redirect = ModelRedirect::new(Default::default(), "claude-sonnet-4-5".into(), known);
+        let app = app_with_redirect(backend, redirect);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "model": "gpt-unknown-99",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": false
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let captured = captured_start.lock().await.clone().expect("start captured");
+        assert_eq!(captured.model, "claude-sonnet-4-5");
+    }
+
+    #[tokio::test]
+    async fn model_redirect_unknown_model_without_default_returns_400() {
+        // Unknown model + non-empty known_models + empty default → 400.
+        let backend = Arc::new(MockBackend::with_frames(vec![token("ok"), done("stop")]));
+        let mut known = std::collections::HashSet::new();
+        known.insert("claude-sonnet-4-5".to_string());
+        let redirect = ModelRedirect::new(Default::default(), String::new(), known);
+        let app = app_with_redirect(backend, redirect);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "model": "gpt-unknown-99",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": false
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"]["code"], "unknown_model");
+        let msg = v["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("gpt-unknown-99"),
+            "error must name the rejected model: {msg}"
+        );
+    }
+
+    #[test]
+    fn apply_model_aliases_pure_function_covers_all_outcomes() {
+        // Pure-function coverage so the handler integration tests can stay
+        // focused on wiring. Covers the four ResolvedModel variants.
+        let mut aliases = std::collections::HashMap::new();
+        aliases.insert("alias-a".to_string(), "target-a".to_string());
+        let mut known = std::collections::HashSet::new();
+        known.insert("target-a".to_string());
+        known.insert("known-direct".to_string());
+
+        // Alias hit.
+        let r = apply_model_aliases(
+            "alias-a",
+            &ModelRedirect::new(aliases.clone(), "fallback".into(), known.clone()),
+        );
+        assert!(matches!(r, ResolvedModel::Aliased { ref resolved } if resolved == "target-a"));
+
+        // Known model → passthrough.
+        let r = apply_model_aliases(
+            "known-direct",
+            &ModelRedirect::new(aliases.clone(), "fallback".into(), known.clone()),
+        );
+        assert!(
+            matches!(r, ResolvedModel::Passthrough { ref resolved } if resolved == "known-direct")
+        );
+
+        // Unknown + default → fallback.
+        let r = apply_model_aliases(
+            "bogus",
+            &ModelRedirect::new(aliases.clone(), "fallback".into(), known.clone()),
+        );
+        assert!(
+            matches!(r, ResolvedModel::FallbackDefault { ref resolved } if resolved == "fallback")
+        );
+
+        // Unknown + no default → 400 sentinel.
+        let r = apply_model_aliases("bogus", &ModelRedirect::new(aliases, String::new(), known));
+        assert_eq!(r, ResolvedModel::UnknownNoDefault);
+
+        // Empty known_models → every model passes through.
+        let r = apply_model_aliases(
+            "arbitrary",
+            &ModelRedirect::new(Default::default(), "ignored".into(), Default::default()),
+        );
+        assert!(
+            matches!(r, ResolvedModel::Passthrough { ref resolved } if resolved == "arbitrary")
+        );
     }
 }

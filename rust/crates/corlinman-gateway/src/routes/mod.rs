@@ -12,11 +12,14 @@ pub mod metrics;
 pub mod models;
 pub mod plugin_callback;
 
+use std::sync::Arc;
+
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     Json, Router,
 };
+use corlinman_plugins::AsyncTaskRegistry;
 use serde_json::json;
 
 /// Compose every route submodule into a single router. `chat` uses its 501
@@ -34,7 +37,8 @@ pub fn router() -> Router {
 }
 
 /// Same as [`router`] but the chat route is backed by the supplied
-/// [`chat::ChatState`].
+/// [`chat::ChatState`]. The plugin_callback route still 501s — tests that
+/// need the real callback wiring use [`router_with_full_state`].
 pub fn router_with_chat_state(state: chat::ChatState) -> Router {
     Router::new()
         .merge(health::router())
@@ -43,6 +47,23 @@ pub fn router_with_chat_state(state: chat::ChatState) -> Router {
         .merge(models::router())
         .merge(admin::router())
         .merge(plugin_callback::router())
+        .merge(metrics::router())
+}
+
+/// Same as [`router_with_chat_state`] but also wires `/plugin-callback/
+/// :task_id` onto the supplied [`AsyncTaskRegistry`]. Production boot uses
+/// this variant so async plugins can deliver their deferred results.
+pub fn router_with_full_state(
+    chat_state: chat::ChatState,
+    async_tasks: Arc<AsyncTaskRegistry>,
+) -> Router {
+    Router::new()
+        .merge(health::router())
+        .merge(chat::router_with_state(chat_state))
+        .merge(embeddings::router())
+        .merge(models::router())
+        .merge(admin::router())
+        .merge(plugin_callback::router_with_state(async_tasks))
         .merge(metrics::router())
 }
 

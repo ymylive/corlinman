@@ -14,8 +14,12 @@ pub mod config;
 pub mod error;
 pub mod manifest;
 pub mod placeholder;
+pub mod session;
+pub mod session_sqlite;
 pub mod types;
 
 // Re-exports that are load-bearing for downstream crates.
 pub use error::{CorlinmanError, FailoverReason};
 pub use placeholder::{DynamicResolver, PlaceholderEngine, RenderContext};
+pub use session::{SessionMessage, SessionRole, SessionStore};
+pub use session_sqlite::SqliteSessionStore;

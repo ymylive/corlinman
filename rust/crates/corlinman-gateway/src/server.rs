@@ -4,10 +4,12 @@
 //! into this same entry point; this first revision only wires axum.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
 use corlinman_agent_client::client::{connect_channel, resolve_endpoint, AgentClient};
+use corlinman_core::{SessionStore, SqliteSessionStore};
 use corlinman_plugins::{roots_from_env_var, Origin, PluginRegistry, SearchRoot};
 use tokio::net::TcpListener;
 
@@ -38,14 +40,34 @@ pub fn build_router_with_backend(backend: Arc<dyn ChatBackend>) -> Router {
 }
 
 /// Build the router with a backend and a plugin registry so the chat route
-/// dispatches `ToolCall` frames to real plugin processes.
+/// dispatches `ToolCall` frames to real plugin processes, and
+/// `/plugin-callback/:task_id` resolves async plugin parked tool_calls via
+/// the registry's shared [`AsyncTaskRegistry`].
 pub fn build_router_with_backend_and_registry(
     backend: Arc<dyn ChatBackend>,
     registry: Arc<PluginRegistry>,
 ) -> Router {
     metrics::init();
+    let async_tasks = registry.async_tasks();
     let state = ChatState::with_registry(backend, registry);
-    trace::layer(routes::router_with_chat_state(state))
+    trace::layer(routes::router_with_full_state(state, async_tasks))
+}
+
+/// Same as [`build_router_with_backend_and_registry`] but also attaches a
+/// session store so `/v1/chat/completions` persists and re-hydrates per-session
+/// message histories. `session_max_messages` is the post-turn trim cap.
+pub fn build_router_with_backend_registry_and_sessions(
+    backend: Arc<dyn ChatBackend>,
+    registry: Arc<PluginRegistry>,
+    session_store: Arc<dyn SessionStore>,
+    session_max_messages: usize,
+) -> Router {
+    metrics::init();
+    let async_tasks = registry.async_tasks();
+    let state = ChatState::with_registry(backend, registry)
+        .with_session_store(session_store)
+        .with_session_max_messages(session_max_messages);
+    trace::layer(routes::router_with_full_state(state, async_tasks))
 }
 
 /// Connect to the Python gRPC agent server; falls back to the stub router
@@ -57,6 +79,10 @@ pub async fn build_router_for_runtime() -> Router {
 /// Same as [`build_router_for_runtime`] but also returns the shared
 /// [`ChatBackend`] when the agent was reachable, so callers (e.g. the QQ
 /// channel task in `main`) can drive the chat pipeline without HTTP.
+///
+/// Opens `<data_dir>/sessions.sqlite` lazily; a failure there only warns and
+/// the gateway boots without session history (falls back to stateless single
+/// turns). This keeps boot resilient on first run / fresh containers.
 pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>) {
     let registry = Arc::new(load_plugin_registry());
     tracing::info!(
@@ -64,16 +90,26 @@ pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>) {
         diagnostic_count = registry.diagnostics().len(),
         "plugin registry loaded",
     );
+
+    // Open the session history store, keyed off `$CORLINMAN_DATA_DIR`.
+    let session_store = open_session_store().await;
+
     let endpoint = resolve_endpoint();
     match connect_channel(&endpoint).await {
         Ok(channel) => {
             tracing::info!(endpoint = %endpoint, "agent client connected");
             let client = AgentClient::new(channel);
             let backend: Arc<dyn ChatBackend> = Arc::new(GrpcBackend::new(client));
-            (
-                build_router_with_backend_and_registry(backend.clone(), registry),
-                Some(backend),
-            )
+            let router = match session_store {
+                Some(store) => build_router_with_backend_registry_and_sessions(
+                    backend.clone(),
+                    registry,
+                    store,
+                    DEFAULT_SESSION_MAX_MESSAGES,
+                ),
+                None => build_router_with_backend_and_registry(backend.clone(), registry),
+            };
+            (router, Some(backend))
         }
         Err(err) => {
             tracing::warn!(
@@ -84,6 +120,53 @@ pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>) {
             (build_router(), None)
         }
     }
+}
+
+/// Default session trim cap used when a config isn't loaded. Matches
+/// `ServerConfig::default().session_max_messages`.
+const DEFAULT_SESSION_MAX_MESSAGES: usize = 100;
+
+/// Resolve `<data_dir>/sessions.sqlite` and open (or create) the store.
+/// Returns `None` when opening fails — the gateway continues stateless rather
+/// than refusing to boot.
+async fn open_session_store() -> Option<Arc<dyn SessionStore>> {
+    let data_dir = resolve_data_dir();
+    let path = data_dir.join("sessions.sqlite");
+    if let Some(parent) = path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                dir = %parent.display(),
+                error = %err,
+                "could not create session data dir; sessions disabled",
+            );
+            return None;
+        }
+    }
+    match SqliteSessionStore::open(&path).await {
+        Ok(store) => {
+            tracing::info!(path = %path.display(), "session store opened");
+            Some(Arc::new(store) as Arc<dyn SessionStore>)
+        }
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "could not open session store; sessions disabled",
+            );
+            None
+        }
+    }
+}
+
+/// Resolve the data directory the same way `main.rs` / plugins do: honour
+/// `$CORLINMAN_DATA_DIR`, else fall back to `~/.corlinman`.
+fn resolve_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CORLINMAN_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".corlinman"))
+        .unwrap_or_else(|| PathBuf::from(".corlinman"))
 }
 
 /// Discover plugins from, in priority order:

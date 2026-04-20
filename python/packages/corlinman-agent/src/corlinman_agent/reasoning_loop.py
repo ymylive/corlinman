@@ -29,6 +29,7 @@ M3.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
@@ -127,6 +128,9 @@ class ReasoningLoop:
         self._provider = provider
         self._tool_result_timeout = tool_result_timeout
         self._tool_results: asyncio.Queue[ToolResult] = asyncio.Queue()
+        self._cancelled = asyncio.Event()
+        self._cancel_reason: str = ""
+        self._input_closed = asyncio.Event()
 
     def feed_tool_result(self, result: ToolResult) -> None:
         """Push a :class:`ToolResult` for consumption by the next round.
@@ -136,12 +140,41 @@ class ReasoningLoop:
         """
         self._tool_results.put_nowait(result)
 
+    def cancel(self, reason: str = "user_abort") -> None:
+        """Signal the loop to terminate at the next safe point.
+
+        Sets an internal :class:`asyncio.Event` observed by :meth:`run` at
+        round boundaries and by :meth:`_collect_results` while waiting for
+        tool results. On cancellation the loop emits an :class:`ErrorEvent`
+        with ``reason="cancelled"`` and returns. Non-blocking; idempotent.
+        """
+        if not self._cancelled.is_set():
+            self._cancel_reason = reason or "user_abort"
+            self._cancelled.set()
+
+    def signal_input_closed(self) -> None:
+        """Signal that no more :class:`ToolResult` values will arrive.
+
+        Called by the servicer when the client half of the bidi stream
+        closes. Unblocks any in-flight :meth:`_collect_results` wait so
+        the loop can terminate promptly with the provider's last
+        ``finish_reason`` (typically ``"tool_calls"``). Distinct from
+        :meth:`cancel`, which surfaces as an :class:`ErrorEvent`.
+        """
+        self._input_closed.set()
+
     async def run(self, start: ChatStart) -> AsyncIterator[Event]:
         """Execute the loop, yielding events until the stream ends."""
         messages: list[dict[str, Any]] = list(start.messages)
         rounds = 0
 
         while rounds < _MAX_ROUNDS:
+            if self._cancelled.is_set():
+                yield ErrorEvent(
+                    message=self._cancel_reason or "cancelled",
+                    reason="cancelled",
+                )
+                return
             rounds += 1
             tool_calls_this_round: list[ToolCallEvent] = []
             finish_reason = "stop"
@@ -164,6 +197,13 @@ class ReasoningLoop:
                 yield ErrorEvent(message=str(exc), reason=reason)
                 return
 
+            if self._cancelled.is_set():
+                yield ErrorEvent(
+                    message=self._cancel_reason or "cancelled",
+                    reason="cancelled",
+                )
+                return
+
             # No tool calls → we're done; emit the terminal Done and exit.
             if not tool_calls_this_round:
                 yield DoneEvent(finish_reason=finish_reason)
@@ -174,6 +214,12 @@ class ReasoningLoop:
             # the provider's finish_reason (typically "tool_calls") so the
             # gateway sees the terminal frame and the pipeline drains.
             results = await self._collect_results(tool_calls_this_round)
+            if self._cancelled.is_set():
+                yield ErrorEvent(
+                    message=self._cancel_reason or "cancelled",
+                    reason="cancelled",
+                )
+                return
             if results is None:
                 yield DoneEvent(finish_reason=finish_reason)
                 return
@@ -253,17 +299,43 @@ class ReasoningLoop:
         Returns ``None`` if no result arrives within
         ``self._tool_result_timeout`` — the caller isn't wired for the
         feedback cycle and the loop should terminate after the current
-        round.
+        round. Also returns ``None`` if the loop is cancelled while
+        waiting; the caller checks :attr:`_cancelled` to distinguish the
+        two outcomes.
         """
         needed = {ev.call_id for ev in calls}
         got: dict[str, ToolResult] = {}
-        try:
-            while needed - got.keys():
-                result = await asyncio.wait_for(
-                    self._tool_results.get(), timeout=self._tool_result_timeout
-                )
+        while needed - got.keys():
+            if self._cancelled.is_set():
+                return None
+            get_task = asyncio.ensure_future(self._tool_results.get())
+            cancel_task = asyncio.ensure_future(self._cancelled.wait())
+            done, pending = await asyncio.wait(
+                {get_task, cancel_task},
+                timeout=self._tool_result_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+            # Await cancellations so they don't leak as "Task was destroyed".
+            for t in pending:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await t
+
+            if cancel_task in done:
+                # Cancelled. If get_task also finished with a result, drop it.
+                if get_task in done and not get_task.cancelled():
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        _ = get_task.result()
+                return None
+            if get_task in done:
+                try:
+                    result = get_task.result()
+                except (asyncio.CancelledError, Exception):
+                    return None
                 got[result.call_id] = result
-        except TimeoutError:
+                continue
+            # Neither completed → timeout; caller isn't wired.
             return None
         return [got[c.call_id] for c in calls]
 
