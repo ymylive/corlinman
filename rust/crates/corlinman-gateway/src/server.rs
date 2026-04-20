@@ -14,6 +14,7 @@ use corlinman_agent_client::client::{connect_channel, resolve_endpoint, AgentCli
 use corlinman_core::config::Config;
 use corlinman_core::{SessionStore, SqliteSessionStore};
 use corlinman_plugins::{roots_from_env_var, Origin, PluginRegistry, SearchRoot};
+use corlinman_vector::SqliteStore;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
@@ -22,6 +23,7 @@ use crate::metrics;
 use crate::middleware::admin_session::AdminSessionStore;
 use crate::middleware::trace;
 use crate::routes;
+use crate::routes::admin::scheduler::SchedulerHistory;
 use crate::routes::admin::{self as admin_routes, AdminState};
 use crate::routes::chat::{grpc::GrpcBackend, ChatBackend, ChatState};
 
@@ -95,6 +97,8 @@ const DEFAULT_ADMIN_SESSION_TTL_SECS: u64 = 86_400;
 fn build_admin_state(
     plugins: Arc<PluginRegistry>,
     log_tx: Option<broadcast::Sender<LogRecord>>,
+    rag_store: Option<Arc<SqliteStore>>,
+    scheduler_history: Option<Arc<SchedulerHistory>>,
 ) -> AdminState {
     let (cfg, cfg_path) = load_admin_config();
     let session_store = Arc::new(AdminSessionStore::new(StdDuration::from_secs(
@@ -113,6 +117,12 @@ fn build_admin_state(
     }
     if let Some(tx) = log_tx {
         admin = admin.with_log_broadcast(tx);
+    }
+    if let Some(store) = rag_store {
+        admin = admin.with_rag_store(store);
+    }
+    if let Some(history) = scheduler_history {
+        admin = admin.with_scheduler_history(history);
     }
     admin
 }
@@ -219,7 +229,14 @@ pub async fn build_runtime_with_logs(
     // the stub being a wildcard (`/admin/*path`) — the concrete routes
     // here take precedence because axum matches specific paths before
     // wildcards. See `routes::admin::router()` for the stub.
-    let admin_state = build_admin_state(registry.clone(), log_tx);
+    //
+    // Post-S6 wire-up: open the RAG SQLite at `<data_dir>/kb.sqlite` so
+    // `/admin/rag/*` has real data to read, and construct a fresh
+    // in-memory `SchedulerHistory` so `/admin/scheduler/history` has a
+    // sink for records when the cron runtime lands in M7.
+    let rag_store = open_rag_store().await;
+    let scheduler_history = Some(SchedulerHistory::new());
+    let admin_state = build_admin_state(registry.clone(), log_tx, rag_store, scheduler_history);
     let router = mount_admin_routes(base_router, admin_state);
 
     (router, backend_opt, registry)
@@ -255,6 +272,39 @@ async fn open_session_store() -> Option<Arc<dyn SessionStore>> {
                 path = %path.display(),
                 error = %err,
                 "could not open session store; sessions disabled",
+            );
+            None
+        }
+    }
+}
+
+/// Resolve `<data_dir>/kb.sqlite` and open (or create) the RAG SQLite store.
+/// Returns `None` when opening fails — the gateway keeps serving and
+/// `/admin/rag/*` returns 503 `rag_disabled` so boot stays resilient on
+/// fresh installs / read-only data dirs.
+async fn open_rag_store() -> Option<Arc<SqliteStore>> {
+    let data_dir = resolve_data_dir();
+    let path = data_dir.join("kb.sqlite");
+    if let Some(parent) = path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                dir = %parent.display(),
+                error = %err,
+                "could not create rag data dir; rag admin disabled",
+            );
+            return None;
+        }
+    }
+    match SqliteStore::open(&path).await {
+        Ok(store) => {
+            tracing::info!(path = %path.display(), "rag store opened");
+            Some(Arc::new(store))
+        }
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "could not open rag store; rag admin disabled",
             );
             None
         }
