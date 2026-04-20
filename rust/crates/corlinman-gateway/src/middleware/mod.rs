@@ -5,6 +5,7 @@
 // TODO: order matters — trace first (outer), then auth, then approval (innermost).
 
 pub mod admin_auth;
+pub mod admin_session;
 pub mod approval;
 pub mod auth;
 pub mod trace;

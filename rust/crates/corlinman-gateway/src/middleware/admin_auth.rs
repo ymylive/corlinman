@@ -1,13 +1,21 @@
-//! Basic-auth guard for `/admin/*`.
+//! Auth guard for `/admin/*`.
 //!
-//! M6 narrow scope: only HTTP Basic (`Authorization: Basic base64(user:pass)`)
-//! verified against `config.admin.username` + `password_hash` (argon2id).
-//! Session cookies / JWT land in a later milestone — see TODO below.
+//! Two credentials get you past the guard, checked in order:
+//!   1. `Cookie: corlinman_session=<token>` validated against
+//!      [`super::admin_session::AdminSessionStore`] (S5 T1) — the normal
+//!      UI path after `/admin/login`.
+//!   2. `Authorization: Basic base64(user:pass)` verified against
+//!      `config.admin.username` + `password_hash` (argon2id) — kept as a
+//!      fallback for curl / CI / the initial login request itself.
 //!
-//! The layer is constructed with an [`AdminAuthState`] that clones cheaply
-//! (it holds `Arc<ArcSwap<Config>>`), so each request loads the *current*
-//! config snapshot and re-verifies — rotating the admin password at runtime
-//! takes effect on the next request without restarting the gateway.
+//! Both paths short-circuit the other: a cookie hit skips Basic entirely,
+//! and missing/expired cookie falls through to Basic rather than 401. This
+//! keeps the old M6 contract (HTTP Basic works) intact while letting the
+//! UI authenticate once and rely on the cookie from then on.
+//!
+//! `AdminAuthState` clones cheaply (all fields are `Arc`), so rotating the
+//! admin password or invalidating a session takes effect on the next
+//! request without restart.
 
 use std::sync::Arc;
 
@@ -25,17 +33,35 @@ use base64::Engine;
 use corlinman_core::config::Config;
 use serde_json::json;
 
+use super::admin_session::AdminSessionStore;
+
+/// Cookie name carrying the opaque session token issued by `/admin/login`.
+/// Exported so the login/logout handlers can write exactly the same name.
+pub const SESSION_COOKIE_NAME: &str = "corlinman_session";
+
 /// Cloneable bundle of state that the admin auth middleware + admin handlers
 /// need. `config` is shared with the rest of the gateway; verifying per
-/// request lets admins rotate credentials without a restart.
+/// request lets admins rotate credentials without a restart. `session_store`
+/// is `None` in legacy / test setups that only want Basic auth — the
+/// middleware then falls straight through to the Basic path.
 #[derive(Clone)]
 pub struct AdminAuthState {
     pub config: Arc<ArcSwap<Config>>,
+    pub session_store: Option<Arc<AdminSessionStore>>,
 }
 
 impl AdminAuthState {
     pub fn new(config: Arc<ArcSwap<Config>>) -> Self {
-        Self { config }
+        Self {
+            config,
+            session_store: None,
+        }
+    }
+
+    /// Fluent: attach a session store so cookie auth is accepted.
+    pub fn with_session_store(mut self, store: Arc<AdminSessionStore>) -> Self {
+        self.session_store = Some(store);
+        self
     }
 }
 
@@ -66,10 +92,25 @@ fn parse_basic(header_value: &str) -> Option<(String, String)> {
     Some((user.to_string(), pass.to_string()))
 }
 
+/// Extract a named cookie value from a `Cookie:` header. Scan manually so we
+/// don't pull a cookie parser crate for two fields. Returns `None` if the
+/// header is absent or the cookie isn't present.
+pub(crate) fn extract_cookie(header_value: &str, name: &str) -> Option<String> {
+    for part in header_value.split(';') {
+        let part = part.trim();
+        if let Some((k, v)) = part.split_once('=') {
+            if k.trim() == name {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Verify `password` against an argon2id hash string. Any parse / verify
 /// failure yields `false`; we never distinguish "wrong password" from
 /// "malformed stored hash" in the response to avoid leaking hash shape.
-fn argon2_verify(password: &str, stored_hash: &str) -> bool {
+pub(crate) fn argon2_verify(password: &str, stored_hash: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(stored_hash) else {
         tracing::warn!("admin.password_hash is not a valid argon2 PHC string");
         return false;
@@ -95,6 +136,24 @@ pub async fn require_admin(
         return unauthorized("admin_not_configured");
     };
 
+    // 1) Cookie path — only if a session store is wired.
+    if let Some(store) = state.session_store.as_ref() {
+        if let Some(cookie_header) = req
+            .headers()
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(token) = extract_cookie(cookie_header, SESSION_COOKIE_NAME) {
+                if store.validate(&token).is_some() {
+                    return next.run(req).await;
+                }
+                // Cookie present but invalid/expired: fall through to
+                // Basic auth rather than 401 so curl/CI still works.
+            }
+        }
+    }
+
+    // 2) Basic auth fallback.
     let Some(auth_header) = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -117,9 +176,6 @@ pub async fn require_admin(
     next.run(req).await
 }
 
-// TODO(M7): add `POST /admin/login` + DashMap session store + `Set-Cookie`
-// so the UI can avoid re-sending Basic credentials on every request.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +186,7 @@ mod tests {
     use axum::routing::get;
     use axum::Router;
     use std::sync::Arc;
+    use std::time::Duration as StdDuration;
     use tower::ServiceExt;
 
     fn hash_password(password: &str) -> String {
@@ -145,6 +202,14 @@ mod tests {
         cfg.admin.username = user.map(str::to_string);
         cfg.admin.password_hash = password.map(hash_password);
         AdminAuthState::new(Arc::new(ArcSwap::from_pointee(cfg)))
+    }
+
+    fn state_with_session(
+        user: Option<&str>,
+        password: Option<&str>,
+        store: Arc<AdminSessionStore>,
+    ) -> AdminAuthState {
+        state_with(user, password).with_session_store(store)
     }
 
     fn app(state: AdminAuthState) -> Router {
@@ -248,5 +313,113 @@ mod tests {
     fn parse_basic_rejects_non_basic() {
         assert!(parse_basic("Bearer xyz").is_none());
         assert!(parse_basic("Basic @@@not-base64@@@").is_none());
+    }
+
+    // --- cookie / session_store branch -----------------------------------
+
+    #[test]
+    fn extract_cookie_finds_named_value() {
+        assert_eq!(
+            extract_cookie("foo=bar; corlinman_session=abc123", SESSION_COOKIE_NAME),
+            Some("abc123".into())
+        );
+        assert_eq!(
+            extract_cookie("corlinman_session=xyz", SESSION_COOKIE_NAME),
+            Some("xyz".into())
+        );
+        assert!(extract_cookie("foo=bar", SESSION_COOKIE_NAME).is_none());
+    }
+
+    #[tokio::test]
+    async fn valid_cookie_lets_request_through() {
+        let store = Arc::new(AdminSessionStore::new(StdDuration::from_secs(60)));
+        let token = store.create("admin".into());
+        let state = state_with_session(Some("admin"), Some("secret"), store);
+        let res = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn expired_cookie_falls_through_to_basic_auth() {
+        // 0s TTL ⇒ token is already expired.
+        let store = Arc::new(AdminSessionStore::new(StdDuration::from_secs(0)));
+        let token = store.create("admin".into());
+        tokio::time::sleep(StdDuration::from_millis(1100)).await;
+        let state = state_with_session(Some("admin"), Some("secret"), store);
+
+        // Expired cookie + valid Basic auth should succeed.
+        let res = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
+                    .header(header::AUTHORIZATION, basic_header("admin", "secret"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Expired cookie + no Basic auth → 401.
+        let res = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn cookie_takes_priority_over_basic_when_both_present() {
+        let store = Arc::new(AdminSessionStore::new(StdDuration::from_secs(60)));
+        let token = store.create("admin".into());
+        let state = state_with_session(Some("admin"), Some("secret"), store);
+
+        // Bogus Basic creds — the cookie should still let us through.
+        let res = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
+                    .header(header::AUTHORIZATION, basic_header("admin", "WRONG"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn basic_auth_still_works_when_no_session_store() {
+        // Mirrors the pre-S5 contract: even without a session store
+        // wired, a valid Basic-auth request must pass.
+        let state = state_with(Some("admin"), Some("secret"));
+        let res = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header(header::AUTHORIZATION, basic_header("admin", "secret"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 }

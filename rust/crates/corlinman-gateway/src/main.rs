@@ -14,6 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use corlinman_core::config::Config;
+use corlinman_gateway::log_broadcast::{
+    BroadcastLayer, BroadcastLayerSpans, LogRecord, DEFAULT_CAPACITY,
+};
 use corlinman_gateway::routes::chat::ChatBackend;
 use corlinman_gateway::services::ChatService as GatewayChatService;
 use corlinman_gateway::{server, shutdown};
@@ -21,6 +24,7 @@ use corlinman_gateway_api::ChatService as ChatServiceTrait;
 use corlinman_plugins::registry::watcher::{HotReloader, DEFAULT_DEBOUNCE};
 use corlinman_plugins::runtime::service_grpc::ServiceRuntime;
 use corlinman_plugins::{PluginSupervisor, PluginType};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -30,7 +34,7 @@ const DEFAULT_SOCKET_ROOT: &str = "/tmp/corlinman-plugins";
 
 #[tokio::main]
 async fn main() {
-    init_tracing();
+    let log_tx = init_tracing();
 
     let addr = resolve_addr();
     tracing::info!(%addr, "starting corlinman-gateway");
@@ -39,7 +43,9 @@ async fn main() {
     let root = CancellationToken::new();
 
     // Build router + keep a handle on the shared backend + registry.
-    let (router, backend, plugin_registry) = server::build_runtime().await;
+    // The log broadcast sender threads through so `/admin/logs/stream`
+    // can subscribe fresh receivers per request.
+    let (router, backend, plugin_registry) = server::build_runtime_with_logs(Some(log_tx)).await;
 
     // Boot the long-lived service-plugin stack: spawn every
     // `plugin_type = "service"` manifest into a supervised child process,
@@ -154,12 +160,22 @@ async fn main() {
     std::process::exit(shutdown::EXIT_CODE_ON_SIGNAL);
 }
 
-fn init_tracing() {
+/// Wire up tracing:
+///   - `EnvFilter` from `RUST_LOG` (fallback `info`).
+///   - `fmt` layer → JSON to stdout.
+///   - `BroadcastLayer` + `BroadcastLayerSpans` → feed `/admin/logs/stream`.
+///
+/// Returns the broadcast sender so `main` can inject it into `AppState`.
+fn init_tracing() -> broadcast::Sender<LogRecord> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let (broadcast_layer, log_tx) = BroadcastLayer::new(DEFAULT_CAPACITY);
     tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt::layer().json().with_current_span(false))
+        .with(BroadcastLayerSpans)
+        .with(broadcast_layer)
         .init();
+    log_tx
 }
 
 fn resolve_addr() -> SocketAddr {

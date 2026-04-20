@@ -281,6 +281,9 @@ mod tests {
             plugins: Arc::new(PluginRegistry::default()),
             config: Arc::new(ArcSwap::from_pointee(Config::default())),
             approval_gate: gate,
+            session_store: None,
+            config_path: None,
+            log_broadcast: None,
         };
         router(state)
     }

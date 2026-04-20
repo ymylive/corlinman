@@ -1,48 +1,69 @@
 /**
- * Admin auth — validates `AdminUsername` / `AdminPassword` (config.toml
- * `[admin]` keys) against the gateway `/admin/login` route, which sets
- * a session cookie consumed by all `/admin/*` handlers.
+ * Admin auth client. Wraps `POST /admin/login`, `POST /admin/logout`,
+ * `GET /admin/me` on the gateway.
  *
- * TODO(M6): wire real fetch once gateway admin routes land. For M0 we only
- *           expose the shape so the layout can reference it.
+ * The session cookie (`corlinman_session`) is set HttpOnly by the gateway,
+ * so JS can't read it — we rely on `credentials: "include"` (already baked
+ * into `apiFetch`) to have the browser round-trip it automatically.
  */
 
-import { apiFetch } from "./api";
+import { apiFetch, CorlinmanApiError } from "./api";
 
 export interface LoginRequest {
   username: string;
   password: string;
 }
 
-export interface AdminSession {
-  username: string;
-  expiresAt: string; // ISO8601
+/** Response body of `POST /admin/login`. `token` mirrors the cookie. */
+export interface LoginResponse {
+  token: string;
+  expires_in: number;
 }
 
-export async function login(req: LoginRequest): Promise<AdminSession> {
-  return apiFetch<AdminSession>("/admin/login", {
+/** Shape of `GET /admin/me`. Fields are ISO-8601 UTC strings. */
+export interface AdminSession {
+  user: string;
+  created_at: string;
+  expires_at: string;
+}
+
+/** POST `/admin/login`. Throws `CorlinmanApiError` on 401 / 503. */
+export async function login(req: LoginRequest): Promise<LoginResponse> {
+  return apiFetch<LoginResponse>("/admin/login", {
     method: "POST",
     body: req,
     mock: {
-      username: req.username || "admin",
-      expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 8).toISOString(),
+      token: "mock-session-token",
+      expires_in: 86400,
     },
   });
 }
 
+/** POST `/admin/logout`. Idempotent: succeeds even without a cookie. */
 export async function logout(): Promise<void> {
-  return apiFetch<void>("/admin/logout", { method: "POST", mock: undefined });
+  return apiFetch<void>("/admin/logout", {
+    method: "POST",
+    mock: undefined,
+  });
 }
 
+/**
+ * GET `/admin/me`. Returns `null` on 401 rather than throwing, so callers
+ * can branch on unauthenticated state without try/catch noise.
+ */
 export async function getSession(): Promise<AdminSession | null> {
   try {
-    return await apiFetch<AdminSession>("/admin/session", {
+    return await apiFetch<AdminSession>("/admin/me", {
       mock: {
-        username: "admin",
-        expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 8).toISOString(),
+        user: "admin",
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(),
       },
     });
-  } catch {
-    return null;
+  } catch (err) {
+    if (err instanceof CorlinmanApiError && err.status === 401) {
+      return null;
+    }
+    throw err;
   }
 }

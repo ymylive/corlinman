@@ -6,16 +6,23 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
+use arc_swap::ArcSwap;
 use axum::Router;
 use corlinman_agent_client::client::{connect_channel, resolve_endpoint, AgentClient};
+use corlinman_core::config::Config;
 use corlinman_core::{SessionStore, SqliteSessionStore};
 use corlinman_plugins::{roots_from_env_var, Origin, PluginRegistry, SearchRoot};
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 
+use crate::log_broadcast::LogRecord;
 use crate::metrics;
+use crate::middleware::admin_session::AdminSessionStore;
 use crate::middleware::trace;
 use crate::routes;
+use crate::routes::admin::{self as admin_routes, AdminState};
 use crate::routes::chat::{grpc::GrpcBackend, ChatBackend, ChatState};
 
 /// Build the top-level axum router with the default (stub) chat route.
@@ -70,6 +77,77 @@ pub fn build_router_with_backend_registry_and_sessions(
     trace::layer(routes::router_with_full_state(state, async_tasks))
 }
 
+/// Default idle TTL for admin web sessions — 24h. Mirrors
+/// `routes::admin::auth::DEFAULT_SESSION_TTL_SECS`.
+const DEFAULT_ADMIN_SESSION_TTL_SECS: u64 = 86_400;
+
+/// Build the `AdminState` for the admin REST routes. Loads config from
+/// `$CORLINMAN_CONFIG` (same logic as `main.rs`), attaches a brand-new
+/// [`AdminSessionStore`], and spawns a detached GC task for it.
+///
+/// The GC task is *not* cancellable from here — it lives for the process
+/// lifetime. That's fine: tokio aborts background tasks on runtime drop,
+/// and `main.rs` does `std::process::exit` on SIGTERM so nothing leaks.
+///
+/// When `$CORLINMAN_CONFIG` points at a real file the resolved path is
+/// attached via [`AdminState::with_config_path`] so `POST /admin/config`
+/// can persist accepted payloads back to the same file at runtime.
+fn build_admin_state(
+    plugins: Arc<PluginRegistry>,
+    log_tx: Option<broadcast::Sender<LogRecord>>,
+) -> AdminState {
+    let (cfg, cfg_path) = load_admin_config();
+    let session_store = Arc::new(AdminSessionStore::new(StdDuration::from_secs(
+        DEFAULT_ADMIN_SESSION_TTL_SECS,
+    )));
+
+    // Fire-and-forget GC. Uses a fresh CancellationToken that never fires,
+    // so the task loops until the process exits.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _handle = Arc::clone(&session_store).start_gc(cancel);
+
+    let mut admin = AdminState::new(plugins, Arc::new(ArcSwap::from_pointee(cfg)))
+        .with_session_store(session_store);
+    if let Some(path) = cfg_path {
+        admin = admin.with_config_path(path);
+    }
+    if let Some(tx) = log_tx {
+        admin = admin.with_log_broadcast(tx);
+    }
+    admin
+}
+
+/// Same `$CORLINMAN_CONFIG` lookup `main.rs` uses. Missing / unreadable →
+/// `(Config::default(), None)` so the gateway still boots (admin endpoints
+/// then return 503 until credentials land in config). When a file was
+/// successfully read the resolved path is returned so the admin state can
+/// persist subsequent live-reload writes back to it.
+fn load_admin_config() -> (Config, Option<PathBuf>) {
+    let Ok(path_str) = std::env::var("CORLINMAN_CONFIG") else {
+        return (Config::default(), None);
+    };
+    let path = PathBuf::from(path_str);
+    if !path.exists() {
+        return (Config::default(), None);
+    }
+    match Config::load_from_path(&path) {
+        Ok(cfg) => (cfg, Some(path)),
+        Err(err) => {
+            tracing::warn!(error = %err, "admin config load failed; using defaults");
+            (Config::default(), None)
+        }
+    }
+}
+
+/// Mount the admin sub-router produced by
+/// [`crate::routes::admin::router_with_state`] onto the base gateway router.
+/// Done as a separate merge so the admin routes sit behind the session +
+/// basic-auth guard while the rest of the gateway stays public (per-route
+/// guards live inside their own modules).
+fn mount_admin_routes(base: Router, state: AdminState) -> Router {
+    base.merge(admin_routes::router_with_state(state))
+}
+
 /// Connect to the Python gRPC agent server; falls back to the stub router
 /// when the agent isn't reachable (so `/health` stays up even if Python died).
 pub async fn build_router_for_runtime() -> Router {
@@ -86,6 +164,16 @@ pub async fn build_router_for_runtime() -> Router {
 /// the gateway boots without session history (falls back to stateless single
 /// turns). This keeps boot resilient on first run / fresh containers.
 pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>, Arc<PluginRegistry>) {
+    build_runtime_with_logs(None).await
+}
+
+/// Variant of [`build_runtime`] that also threads a `log_tx` sender
+/// (produced by [`init_tracing`] in `main.rs`) into the admin state so
+/// `/admin/logs/stream` can subscribe fresh receivers. Passing `None`
+/// preserves the previous behaviour (the endpoint returns 503).
+pub async fn build_runtime_with_logs(
+    log_tx: Option<broadcast::Sender<LogRecord>>,
+) -> (Router, Option<Arc<dyn ChatBackend>>, Arc<PluginRegistry>) {
     let registry = Arc::new(load_plugin_registry());
     tracing::info!(
         plugin_count = registry.len(),
@@ -97,7 +185,7 @@ pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>, Arc<Plugi
     let session_store = open_session_store().await;
 
     let endpoint = resolve_endpoint();
-    match connect_channel(&endpoint).await {
+    let (base_router, backend_opt) = match connect_channel(&endpoint).await {
         Ok(channel) => {
             tracing::info!(endpoint = %endpoint, "agent client connected");
             let client = AgentClient::new(channel);
@@ -111,7 +199,7 @@ pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>, Arc<Plugi
                 ),
                 None => build_router_with_backend_and_registry(backend.clone(), registry.clone()),
             };
-            (router, Some(backend), registry)
+            (router, Some(backend))
         }
         Err(err) => {
             tracing::warn!(
@@ -119,9 +207,22 @@ pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>, Arc<Plugi
                 error = %err,
                 "agent client unreachable; /v1/chat/completions will 501",
             );
-            (build_router(), None, registry)
+            (build_router(), None)
         }
-    }
+    };
+
+    // S5 T1: wire the real admin REST routes + session store on top of
+    // whatever base router we just built. The stub `admin::router()` that
+    // `routes::router_with_full_state` merged returns 501 for every path;
+    // merging a second time means both routers share the `/admin/*`
+    // namespace. axum rejects duplicate route definitions, so we rely on
+    // the stub being a wildcard (`/admin/*path`) — the concrete routes
+    // here take precedence because axum matches specific paths before
+    // wildcards. See `routes::admin::router()` for the stub.
+    let admin_state = build_admin_state(registry.clone(), log_tx);
+    let router = mount_admin_routes(base_router, admin_state);
+
+    (router, backend_opt, registry)
 }
 
 /// Default session trim cap used when a config isn't loaded. Matches

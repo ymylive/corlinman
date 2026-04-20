@@ -14,20 +14,27 @@
 //! existing [`crate::routes::router`] stays valid. Callers that can supply
 //! real state should use [`router_with_state`] instead.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use axum::{routing::any, Router};
 use corlinman_core::config::Config;
 use corlinman_plugins::registry::PluginRegistry;
+use tokio::sync::broadcast;
 
+use crate::log_broadcast::LogRecord;
 use crate::middleware::admin_auth::{require_admin, AdminAuthState};
+use crate::middleware::admin_session::AdminSessionStore;
 use crate::middleware::approval::ApprovalGate;
 
 use super::not_implemented;
 
 pub mod agents;
 pub mod approvals;
+pub mod auth;
+pub mod config;
+pub mod logs;
 pub mod plugins;
 
 /// Shared read-only state passed to every admin handler.
@@ -43,6 +50,22 @@ pub struct AdminState {
     /// stripped-down builds that boot without approval rules configured;
     /// the `/admin/approvals*` endpoints then return 503.
     pub approval_gate: Option<Arc<ApprovalGate>>,
+    /// Sprint 5 T1: session registry shared with `admin_auth` middleware.
+    /// `None` on bare test harnesses that only exercise Basic-auth paths;
+    /// `/admin/login`, `/admin/logout`, `/admin/me` then 503.
+    pub session_store: Option<Arc<AdminSessionStore>>,
+    /// Sprint 5 T2: on-disk location of the currently-loaded config.
+    /// `POST /admin/config` re-serialises accepted payloads here via an
+    /// atomic tmp-then-rename write. `None` in test harnesses that exercise
+    /// the validation / swap path without a real file (the POST handler
+    /// then returns 503 `config_path_unset`).
+    pub config_path: Option<PathBuf>,
+    /// Sprint 5 T3: broadcast sender fed by
+    /// [`crate::log_broadcast::BroadcastLayer`]. `/admin/logs/stream`
+    /// subscribes once per connection. `None` in stripped-down test
+    /// harnesses that don't install the tracing layer; the endpoint
+    /// then returns 503 `logs_disabled`.
+    pub log_broadcast: Option<broadcast::Sender<LogRecord>>,
 }
 
 impl AdminState {
@@ -51,6 +74,9 @@ impl AdminState {
             plugins,
             config,
             approval_gate: None,
+            session_store: None,
+            config_path: None,
+            log_broadcast: None,
         }
     }
 
@@ -58,6 +84,28 @@ impl AdminState {
     /// can read the SQLite queue and wake parked decisions.
     pub fn with_approval_gate(mut self, gate: Arc<ApprovalGate>) -> Self {
         self.approval_gate = Some(gate);
+        self
+    }
+
+    /// Fluent: attach the session store so `/admin/login` can issue
+    /// cookies and `require_admin` can validate them.
+    pub fn with_session_store(mut self, store: Arc<AdminSessionStore>) -> Self {
+        self.session_store = Some(store);
+        self
+    }
+
+    /// Fluent: attach the on-disk config path so `POST /admin/config`
+    /// can persist accepted payloads back to the same file the loader
+    /// read at boot.
+    pub fn with_config_path(mut self, path: PathBuf) -> Self {
+        self.config_path = Some(path);
+        self
+    }
+
+    /// Fluent: attach the tracing broadcast sender so
+    /// `/admin/logs/stream` can subscribe new receivers.
+    pub fn with_log_broadcast(mut self, tx: broadcast::Sender<LogRecord>) -> Self {
+        self.log_broadcast = Some(tx);
         self
     }
 }
@@ -68,18 +116,30 @@ pub fn router() -> Router {
     Router::new().route("/admin/*path", any(|| not_implemented("/admin/*")))
 }
 
-/// Production admin router: real handlers + basic-auth guard.
+/// Production admin router: real handlers + auth guard (cookie first,
+/// Basic-auth fallback). Login/logout/me routes are merged *outside* the
+/// guard so unauthenticated callers can obtain a session.
 pub fn router_with_state(state: AdminState) -> Router {
-    let auth_state = AdminAuthState::new(state.config.clone());
+    let mut auth_state = AdminAuthState::new(state.config.clone());
+    if let Some(store) = state.session_store.as_ref() {
+        auth_state = auth_state.with_session_store(store.clone());
+    }
 
-    Router::new()
+    let guarded = Router::new()
         .merge(plugins::router(state.clone()))
         .merge(agents::router(state.clone()))
-        .merge(approvals::router(state))
+        .merge(approvals::router(state.clone()))
+        .merge(config::router(state.clone()))
+        .merge(logs::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             require_admin,
-        ))
+        ));
+
+    // `/admin/login`, `/admin/logout`, `/admin/me` — outside the guard.
+    // Each handler does its own credential check (argon2 verify or
+    // cookie validate) to avoid the chicken-and-egg problem.
+    guarded.merge(auth::router(state))
 }
 
 #[cfg(test)]

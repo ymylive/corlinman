@@ -280,3 +280,86 @@ export function genTraceId(): string {
   for (let i = 0; i < 16; i++) out += hex();
   return out;
 }
+
+// --- Approvals (S5 T4 addition) -------------------------------------------
+// Shape mirrors Rust `ApprovalOut` in
+// rust/crates/corlinman-gateway/src/routes/admin/approvals.rs so the admin
+// page consumes mock + real gateway payloads without branching.
+
+export interface MockApproval {
+  id: string;
+  plugin: string;
+  tool: string;
+  session_key: string;
+  args_json: string;
+  requested_at: string;
+  decided_at: string | null;
+  decision: string | null;
+}
+
+export const MOCK_PENDING_APPROVALS: MockApproval[] = [
+  {
+    id: "apv_01HXYZA",
+    plugin: "FileOperator",
+    tool: "WriteFile",
+    session_key: "qq:group:123456",
+    args_json: JSON.stringify({
+      path: "./Daily/2026-04-20.md",
+      content:
+        "# 2026-04-20\n\n- 调试 approvals 页\n- 跟 corlinman-gateway 对接 SSE\n",
+      mode: "overwrite",
+    }),
+    requested_at: "2026-04-20T06:11:02Z",
+    decided_at: null,
+    decision: null,
+  },
+  {
+    id: "apv_01HXYZB",
+    plugin: "FileOperator",
+    tool: "DeleteFile",
+    session_key: "qq:private:88442211",
+    args_json: JSON.stringify({ path: "/tmp/scratch.log" }),
+    requested_at: "2026-04-20T06:14:48Z",
+    decided_at: null,
+    decision: null,
+  },
+  {
+    id: "apv_01HXYZC",
+    plugin: "ChromeBridge",
+    tool: "open_tab",
+    session_key: "web:admin:nova",
+    args_json: JSON.stringify({
+      url: "https://example.com/reports/q1",
+      focus: true,
+    }),
+    requested_at: "2026-04-20T06:18:20Z",
+    decided_at: null,
+    decision: null,
+  },
+];
+
+export const MOCK_HISTORY_APPROVALS: MockApproval[] = [
+  {
+    id: "apv_01HXXX1",
+    plugin: "FileOperator",
+    tool: "WriteFile",
+    session_key: "qq:group:123456",
+    args_json: JSON.stringify({
+      path: "./Daily/2026-04-19.md",
+      content: "# 2026-04-19\n- 今日已完成：…\n",
+    }),
+    requested_at: "2026-04-19T23:59:11Z",
+    decided_at: "2026-04-19T23:59:41Z",
+    decision: "approved",
+  },
+  {
+    id: "apv_01HXXX2",
+    plugin: "FileOperator",
+    tool: "DeleteFile",
+    session_key: "qq:group:654321",
+    args_json: JSON.stringify({ path: "/etc/hosts" }),
+    requested_at: "2026-04-19T18:02:00Z",
+    decided_at: "2026-04-19T18:02:22Z",
+    decision: "denied",
+  },
+];

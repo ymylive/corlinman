@@ -174,5 +174,65 @@ export async function listPendingApprovals(): Promise<ApprovalItem[]> {
   });
 }
 
+// --- Approvals (S2 T3 wired, S5 T4 expanded with batch helper) -------------
+// Matches the Rust `ApprovalOut` shape in
+// rust/crates/corlinman-gateway/src/routes/admin/approvals.rs.
+export interface Approval {
+  id: string;
+  plugin: string;
+  tool: string;
+  session_key: string;
+  args_json: string;
+  requested_at: string;
+  decided_at: string | null;
+  decision: string | null;
+}
+
+export function fetchApprovals(includeDecided: boolean): Promise<Approval[]> {
+  const qs = includeDecided ? "?include_decided=true" : "";
+  return apiFetch<Approval[]>(`/admin/approvals${qs}`);
+}
+
+export interface DecideResult {
+  id: string;
+  decision: string;
+}
+
+export function decideApproval(
+  id: string,
+  approve: boolean,
+  reason?: string,
+): Promise<DecideResult> {
+  return apiFetch<DecideResult>(`/admin/approvals/${id}/decide`, {
+    method: "POST",
+    body: { approve, reason },
+  });
+}
+
+/** Outcome of a single decide call inside a batch. */
+export interface BatchDecideOutcome {
+  id: string;
+  ok: boolean;
+  error?: string;
+}
+
+/** Fires every decide in parallel with `Promise.allSettled` and reports per-id
+ * outcomes so the caller can revert optimistic updates for the failed ones. */
+export async function decideApprovalsBatch(
+  ids: string[],
+  approve: boolean,
+  reason?: string,
+): Promise<BatchDecideOutcome[]> {
+  const results = await Promise.allSettled(
+    ids.map((id) => decideApproval(id, approve, reason)),
+  );
+  return results.map((r, i) => {
+    const id = ids[i]!;
+    if (r.status === "fulfilled") return { id, ok: true };
+    const msg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+    return { id, ok: false, error: msg };
+  });
+}
+
 /** Convenience re-export for callers that want the SSE helper. */
 export { openEventStream } from "./sse";

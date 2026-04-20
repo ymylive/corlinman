@@ -3,17 +3,26 @@
 //! Currently holds the plugin registry so handlers (notably the chat route)
 //! can dispatch `ServerFrame::ToolCall` frames to real plugin runtimes via
 //! [`corlinman_plugins::PluginRegistry`]. Later milestones will extend this
-//! with live config, the agent client, vector store, approval queue, and a
-//! broadcast event bus (plan §14 R10).
+//! with the agent client, vector store, approval queue, and a broadcast
+//! event bus (plan §14 R10).
+//!
+//! `config` + `config_path` landed with S5 T2: `Arc<ArcSwap<Config>>` gives
+//! handlers a lock-free snapshot that the `POST /admin/config` endpoint can
+//! swap in place, and `config_path` is the on-disk TOML the same endpoint
+//! re-serialises to after a successful validate. Both are `Option` so the
+//! existing `AppState::new(plugin_registry)` callsites (integration tests
+//! that never touch config) stay valid — admin routes still carry their
+//! own `AdminState` with a non-optional `config` for the admin surface.
 //
-// TODO: hold `config: Arc<ArcSwap<CorlinmanConfig>>` for lock-free hot reload;
-//       every handler calls `state.config.load()` at entry.
 // TODO: include `agent: corlinman_agent_client::AgentClient`,
 //       `vector: corlinman_vector::Store`, `approvals: ApprovalQueue`, and a
 //       broadcast `events: tokio::sync::broadcast::Sender<Event>`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+use corlinman_core::config::Config;
 use corlinman_core::SessionStore;
 use corlinman_plugins::runtime::service_grpc::ServiceRuntime;
 use corlinman_plugins::{PluginRegistry, PluginSupervisor};
@@ -39,6 +48,16 @@ pub struct AppState {
     /// Tool-approval gate (Sprint 2 T3). `None` = no rules configured, so
     /// every tool call is admitted unchecked (matches pre-T3 behaviour).
     pub approval_gate: Option<Arc<ApprovalGate>>,
+    /// Live gateway config snapshot (S5 T2). Readers call
+    /// `state.config.as_ref().map(|c| c.load())` for a cheap, lock-free
+    /// snapshot; `POST /admin/config` publishes swaps via `store`. `None`
+    /// in the stub/test builds that never loaded a config file.
+    pub config: Option<Arc<ArcSwap<Config>>>,
+    /// On-disk location of the TOML that `config` was loaded from. Needed
+    /// by `POST /admin/config` to atomically write the accepted payload
+    /// back (tmp → rename). `None` when the config was synthesised from
+    /// defaults rather than read from a file.
+    pub config_path: Option<PathBuf>,
 }
 
 impl AppState {
@@ -51,6 +70,8 @@ impl AppState {
             service_runtime: None,
             plugin_supervisor: None,
             approval_gate: None,
+            config: None,
+            config_path: None,
         }
     }
 
@@ -80,6 +101,14 @@ impl AppState {
         self
     }
 
+    /// Attach the shared live-config handle + its on-disk path. Fluent so
+    /// `server.rs` can chain after loading `$CORLINMAN_CONFIG`.
+    pub fn with_config(mut self, config: Arc<ArcSwap<Config>>, path: PathBuf) -> Self {
+        self.config = Some(config);
+        self.config_path = Some(path);
+        self
+    }
+
     /// Convenience constructor for tests / stubs that don't need any plugins.
     pub fn empty() -> Self {
         Self {
@@ -88,6 +117,8 @@ impl AppState {
             service_runtime: None,
             plugin_supervisor: None,
             approval_gate: None,
+            config: None,
+            config_path: None,
         }
     }
 }
