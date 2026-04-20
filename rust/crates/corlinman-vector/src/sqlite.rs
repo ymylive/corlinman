@@ -1,11 +1,13 @@
 //! sqlx pool + file/chunk/kv access + BM25 FTS5 search.
 //!
-//! Tables (corlinman-native, schema v3):
+//! Tables (corlinman-native, schema v4):
 //!
 //! - `files` — one row per indexed source file.
 //! - `chunks` — text chunks + little-endian f32 BLOB vector.
 //! - `chunks_fts` — FTS5 contentless-linked virtual table mirroring
 //!   `chunks.content`, maintained by INSERT/DELETE/UPDATE triggers.
+//! - `chunk_tags` — (chunk_id, tag) many-to-many used for tag-filter
+//!   pushdown in [`crate::hybrid::HybridSearcher`] (Sprint 3 T4).
 //! - `kv_store` — general KV cache + `schema_version`.
 //! - `pending_approvals` — one row per tool call that hit a `prompt`
 //!   approval rule; consumed by the `/admin/approvals` UI.
@@ -91,6 +93,15 @@ CREATE INDEX IF NOT EXISTS idx_pending_approvals_undecided
 
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_requested
     ON pending_approvals(requested_at);
+
+CREATE TABLE IF NOT EXISTS chunk_tags (
+    chunk_id INTEGER NOT NULL,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (chunk_id, tag),
+    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_tags_tag ON chunk_tags(tag);
 "#;
 
 /// Row from `files`.
@@ -295,6 +306,195 @@ impl SqliteStore {
                 (id, -raw)
             })
             .collect())
+    }
+
+    /// BM25 search restricted to a caller-supplied `allowed_ids` whitelist
+    /// (used by [`crate::hybrid::HybridSearcher`] for tag-filter pushdown).
+    ///
+    /// `None` ⇒ behaves identically to [`Self::search_bm25`]. `Some(&[])`
+    /// ⇒ returns no hits without ever hitting SQLite.
+    pub async fn search_bm25_with_filter(
+        &self,
+        query: &str,
+        limit: usize,
+        allowed_ids: Option<&[i64]>,
+    ) -> Result<Vec<(i64, f32)>> {
+        if query.trim().is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        match allowed_ids {
+            None => self.search_bm25(query, limit).await,
+            Some([]) => Ok(Vec::new()),
+            Some(ids) => {
+                let placeholders = std::iter::repeat_n("?", ids.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                // All-unnumbered `?` so sqlx binds by textual order —
+                // mixing `?N` with `?` confuses sqlx's positional binder.
+                let sql = format!(
+                    "SELECT rowid AS id, bm25(chunks_fts) AS score \
+                     FROM chunks_fts \
+                     WHERE chunks_fts MATCH ? AND rowid IN ({placeholders}) \
+                     ORDER BY score ASC \
+                     LIMIT ?"
+                );
+                let mut q = sqlx::query(&sql).bind(query);
+                for id in ids {
+                    q = q.bind(id);
+                }
+                q = q.bind(limit as i64);
+                let rows = q.fetch_all(&self.pool).await.with_context(|| {
+                    format!("search_bm25_with_filter('{query}', limit={limit})")
+                })?;
+                Ok(rows
+                    .into_iter()
+                    .map(|r| {
+                        let id = r.get::<i64, _>("id");
+                        let raw = r.get::<f64, _>("score") as f32;
+                        (id, -raw)
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    // ---- chunk_tags (schema v4) ------------------------------------------
+
+    /// Attach `tag` to `chunk_id`. Idempotent: a duplicate (chunk, tag)
+    /// pair is a no-op thanks to `INSERT OR IGNORE`.
+    pub async fn insert_tag(&self, chunk_id: i64, tag: &str) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO chunk_tags(chunk_id, tag) VALUES (?1, ?2)")
+            .bind(chunk_id)
+            .bind(tag)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("insert_tag(chunk_id={chunk_id}, tag={tag})"))?;
+        Ok(())
+    }
+
+    /// Tags attached to `chunk_id`, sorted ascending.
+    pub async fn get_tags(&self, chunk_id: i64) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT tag FROM chunk_tags WHERE chunk_id = ?1 ORDER BY tag ASC")
+            .bind(chunk_id)
+            .fetch_all(&self.pool)
+            .await
+            .with_context(|| format!("get_tags({chunk_id})"))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<String, _>("tag"))
+            .collect())
+    }
+
+    /// Resolve a [`crate::hybrid::TagFilter`] into the sorted set of
+    /// `chunk.id`s that satisfy it (required ∧ any_of ∧ ¬excluded).
+    ///
+    /// Semantics:
+    /// - `required`: chunk must carry *every* tag listed.
+    /// - `any_of`: chunk must carry *at least one* tag listed (ignored when empty).
+    /// - `excluded`: chunk must carry *none* of the tags listed.
+    /// - All three empty ⇒ returns every `chunks.id`.
+    pub async fn filter_chunk_ids_by_tags(
+        &self,
+        filter: &crate::hybrid::TagFilter,
+    ) -> Result<Vec<i64>> {
+        let req = &filter.required;
+        let any = &filter.any_of;
+        let exc = &filter.excluded;
+
+        // Empty filter ⇒ every chunk id; callers treat "all chunks" as
+        // "no filter applied".
+        if req.is_empty() && any.is_empty() && exc.is_empty() {
+            let rows = sqlx::query("SELECT id FROM chunks ORDER BY id ASC")
+                .fetch_all(&self.pool)
+                .await
+                .context("filter_chunk_ids_by_tags: list all")?;
+            return Ok(rows.into_iter().map(|r| r.get::<i64, _>("id")).collect());
+        }
+
+        // Build the SQL incrementally. `HAVING COUNT(DISTINCT ..) = N`
+        // implements the conjunction for `required`.
+        let mut sql = String::from("SELECT DISTINCT c.id FROM chunks c");
+        let mut binds: Vec<String> = Vec::new();
+        let mut where_clauses: Vec<String> = Vec::new();
+
+        if !req.is_empty() {
+            sql.push_str(" JOIN chunk_tags ct_req ON ct_req.chunk_id = c.id");
+            let placeholders = std::iter::repeat_n("?", req.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            where_clauses.push(format!("ct_req.tag IN ({placeholders})"));
+            for t in req {
+                binds.push(t.clone());
+            }
+        }
+
+        if !any.is_empty() {
+            let placeholders = std::iter::repeat_n("?", any.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            where_clauses.push(format!(
+                "EXISTS (SELECT 1 FROM chunk_tags ct_any \
+                 WHERE ct_any.chunk_id = c.id AND ct_any.tag IN ({placeholders}))"
+            ));
+            for t in any {
+                binds.push(t.clone());
+            }
+        }
+
+        if !exc.is_empty() {
+            let placeholders = std::iter::repeat_n("?", exc.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            where_clauses.push(format!(
+                "NOT EXISTS (SELECT 1 FROM chunk_tags ct_exc \
+                 WHERE ct_exc.chunk_id = c.id AND ct_exc.tag IN ({placeholders}))"
+            ));
+            for t in exc {
+                binds.push(t.clone());
+            }
+        }
+
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+
+        if !req.is_empty() {
+            sql.push_str(&format!(
+                " GROUP BY c.id HAVING COUNT(DISTINCT ct_req.tag) = {}",
+                req.len()
+            ));
+        }
+
+        sql.push_str(" ORDER BY c.id ASC");
+
+        let mut q = sqlx::query(&sql);
+        for b in &binds {
+            q = q.bind(b);
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .context("filter_chunk_ids_by_tags")?;
+        Ok(rows.into_iter().map(|r| r.get::<i64, _>("id")).collect())
+    }
+
+    /// Total row count in `files`.
+    pub async fn count_files(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM files")
+            .fetch_one(&self.pool)
+            .await
+            .context("count_files")?;
+        Ok(row.get::<i64, _>("n"))
+    }
+
+    /// Distinct tag count across `chunk_tags`.
+    pub async fn count_tags(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(DISTINCT tag) AS n FROM chunk_tags")
+            .fetch_one(&self.pool)
+            .await
+            .context("count_tags")?;
+        Ok(row.get::<i64, _>("n"))
     }
 
     /// Backfill `chunks_fts` from the existing `chunks` table.
@@ -544,7 +744,7 @@ mod tests {
     #[tokio::test]
     async fn open_creates_schema() {
         let (store, _tmp) = fresh_store().await;
-        for t in ["files", "chunks", "kv_store", "chunks_fts"] {
+        for t in ["files", "chunks", "kv_store", "chunks_fts", "chunk_tags"] {
             assert!(store.table_exists(t).await.unwrap(), "table {t} missing");
         }
     }
@@ -701,6 +901,84 @@ mod tests {
         assert!(SCHEMA_SQL.contains("CREATE TABLE"));
         assert!(SCHEMA_SQL.contains("chunks_fts"));
         assert!(SCHEMA_SQL.contains("pending_approvals"));
+        assert!(SCHEMA_SQL.contains("chunk_tags"));
+    }
+
+    // ---- chunk_tags -----------------------------------------------------
+
+    async fn seed_tagged_chunks(store: &SqliteStore) -> (i64, i64, i64) {
+        // Returns (chunk_a, chunk_b, chunk_c):
+        //   a → tags ["rust", "backend"]
+        //   b → tags ["rust", "frontend"]
+        //   c → no tags
+        let file_id = store
+            .insert_file("t.md", "default", "h", 0, 0)
+            .await
+            .unwrap();
+        let a = store
+            .insert_chunk(file_id, 0, "rust backend content", None)
+            .await
+            .unwrap();
+        let b = store
+            .insert_chunk(file_id, 1, "rust frontend content", None)
+            .await
+            .unwrap();
+        let c = store
+            .insert_chunk(file_id, 2, "untagged note", None)
+            .await
+            .unwrap();
+        store.insert_tag(a, "rust").await.unwrap();
+        store.insert_tag(a, "backend").await.unwrap();
+        store.insert_tag(b, "rust").await.unwrap();
+        store.insert_tag(b, "frontend").await.unwrap();
+        (a, b, c)
+    }
+
+    #[tokio::test]
+    async fn insert_and_get_tags_roundtrip() {
+        let (store, _tmp) = fresh_store().await;
+        let (a, _b, c) = seed_tagged_chunks(&store).await;
+        assert_eq!(store.get_tags(a).await.unwrap(), vec!["backend", "rust"]);
+        assert_eq!(store.get_tags(c).await.unwrap(), Vec::<String>::new());
+        // Idempotency.
+        store.insert_tag(a, "rust").await.unwrap();
+        assert_eq!(store.get_tags(a).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn count_files_and_tags() {
+        let (store, _tmp) = fresh_store().await;
+        assert_eq!(store.count_files().await.unwrap(), 0);
+        assert_eq!(store.count_tags().await.unwrap(), 0);
+        seed_tagged_chunks(&store).await;
+        assert_eq!(store.count_files().await.unwrap(), 1);
+        // distinct tags: rust, backend, frontend
+        assert_eq!(store.count_tags().await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn search_bm25_with_filter_restricts_hits() {
+        let (store, _tmp) = fresh_store().await;
+        let (a, _b, _c) = seed_tagged_chunks(&store).await;
+        // No filter ⇒ picks up both "rust ..." chunks.
+        let hits = store
+            .search_bm25_with_filter("rust", 10, None)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        // Whitelist only chunk a.
+        let hits = store
+            .search_bm25_with_filter("rust", 10, Some(&[a]))
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, a);
+        // Empty whitelist ⇒ empty.
+        let hits = store
+            .search_bm25_with_filter("rust", 10, Some(&[]))
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
     }
 
     // ---- pending_approvals ------------------------------------------------

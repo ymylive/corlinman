@@ -308,6 +308,7 @@ async fn overfetch_multiplier_controls_candidate_pool() {
     // parameterised path matches the simpler one for equivalent
     // configs.
     let default_params = HybridParams::default();
+    let default_top_k = default_params.top_k;
     let default_searcher = HybridSearcher::new(
         Arc::new(SqliteStore::open(&sqlite_path).await.unwrap()),
         Arc::new(RwLock::new(UsearchIndex::open(&usearch_path).unwrap())),
@@ -317,7 +318,7 @@ async fn overfetch_multiplier_controls_candidate_pool() {
         .search(token, &corpus[0].1, None)
         .await
         .unwrap();
-    assert!(default_hits.len() <= default_params.top_k);
+    assert!(default_hits.len() <= default_top_k);
 }
 
 #[tokio::test]

@@ -9,8 +9,13 @@
 //! 3. **RRF fusion** via [`hybrid::HybridSearcher`]
 //!    (reciprocal-rank fusion with per-ranker weights).
 //!
-//! Cross-encoder rerank is deferred to M6; LRU unload of `.usearch` files
-//! and tag-filter pushdown remain on the later roadmap.
+//! Cross-encoder rerank ships as a pluggable [`rerank::Reranker`] trait
+//! (Sprint 3 T6); the default is [`rerank::NoopReranker`] and the gRPC
+//! path to the Python embedding service is stubbed in
+//! [`rerank::GrpcReranker`]. LRU unload of `.usearch` files is the
+//! remaining roadmap item. Tag-filter pushdown landed with Sprint 3 T4
+//! via [`hybrid::TagFilter`] + the `chunk_tags` table (see
+//! [`sqlite::SCHEMA_SQL`]).
 //!
 //! ## Module layout
 //!
@@ -18,16 +23,27 @@
 //! - [`usearch_index`]: HNSW wrapper.
 //! - [`hybrid`]: RRF fusion over dense + sparse result sets.
 //! - [`query::VectorStore`]: the public facade combining both.
-//! - [`migration`]: `kv_store('schema_version')` bootstrap + v1→v2 FTS5 backfill.
+//! - [`migration`]: `kv_store('schema_version')` bootstrap + trait-based
+//!   migration registry (Sprint 3 T2).
+//! - [`header`]: read-only `.usearch` header probe used by the migration
+//!   runner to detect embedding-dimension drift.
 
+pub mod header;
 pub mod hybrid;
 pub mod migration;
 pub mod query;
+pub mod rerank;
 pub mod sqlite;
 pub mod usearch_index;
 
-pub use hybrid::{HitSource, HybridParams, HybridSearcher, RagHit};
+pub use header::{probe_and_convert_if_needed, probe_usearch_header, UsearchHeader};
+pub use hybrid::{HitSource, HybridParams, HybridSearcher, RagHit, TagFilter};
+pub use migration::{
+    MigrationRegistry, MigrationReport, MigrationScript, V1ToV2FtsBackfill, V2ToV3PendingApprovals,
+    V3ToV4ChunkTags,
+};
 pub use query::VectorStore;
+pub use rerank::{GrpcReranker, NoopReranker, Reranker};
 pub use sqlite::{ChunkRow, FileRow, PendingApproval, SqliteStore};
 pub use usearch_index::UsearchIndex;
 
@@ -40,9 +56,14 @@ pub use usearch_index::UsearchIndex;
 ///   gate (Sprint 2 T3). Forward-only migration — the DDL is `IF NOT EXISTS`
 ///   so a fresh v3 DB materialises the table during `SqliteStore::open`, and
 ///   `migration::ensure_schema` just bumps the stored version for legacy DBs.
+/// - v4: add `chunk_tags` (chunk_id, tag) many-to-many + `idx_chunk_tags_tag`
+///   supporting the Sprint 3 T4 tag-filter pushdown. The DDL is in
+///   [`sqlite::SCHEMA_SQL`] so fresh DBs materialise the table during open;
+///   legacy v3 DBs get the table via the [`migration::V3ToV4ChunkTags`]
+///   script.
 ///
 /// Bumped on any breaking migration; see [`migration::ensure_schema`].
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Encode a `&[f32]` as a little-endian byte blob for the `chunks.vector`
 /// column.

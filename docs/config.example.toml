@@ -77,6 +77,28 @@ hybrid_bm25_weight = 1.0
 hybrid_hnsw_weight = 1.0
 rrf_k = 60.0
 
+# Cross-encoder rerank on top of RRF (Sprint 3 T6). Disabled by default — the
+# searcher keeps RRF's ordering. Flip `enabled = true` to route fused
+# candidates through a cross-encoder before truncating to `top_k`.
+#
+# mode = "local"  → sentence-transformers cross-encoder in the embedding
+#                   service (requires its [local] extra); set `model` to a
+#                   HF id such as "BAAI/bge-reranker-v2-m3".
+# mode = "remote" → HTTP rerank endpoint (cohere / siliconflow / compat).
+#                   Set `api_base`, `api_key`, and `model` (provider id).
+[rag.rerank]
+enabled = false
+mode = "local"
+# model = "BAAI/bge-reranker-v2-m3"
+
+# Remote example:
+# [rag.rerank]
+# enabled = true
+# mode = "remote"
+# model = "BAAI/bge-reranker-v2-m3"
+# api_base = "https://api.siliconflow.cn/v1"
+# api_key = { env = "SILICONFLOW_API_KEY" }
+
 # ---------------------------------------------------------------------------
 # [[approvals.rules]] — per-plugin / per-tool approval gate (Sprint 2 T3).
 #

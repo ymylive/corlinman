@@ -21,12 +21,22 @@
 //! penalty. The final list is sorted by fused score (descending) and
 //! truncated to `top_k`.
 //!
+//! # Cross-encoder rerank
+//!
+//! A post-RRF rerank stage is pluggable via [`crate::rerank::Reranker`].
+//! The searcher holds an `Arc<dyn Reranker>` (default
+//! [`crate::rerank::NoopReranker`]) and — when `params.rerank_enabled` is
+//! `true` — hands the fused hits to it before truncating to `top_k`.
+//! Sprint 3 T6 shipped the trait + a noop default + a
+//! [`crate::rerank::GrpcReranker`] stub; the real client lives in the
+//! Python embedding service (see `corlinman_embedding.rerank_client`).
+//!
 //! # Not yet implemented
 //!
-//! - Cross-encoder rerank on top of RRF output (planned for M6).
 //! - LRU unload of `.usearch` files on idle timeout.
-//! - Tag / metadata filter pushdown (the baseline SQLite schema no
-//!   longer carries tag tables in M4).
+//! - `Rerank` gRPC RPC in `proto/embedding.proto` (the stub in
+//!   [`crate::rerank::GrpcReranker`] currently returns
+//!   `CorlinmanError::Internal("unimplemented: ...")`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,11 +45,36 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::rerank::{NoopReranker, Reranker};
 use crate::sqlite::SqliteStore;
 use crate::usearch_index::UsearchIndex;
 
+/// Tag-filter predicate pushed down to both recall paths (Sprint 3 T4).
+///
+/// Semantics (all conditions conjoined):
+/// - `required`: chunk must carry *every* tag in the list.
+/// - `any_of`: chunk must carry *at least one* tag (ignored when empty).
+/// - `excluded`: chunk must carry *none* of the listed tags.
+///
+/// An all-empty `TagFilter` is equivalent to `None` — callers should not
+/// build one in that case (the searcher still short-circuits correctly
+/// if they do, it's just wasted work).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TagFilter {
+    pub required: Vec<String>,
+    pub excluded: Vec<String>,
+    pub any_of: Vec<String>,
+}
+
+impl TagFilter {
+    /// `true` when every constraint list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.required.is_empty() && self.excluded.is_empty() && self.any_of.is_empty()
+    }
+}
+
 /// Reciprocal-rank-fusion tuning knobs.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HybridParams {
     /// Final number of fused hits to return.
     pub top_k: usize,
@@ -52,10 +87,21 @@ pub struct HybridParams {
     pub hnsw_weight: f32,
     /// RRF dampening constant `k` (standard literature default = 60).
     pub rrf_k: f32,
+    /// Optional tag-filter predicate. `None` ⇒ no filter; see
+    /// [`TagFilter`] for semantics. Pushed down into BM25 (SQL `IN` on
+    /// the whitelisted ids) and post-filters HNSW (usearch has no
+    /// predicate support, so we over-fetch then prune).
+    pub tag_filter: Option<TagFilter>,
+    /// Run the [`HybridSearcher`]'s [`Reranker`] after RRF fusion when
+    /// `true`. Default: `false`. When `false` the fused list is simply
+    /// truncated to `top_k` (the noop reranker behaviour), so callers
+    /// who leave this alone see the legacy RRF-only ordering.
+    pub rerank_enabled: bool,
 }
 
 impl HybridParams {
-    /// Library defaults: `top_k=10`, `overfetch=3`, equal weights, `k=60`.
+    /// Library defaults: `top_k=10`, `overfetch=3`, equal weights, `k=60`,
+    /// no tag filter, rerank disabled.
     pub const fn new() -> Self {
         Self {
             top_k: 10,
@@ -63,6 +109,8 @@ impl HybridParams {
             bm25_weight: 1.0,
             hnsw_weight: 1.0,
             rrf_k: 60.0,
+            tag_filter: None,
+            rerank_enabled: false,
         }
     }
 }
@@ -110,11 +158,15 @@ pub struct HybridSearcher {
     sqlite: Arc<SqliteStore>,
     usearch: Arc<RwLock<UsearchIndex>>,
     params: HybridParams,
+    reranker: Arc<dyn Reranker>,
 }
 
 impl HybridSearcher {
     /// Construct a searcher with the provided default `params`. Callers
     /// can still override per-query via [`Self::search`]'s `override_params`.
+    ///
+    /// The reranker defaults to [`NoopReranker`]. Use
+    /// [`Self::with_reranker`] on the returned value to swap it.
     pub fn new(
         sqlite: Arc<SqliteStore>,
         usearch: Arc<RwLock<UsearchIndex>>,
@@ -124,12 +176,34 @@ impl HybridSearcher {
             sqlite,
             usearch,
             params,
+            reranker: Arc::new(NoopReranker),
         }
+    }
+
+    /// Replace the reranker. Returns `self` for builder-style chaining:
+    ///
+    /// ```ignore
+    /// let searcher = HybridSearcher::new(sqlite, usearch, params)
+    ///     .with_reranker(Arc::new(GrpcReranker::new("http://...", "bge-reranker-v2-m3")));
+    /// ```
+    ///
+    /// Only takes effect for queries that also pass
+    /// `params.rerank_enabled = true` (per-query override or via the
+    /// searcher default).
+    #[must_use]
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
+        self.reranker = reranker;
+        self
+    }
+
+    /// Borrow the active reranker (primarily for tests + introspection).
+    pub fn reranker(&self) -> &Arc<dyn Reranker> {
+        &self.reranker
     }
 
     /// Default parameters used when a `search` call passes `None`.
     pub fn params(&self) -> HybridParams {
-        self.params
+        self.params.clone()
     }
 
     /// Hybrid search: HNSW + BM25 + RRF fusion.
@@ -137,17 +211,44 @@ impl HybridSearcher {
     /// `query_text` drives BM25. `query_vector` drives HNSW. Pass an
     /// empty `query_text` to run dense-only implicitly (BM25 returns no
     /// hits and RRF reduces to the HNSW ranking).
+    ///
+    /// When `override_params.tag_filter` (or the default `params.tag_filter`)
+    /// is `Some`, both recall paths are restricted to the intersection
+    /// of `chunks.id` with the filter predicate:
+    /// - BM25: SQL-level `rowid IN (...)` pushdown
+    ///   ([`SqliteStore::search_bm25_with_filter`]).
+    /// - HNSW: we over-fetch `fetch` candidates and drop any whose
+    ///   `chunk_id` is not on the whitelist; usearch has no predicate
+    ///   support so this is the best we can do without paginating.
     pub async fn search(
         &self,
         query_text: &str,
         query_vector: &[f32],
         override_params: Option<HybridParams>,
     ) -> Result<Vec<RagHit>> {
-        let p = override_params.unwrap_or(self.params);
+        let p = override_params.unwrap_or_else(|| self.params.clone());
         if p.top_k == 0 {
             return Ok(Vec::new());
         }
         let fetch = p.top_k.saturating_mul(p.overfetch_multiplier.max(1));
+
+        // --- Tag filter: resolve once, reuse for both paths. ---------------
+        let allowed_ids: Option<Vec<i64>> = match &p.tag_filter {
+            Some(tf) if !tf.is_empty() => Some(
+                self.sqlite
+                    .filter_chunk_ids_by_tags(tf)
+                    .await
+                    .context("tag filter pushdown")?,
+            ),
+            _ => None,
+        };
+        let allowed_set: Option<std::collections::HashSet<i64>> =
+            allowed_ids.as_ref().map(|v| v.iter().copied().collect());
+
+        // Active filter + empty whitelist ⇒ no chunks match, skip the work.
+        if matches!(&allowed_set, Some(s) if s.is_empty()) {
+            return Ok(Vec::new());
+        }
 
         // --- Recall path 1: HNSW (dense) -----------------------------------
         let dense_hits: Vec<(i64, f32)> = {
@@ -155,30 +256,61 @@ impl HybridSearcher {
             if idx.size() == 0 || query_vector.is_empty() {
                 Vec::new()
             } else {
-                idx.search(query_vector, fetch)
-                    .context("hnsw search")?
+                // Over-fetch when tag-filter is active: HNSW can't predicate,
+                // so we pull extra and keep the first `fetch` survivors.
+                let hnsw_k = if allowed_set.is_some() {
+                    fetch.saturating_mul(4).max(fetch)
+                } else {
+                    fetch
+                };
+                let raw = idx.search(query_vector, hnsw_k).context("hnsw search")?;
+                let mut out: Vec<(i64, f32)> = raw
                     .into_iter()
                     .map(|(k, dist)| (k as i64, 1.0 - dist))
-                    .collect()
+                    .collect();
+                if let Some(set) = &allowed_set {
+                    out.retain(|(id, _)| set.contains(id));
+                    out.truncate(fetch);
+                }
+                out
             }
         };
 
         // --- Recall path 2: BM25 (sparse) ----------------------------------
         let sparse_hits: Vec<(i64, f32)> = self
             .sqlite
-            .search_bm25(query_text, fetch)
+            .search_bm25_with_filter(query_text, fetch, allowed_ids.as_deref())
             .await
             .context("bm25 search")?;
 
         // --- Fusion --------------------------------------------------------
+        //
+        // When rerank is disabled we can truncate before hydration (the old
+        // path). When rerank is enabled we keep the full fused set so the
+        // cross-encoder has real candidates to re-order; truncation to
+        // `top_k` happens inside the reranker.
         let fused = rrf_fuse(&dense_hits, &sparse_hits, &p);
-        let truncated: Vec<(i64, f32, HitSource)> = fused.into_iter().take(p.top_k).collect();
-        if truncated.is_empty() {
+        let candidates: Vec<(i64, f32, HitSource)> = if p.rerank_enabled {
+            fused
+        } else {
+            fused.into_iter().take(p.top_k).collect()
+        };
+        if candidates.is_empty() {
             return Ok(Vec::new());
         }
 
-        let ids: Vec<i64> = truncated.iter().map(|(id, _, _)| *id).collect();
-        self.hydrate(&ids, truncated).await
+        let ids: Vec<i64> = candidates.iter().map(|(id, _, _)| *id).collect();
+        let hits = self.hydrate(&ids, candidates).await?;
+
+        // --- Optional rerank ----------------------------------------------
+        if p.rerank_enabled {
+            self.reranker
+                .rerank(query_text, hits, p.top_k)
+                .await
+                .map_err(|e| anyhow::anyhow!("reranker failed: {e}"))
+        } else {
+            Ok(hits)
+        }
     }
 
     /// HNSW-only fallback. Bypasses RRF; score is cosine similarity.
@@ -272,6 +404,7 @@ impl std::fmt::Debug for HybridSearcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HybridSearcher")
             .field("params", &self.params)
+            .field("reranker", &self.reranker)
             .finish_non_exhaustive()
     }
 }
@@ -366,6 +499,8 @@ mod tests {
             bm25_weight: 10.0,
             hnsw_weight: 0.1,
             rrf_k: 60.0,
+            tag_filter: None,
+            rerank_enabled: false,
         };
         let fused = rrf_fuse(&dense, &sparse, &p);
         assert_eq!(fused[0].0, 2);
@@ -390,9 +525,284 @@ mod tests {
             bm25_weight: 1.0,
             hnsw_weight: 1.0,
             rrf_k: 0.0,
+            tag_filter: None,
+            rerank_enabled: false,
         };
         let fused = rrf_fuse(&[(1, 0.0)], &[(1, 0.0)], &p);
         assert_eq!(fused.len(), 1);
         assert!(fused[0].1.is_finite());
+    }
+
+    // ---- tag filter integration ---------------------------------------
+
+    use tempfile::TempDir;
+
+    /// Build a tiny hybrid searcher: 3 chunks of 4-d vectors, first two
+    /// tagged, the third untagged. Used by the tag-filter tests.
+    async fn tagged_store() -> (HybridSearcher, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let sqlite = SqliteStore::open(&tmp.path().join("kb.sqlite"))
+            .await
+            .unwrap();
+        let file_id = sqlite
+            .insert_file("notes/t.md", "notes", "h", 0, 0)
+            .await
+            .unwrap();
+
+        let corpus = [
+            ("apple banana cherry", [1.0_f32, 0.0, 0.0, 0.0]),
+            ("banana dog elephant", [0.9, 0.1, 0.0, 0.0]),
+            ("grape honey iris", [0.0, 0.0, 1.0, 0.0]),
+        ];
+        let mut ids = [0_i64; 3];
+        for (i, (text, vec)) in corpus.iter().enumerate() {
+            ids[i] = sqlite
+                .insert_chunk(file_id, i as i64, text, Some(vec))
+                .await
+                .unwrap();
+        }
+        // ids[0] → rust+backend; ids[1] → rust+frontend; ids[2] → untagged.
+        sqlite.insert_tag(ids[0], "rust").await.unwrap();
+        sqlite.insert_tag(ids[0], "backend").await.unwrap();
+        sqlite.insert_tag(ids[1], "rust").await.unwrap();
+        sqlite.insert_tag(ids[1], "frontend").await.unwrap();
+
+        let mut index = UsearchIndex::create_with_capacity(4, 16).unwrap();
+        for (i, (_, vec)) in corpus.iter().enumerate() {
+            index.add(ids[i] as u64, vec).unwrap();
+        }
+
+        let hybrid = HybridSearcher::new(
+            Arc::new(sqlite),
+            Arc::new(RwLock::new(index)),
+            HybridParams::new(),
+        );
+        (hybrid, tmp)
+    }
+
+    fn params_with_filter(top_k: usize, tf: TagFilter) -> HybridParams {
+        HybridParams {
+            top_k,
+            overfetch_multiplier: 3,
+            bm25_weight: 1.0,
+            hnsw_weight: 1.0,
+            rrf_k: 60.0,
+            tag_filter: Some(tf),
+            rerank_enabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn tag_filter_required_matches_only_those_tags() {
+        let (searcher, _tmp) = tagged_store().await;
+        let tf = TagFilter {
+            required: vec!["rust".into()],
+            ..Default::default()
+        };
+        // "banana" matches chunks 0 and 1; both carry "rust" so both survive.
+        // chunk 2 ("grape honey iris") has no "rust" tag → excluded.
+        let hits = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(params_with_filter(10, tf)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        for h in &hits {
+            assert!(!h.content.contains("grape"));
+        }
+    }
+
+    #[tokio::test]
+    async fn tag_filter_excluded_removes_matches() {
+        let (searcher, _tmp) = tagged_store().await;
+        let tf = TagFilter {
+            excluded: vec!["frontend".into()],
+            ..Default::default()
+        };
+        // chunk 1 is tagged frontend → excluded. chunks 0 and 2 pass.
+        let hits = searcher
+            .search(
+                "banana grape",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(params_with_filter(10, tf)),
+            )
+            .await
+            .unwrap();
+        let contents: Vec<&str> = hits.iter().map(|h| h.content.as_str()).collect();
+        assert!(contents.iter().any(|c| c.contains("apple")));
+        // "banana dog elephant" is the frontend-tagged chunk — must be gone.
+        assert!(!contents.iter().any(|c| c.contains("dog elephant")));
+    }
+
+    #[tokio::test]
+    async fn tag_filter_any_of_ors() {
+        let (searcher, _tmp) = tagged_store().await;
+        let tf = TagFilter {
+            any_of: vec!["backend".into(), "frontend".into()],
+            ..Default::default()
+        };
+        // chunks 0 (backend) and 1 (frontend) qualify; chunk 2 does not.
+        let hits = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(params_with_filter(10, tf)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn tag_filter_empty_equivalent_to_no_filter() {
+        let (searcher, _tmp) = tagged_store().await;
+        let with_empty = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(params_with_filter(10, TagFilter::default())),
+            )
+            .await
+            .unwrap();
+        let without = searcher
+            .search("banana", &[1.0, 0.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+        assert_eq!(with_empty.len(), without.len());
+    }
+
+    #[tokio::test]
+    async fn tag_filter_combined_required_and_excluded() {
+        let (searcher, _tmp) = tagged_store().await;
+        let tf = TagFilter {
+            required: vec!["rust".into()],
+            excluded: vec!["frontend".into()],
+            ..Default::default()
+        };
+        // Only chunk 0 satisfies rust ∧ ¬frontend.
+        let hits = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(params_with_filter(10, tf)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].content.contains("apple"));
+    }
+
+    // ---- reranker integration (Sprint 3 T6) ----------------------------
+
+    use crate::rerank::Reranker;
+    use async_trait::async_trait;
+
+    /// Reverses the order RRF produced, so we can observe whether the
+    /// searcher actually consulted the injected reranker.
+    #[derive(Debug, Default)]
+    struct ReversingReranker;
+
+    #[async_trait]
+    impl Reranker for ReversingReranker {
+        async fn rerank(
+            &self,
+            _query: &str,
+            mut hits: Vec<RagHit>,
+            top_k: usize,
+        ) -> Result<Vec<RagHit>, corlinman_core::error::CorlinmanError> {
+            hits.reverse();
+            hits.truncate(top_k);
+            Ok(hits)
+        }
+    }
+
+    fn rerank_params(top_k: usize, enabled: bool) -> HybridParams {
+        HybridParams {
+            top_k,
+            overfetch_multiplier: 3,
+            bm25_weight: 1.0,
+            hnsw_weight: 1.0,
+            rrf_k: 60.0,
+            tag_filter: None,
+            rerank_enabled: enabled,
+        }
+    }
+
+    #[tokio::test]
+    async fn rerank_disabled_preserves_rrf_order() {
+        let (searcher, _tmp) = tagged_store().await;
+        // Even with a reversing reranker installed, `rerank_enabled=false`
+        // must leave the RRF ordering intact.
+        let searcher = searcher.with_reranker(Arc::new(ReversingReranker));
+        let hits = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(rerank_params(10, false)),
+            )
+            .await
+            .unwrap();
+        assert!(!hits.is_empty());
+        // "apple banana cherry" is the closest dense match (vector [1,0,0,0])
+        // and also wins BM25 on "banana" → it should lead the RRF output.
+        assert!(
+            hits[0].content.contains("apple"),
+            "expected RRF top to be the apple chunk, got {:?}",
+            hits.iter().map(|h| &h.content).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn rerank_enabled_uses_injected_reranker() {
+        let (searcher, _tmp) = tagged_store().await;
+        let baseline = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(rerank_params(10, false)),
+            )
+            .await
+            .unwrap();
+
+        let searcher = searcher.with_reranker(Arc::new(ReversingReranker));
+        let reranked = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(rerank_params(10, true)),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(baseline.len(), reranked.len());
+        assert!(baseline.len() >= 2, "need ≥2 hits to test reversal");
+        // Reranker reverses: the former last should be first, former first last.
+        assert_eq!(
+            reranked.first().unwrap().chunk_id,
+            baseline.last().unwrap().chunk_id
+        );
+        assert_eq!(
+            reranked.last().unwrap().chunk_id,
+            baseline.first().unwrap().chunk_id
+        );
+    }
+
+    #[tokio::test]
+    async fn rerank_enabled_truncates_to_top_k() {
+        let (searcher, _tmp) = tagged_store().await;
+        let searcher = searcher.with_reranker(Arc::new(ReversingReranker));
+        // Corpus has 3 chunks; ask for top_k=2 with rerank on.
+        let hits = searcher
+            .search(
+                "banana grape",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(rerank_params(2, true)),
+            )
+            .await
+            .unwrap();
+        assert!(hits.len() <= 2);
     }
 }

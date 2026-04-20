@@ -259,6 +259,10 @@ pub struct RagConfig {
     pub hybrid_hnsw_weight: f32,
     #[validate(range(min = 1.0, max = 10000.0))]
     pub rrf_k: f32,
+    /// Cross-encoder rerank stage applied after RRF fusion (Sprint 3 T6).
+    /// Disabled by default — flip `enabled = true` to hand the fused
+    /// candidates to the Python embedding service's rerank client.
+    pub rerank: RerankConfig,
 }
 
 impl Default for RagConfig {
@@ -269,6 +273,7 @@ impl Default for RagConfig {
             hybrid_bm25_weight: 1.0,
             hybrid_hnsw_weight: 1.0,
             rrf_k: default_rrf_k(),
+            rerank: RerankConfig::default(),
         }
     }
 }
@@ -281,6 +286,44 @@ fn default_top_k() -> usize {
 }
 fn default_rrf_k() -> f32 {
     60.0
+}
+
+/// Cross-encoder rerank configuration.
+///
+/// `mode = "local"` runs a sentence-transformers cross-encoder in the Python
+/// embedding service (requires its `[local]` extra). `mode = "remote"` POSTs
+/// to a cohere/siliconflow-style rerank endpoint (`api_base` + `api_key`).
+///
+/// When `enabled = false` (the default) the rest of the fields are ignored;
+/// the searcher uses the noop reranker and RRF ordering is returned as-is.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RerankConfig {
+    /// Master switch. `false` (default) ⇒ noop reranker.
+    pub enabled: bool,
+    /// Backend selector. See [`RerankMode`].
+    pub mode: RerankMode,
+    /// Model id passed to the reranker provider
+    /// (e.g. `BAAI/bge-reranker-v2-m3` for local, `rerank-multilingual-v3.0`
+    /// for remote). `None` ⇒ provider default.
+    pub model: Option<String>,
+    /// Base URL for `mode = "remote"` (e.g. `https://api.siliconflow.cn/v1`).
+    /// Ignored for `mode = "local"`.
+    pub api_base: Option<String>,
+    /// API key for `mode = "remote"`. Ignored for `mode = "local"`.
+    pub api_key: Option<SecretRef>,
+}
+
+/// Which rerank backend the embedding service should use.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankMode {
+    /// Local sentence-transformers cross-encoder running in the Python
+    /// embedding service. Requires the `[local]` extra.
+    #[default]
+    Local,
+    /// Remote HTTP rerank endpoint (cohere / siliconflow / OpenAI-compat).
+    Remote,
 }
 
 // ---------------------------------------------------------------------------
@@ -826,6 +869,10 @@ hybrid_bm25_weight = 1.0
 hybrid_hnsw_weight = 1.0
 rrf_k = 60.0
 
+[rag.rerank]
+enabled = false
+mode = "local"
+
 [[approvals.rules]]
 plugin = "file-ops"
 tool = "file-ops.write"
@@ -866,6 +913,32 @@ file_rolling = true
         assert_eq!(cfg.providers.enabled_names(), vec!["anthropic"]);
         assert_eq!(cfg.channels.qq.as_ref().unwrap().self_ids, vec![123456789]);
         assert_eq!(cfg.scheduler.jobs.len(), 1);
+        // [rag.rerank] defaults propagate when unspecified.
+        assert!(!cfg.rag.rerank.enabled);
+        assert_eq!(cfg.rag.rerank.mode, RerankMode::Local);
+    }
+
+    #[test]
+    fn rag_rerank_remote_block_parses() {
+        let toml = r#"
+[rag.rerank]
+enabled = true
+mode = "remote"
+model = "rerank-multilingual-v3.0"
+api_base = "https://api.example.com/v1"
+api_key = { env = "EXAMPLE_RERANK_KEY" }
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.rag.rerank.enabled);
+        assert_eq!(cfg.rag.rerank.mode, RerankMode::Remote);
+        assert_eq!(
+            cfg.rag.rerank.model.as_deref(),
+            Some("rerank-multilingual-v3.0")
+        );
+        assert!(matches!(
+            cfg.rag.rerank.api_key,
+            Some(SecretRef::EnvVar { .. })
+        ));
     }
 
     #[test]

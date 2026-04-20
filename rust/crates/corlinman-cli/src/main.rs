@@ -34,6 +34,9 @@ enum Cmd {
     Dev(cmd::dev::Cmd),
     /// Run QA scenarios from `qa/scenarios/*.yaml`.
     Qa(cmd::qa::Args),
+    /// Vector index: stats / query / rebuild (Sprint 3 T5).
+    #[command(subcommand)]
+    Vector(cmd::vector::Cmd),
 }
 
 #[tokio::main]
@@ -46,5 +49,6 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Config(sub) => cmd::config::run(sub).await,
         Cmd::Dev(sub) => cmd::dev::run(sub).await,
         Cmd::Qa(args) => cmd::qa::run(args).await,
+        Cmd::Vector(sub) => cmd::vector::run(sub).await,
     }
 }
