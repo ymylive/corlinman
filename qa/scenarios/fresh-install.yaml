@@ -1,0 +1,33 @@
+# QA scenario: fresh-install walkthrough.
+#
+# This scenario can't run inside the offline in-process runner — it's the
+# "hand the binary to a fresh Ubuntu user" check:
+#   1. clean $HOME/.corlinman
+#   2. `corlinman onboard` wizard
+#   3. `corlinman dev` → gateway + python + UI all come up healthy
+#   4. `curl /v1/chat/completions` against a real provider API key
+#   5. open the UI at http://127.0.0.1:3000
+#
+# By design it's marked `requires_live: true` so the CI suite skips it.
+# Runs manually via `corlinman qa run --include-live`, or (better) as part
+# of the S8 T4 screencast on a fresh VM.
+
+name: fresh-install-walkthrough
+description: |
+  End-to-end happy path on a blank $HOME: onboard → dev → chat → UI open.
+  Requires a real provider key + a display for the UI; therefore always
+  marked requires_live.
+
+requires_live: true
+kind: live
+live:
+  note: |
+    Run on a fresh Ubuntu 22.04 VM (or an isolated user account):
+      1. git clone …corlinman; cd corlinman
+      2. ./scripts/dev-setup.sh
+      3. rm -rf ~/.corlinman
+      4. corlinman onboard          # walk through the wizard
+      5. corlinman dev              # check gateway + python + UI
+      6. curl /v1/chat/completions with a real provider key
+      7. open http://127.0.0.1:3000 and submit one prompt
+    Covered by the S8 T4 screencast; pair this scenario with Asciinema.

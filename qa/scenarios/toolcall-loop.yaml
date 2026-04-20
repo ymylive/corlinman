@@ -1,0 +1,44 @@
+# QA scenario: one-turn tool-call loop.
+#
+# Scripted backend emits a ToolCall frame for a non-existent plugin followed
+# by a Done. In the chat_http in-process runner the backend is bound to the
+# base `ChatState::new(...)` (no plugin registry) so the gateway responds with
+# the OpenAI-standard `tool_calls[]` array carrying the scripted call, with
+# finish_reason=tool_calls. That's the shape a client receives before it
+# sends the tool response back — i.e. the first half of the loop.
+
+name: toolcall-loop-emits-openai-tool_calls
+description: |
+  The gateway must surface a scripted ServerFrame::ToolCall as the
+  OpenAI-standard `choices[0].message.tool_calls[]` array.
+
+requires_live: false
+kind: chat_http
+chat_http:
+  request:
+    model: claude-sonnet-4-5
+    stream: false
+    messages:
+      - role: user
+        content: call the tool
+  frames:
+    - kind: tool_call
+      id: "call_abc123"
+      name: "qa_echo"
+      arguments:
+        text: "ping"
+    - kind: done
+      reason: tool_calls
+  expect:
+    status: 200
+    json_contains:
+      - path: choices.0.finish_reason
+        equals: tool_calls
+      - path: choices.0.message.tool_calls.0.id
+        equals: "call_abc123"
+      - path: choices.0.message.tool_calls.0.type
+        equals: function
+      - path: choices.0.message.tool_calls.0.function.name
+        equals: qa_echo
+      - path: choices.0.message.tool_calls.0.function.arguments
+        contains: "ping"

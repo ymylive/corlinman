@@ -17,6 +17,7 @@ corlinman-core = { path = "../corlinman-core" }
 corlinman-proto = { path = "../corlinman-proto" }
 corlinman-plugins = { path = "../corlinman-plugins" }
 corlinman-vector = { path = "../corlinman-vector" }
+corlinman-gateway = { path = "../corlinman-gateway" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -46,11 +47,15 @@ sha2 = { workspace = true }
 time = { workspace = true }
 url = "2"
 walkdir = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+http = { workspace = true }
+http-body-util = "0.1"
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-tempfile = "3"
 assert_cmd = "2"
 predicates = "3"

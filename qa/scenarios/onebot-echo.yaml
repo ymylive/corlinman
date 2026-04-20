@@ -1,0 +1,42 @@
+# QA scenario: OneBot (QQ) echo — the gateway-side half.
+#
+# The full QQ channel path (mock gocq WS → `run_qq_channel` → ChatService →
+# `send_group_msg`) is already exercised by the in-crate integration test
+# `corlinman-channels/tests/qq_to_chat_e2e.rs`. That test spins up a TCP
+# listener, a mock gocq WS peer, and the fake ChatService, none of which fit
+# inside the stateless scenario-runner DSL without bringing half the channel
+# crate along.
+#
+# The offline-friendly sibling here exercises the piece the QQ channel
+# actually calls under the hood: a chat round-trip that echoes the inbound
+# user text. If the chat pipeline regresses, `run_qq_channel` does too —
+# the integration test catches the WS plumbing separately.
+
+name: onebot-echo-via-chat-pipeline
+description: |
+  Simulates the chat pipeline a QQ group message feeds into: user "hello
+  world" → scripted backend echoes tokens back → gateway folds them into
+  `choices[0].message.content`. The real WS/gocq path is covered by
+  `qq_to_chat_e2e.rs`.
+
+requires_live: false
+kind: chat_http
+chat_http:
+  request:
+    model: claude-sonnet-4-5
+    stream: false
+    messages:
+      - role: user
+        content: "hello world"
+  frames:
+    - kind: token
+      text: "Hello "
+    - kind: token
+      text: "world"
+    - kind: done
+      reason: stop
+  expect:
+    status: 200
+    json_contains:
+      - path: choices.0.message.content
+        contains: "Hello world"

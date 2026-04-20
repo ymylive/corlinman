@@ -1,0 +1,20 @@
+# QA scenario: async plugin emits a task_id for later resolution.
+#
+# When a plugin responds with `{"task_id": "..."}` instead of an inline
+# result, the stdio runtime must fold that into PluginOutput::AcceptedForLater
+# so the gateway can park the tool_call until the plugin fires
+# `/plugin-callback/:task_id` (M3 async path).
+
+name: plugin-async-accepted-for-later
+description: |
+  The runtime recognises the `task_id` result shape and yields
+  AcceptedForLater with the exact task id.
+
+requires_live: false
+kind: plugin_exec_async
+plugin_exec:
+  arguments:
+    mode: task
+    task_id: qa-task-1234
+  expect:
+    accepted_task_id: qa-task-1234

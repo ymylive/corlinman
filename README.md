@@ -1,5 +1,30 @@
 # corlinman
 
+[![CI](https://img.shields.io/github/actions/workflow/status/ymylive/corlinman/ci.yml?branch=main&label=CI)](https://github.com/ymylive/corlinman/actions)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.1.0-orange)](CHANGELOG.md)
+
+![corlinman admin dashboard](docs/assets/dashboard.png)
+
+> The screenshot above is a placeholder and will be replaced with the
+> real dashboard capture when the S8 T4 installation screencast lands.
+
+## 30-second quickstart
+
+Prebuilt docker images are planned for v0.1.1. Until then, build from source:
+
+```bash
+git clone https://github.com/ymylive/corlinman && cd corlinman
+./scripts/dev-setup.sh                             # deps + proto + hooks
+cargo build --release -p corlinman-gateway -p corlinman-cli
+./target/release/corlinman onboard                 # wizard
+./target/release/corlinman dev                     # gateway + python + UI
+# dashboard at http://127.0.0.1:3000, gateway at http://127.0.0.1:6000
+```
+
+Data defaults to `~/.corlinman/`; override via `--data-dir` /
+`CORLINMAN_DATA_DIR`.
+
 自托管的 LLM 工具箱：统一管理多 provider（Anthropic / OpenAI / Google / DeepSeek / Qwen / GLM）、插件化工具执行、RAG 知识库、QQ 机器人通道、管理后台。**一台机器跑起来就能用**，重视可观测性和运维友好度。
 
 ## 架构一览
@@ -48,10 +73,14 @@ scripts/            dev-setup、gen-proto
 - [插件作者指南](docs/plugin-authoring.md)
 - [运维手册](docs/runbook.md)
 - [里程碑进展](docs/milestones.md)
+- [1.0 Changelog](CHANGELOG.md)
+- [性能基线](docs/perf-baseline-1.0.md)
 
 ## 状态
 
-Pre-alpha — M0 已完成，M1 在 flight。完整计划见 `/Users/cornna/.claude/plans/openclaw-rust-python-corlinma-graceful-meerkat.md`。
+`v0.1.0` — first tagged release. M0–M7 landed, M8 release prep complete.
+See [`docs/milestones.md`](docs/milestones.md) for per-milestone status and
+[`docs/roadmap.md`](docs/roadmap.md) for post-1.0 plans.
 
 ## License
 

@@ -1,0 +1,30 @@
+# QA scenario: hybrid RAG retrieval (HNSW + BM25 + RRF).
+#
+# The runner builds an in-memory SqliteStore + usearch index from the corpus
+# entries, runs `HybridSearcher::search(text, vector, None)`, and asserts the
+# top hit content. Vectors are intentionally simple one-hots so the cosine
+# dense ranker picks the expected chunk; BM25 helps when the text overlap
+# is unambiguous.
+
+name: rag-hybrid-retrieves-best-match
+description: |
+  Three-chunk corpus where only one entry mentions the query terms. Both
+  BM25 (textual) and HNSW (vector 0-axis aligned) should surface it as #1.
+
+requires_live: false
+kind: rag_hybrid
+rag_hybrid:
+  corpus:
+    - content: "rust systems programming with cargo and tokio"
+      vector: [1.0, 0.0, 0.0, 0.0]
+    - content: "cooking recipes for beginners"
+      vector: [0.0, 1.0, 0.0, 0.0]
+    - content: "gardening advice for small apartments"
+      vector: [0.0, 0.0, 1.0, 0.0]
+  query:
+    text: "rust tokio cargo"
+    vector: [1.0, 0.0, 0.0, 0.0]
+    top_k: 3
+  expect:
+    min_hits: 1
+    top_contains: "rust systems programming"

@@ -1,0 +1,25 @@
+# QA scenario: sync plugin stdio roundtrip.
+#
+# The runner materialises a python echo plugin in a tempdir and invokes it
+# via `corlinman_plugins::runtime::jsonrpc_stdio::execute` with the
+# arguments below. The plugin returns `{"echo": <arguments>}` when the
+# `mode` field is `echo` (default).
+
+name: plugin-sync-echo-success
+description: |
+  A sync plugin executes, returns a structured result, and the runtime maps
+  it to PluginOutput::Success containing the JSON the plugin wrote to stdout.
+
+requires_live: false
+kind: plugin_exec_sync
+plugin_exec:
+  arguments:
+    mode: echo
+    payload: "hello"
+    number: 42
+  expect:
+    success_json_contains:
+      - path: echo.payload
+        equals: "hello"
+      - path: echo.number
+        equals: 42

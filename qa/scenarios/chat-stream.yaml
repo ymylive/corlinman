@@ -1,58 +1,33 @@
 # QA scenario: /v1/chat/completions (SSE streaming).
 #
-# Exercises the SSE path. The runner issues `curl -N` (no buffering) and
-# matches the raw response bytes against the expected event fragments.
+# In-process router + scripted backend, asserted against the raw SSE bytes.
 
 name: chat-stream-happy-path
 description: |
   Streaming chat completion. The gateway must emit at least one SSE `data:`
-  event carrying the mocked "hello world" tokens and terminate with the
-  `data: [DONE]` sentinel.
+  event carrying the mocked tokens and terminate with the `data: [DONE]`
+  sentinel.
 
-services:
-  - name: python-agent
-    command: uv run corlinman-python-server
-    env:
-      ANTHROPIC_API_KEY: "mock"
-      CORLINMAN_PY_ADDR: "127.0.0.1:50552"
-      CORLINMAN_TEST_MOCK_PROVIDER: "hello world"
-    readiness:
-      type: tcp
-      host: 127.0.0.1
-      port: 50552
-      timeout_s: 10
-
-  - name: rust-gateway
-    command: cargo run -q -p corlinman-gateway --bin corlinman-gateway
-    env:
-      PORT: "6006"
-      CORLINMAN_PY_ADDR: "127.0.0.1:50552"
-    readiness:
-      type: http
-      url: http://127.0.0.1:6006/health
-      expect_status: 200
-      timeout_s: 30
-
-steps:
-  - name: post-chat-completions-stream
-    request:
-      method: POST
-      url: http://127.0.0.1:6006/v1/chat/completions
-      headers:
-        Content-Type: application/json
-        Accept: text/event-stream
-      body:
-        model: claude-sonnet-4-5
-        stream: true
-        messages:
-          - role: user
-            content: stream please
-      raw_stream: true
-    expect:
-      status: 200
-      content_type_contains: text/event-stream
-      stream_fragments:
-        - contains: "data:"
-        - contains: "hello"
-        - contains: "world"
-        - contains: "data: [DONE]"
+requires_live: false
+kind: chat_http
+chat_http:
+  request:
+    model: claude-sonnet-4-5
+    stream: true
+    messages:
+      - role: user
+        content: stream please
+  frames:
+    - kind: token
+      text: "hello "
+    - kind: token
+      text: "world"
+    - kind: done
+      reason: stop
+  expect:
+    status: 200
+    stream_fragments:
+      - "data:"
+      - "hello"
+      - "world"
+      - "data: [DONE]"
