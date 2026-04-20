@@ -1,0 +1,29 @@
+# QQ (OneBot v11) profile — overlay on docker-compose.yml.
+# TODO (M5): pick a concrete go-cqhttp image; current upstream is archived.
+#   Candidates: LagrangeDev/Lagrange.OneBot, NapNeko/NapCatQQ.
+# For now this file documents the network contract: gocq WS exposed on 3001,
+# corlinman-channels connects to ws://gocq:3001 inside corlinman-net.
+
+services:
+  gocq:
+    # Placeholder — replace during M5 (channels QQ/OneBot).
+    image: ghcr.io/ymylive/corlinman-gocq:placeholder
+    container_name: corlinman-gocq
+    profiles: ["qq"]
+    restart: unless-stopped
+    ports:
+      # WS listener that corlinman-channels dials
+      - "3001:3001"
+    volumes:
+      - ../../.gocq:/data
+    environment:
+      # Typical OneBot v11 knobs; resolve in M5.
+      ONEBOT_WS_PORT: "3001"
+    networks:
+      - corlinman-net
+
+  corlinman:
+    environment:
+      QQ_WS_URL: ws://gocq:3001
+    depends_on:
+      - gocq

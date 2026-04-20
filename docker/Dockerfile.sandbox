@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1.7
+#
+# corlinman plugin sandbox base image
+# Referenced by manifest.sandbox blocks; bollard spawns containers from this.
+# Keep minimal — plugins that need extras should layer on top or declare binds.
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash \
+      ca-certificates \
+      curl \
+      git \
+      jq \
+      python3 \
+      ripgrep \
+      nodejs \
+      tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 1000 corlinman \
+ && useradd --system --uid 1000 --gid corlinman --home-dir /workspace --shell /bin/bash corlinman \
+ && mkdir -p /workspace \
+ && chown -R corlinman:corlinman /workspace
+
+WORKDIR /workspace
+USER corlinman:corlinman
+
+ENTRYPOINT ["tini", "--"]
+CMD ["bash"]

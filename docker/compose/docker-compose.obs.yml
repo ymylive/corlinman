@@ -1,0 +1,42 @@
+# Observability profile — Prometheus + Grafana scraping corlinman :6005/metrics.
+# Overlay on docker-compose.yml.
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: corlinman-prometheus
+    profiles: ["obs"]
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    networks:
+      - corlinman-net
+
+  grafana:
+    image: grafana/grafana-oss:11.2.2
+    container_name: corlinman-grafana
+    profiles: ["obs"]
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - corlinman-net
+
+volumes:
+  prometheus-data:
+  grafana-data:

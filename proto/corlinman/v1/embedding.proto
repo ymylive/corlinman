@@ -1,0 +1,43 @@
+// embedding.proto — text embedding service.
+//
+// Python `corlinman_embedding` implements this; called by the Python agent
+// (for RAG queries) and by the Rust indexer (for plugin-upsert ingest).
+
+syntax = "proto3";
+
+package corlinman.v1;
+
+import "corlinman/v1/common.proto";
+
+option optimize_for = SPEED;
+
+service Embedding {
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+  // EmbedBatch: client-streaming + server-streaming for large ingest pipelines.
+  // Order is preserved by `request_id`; batches may be flushed independently.
+  rpc EmbedBatch(stream EmbedRequest) returns (stream EmbedResponse);
+}
+
+message EmbedRequest {
+  string model = 1;              // e.g. "text-embedding-3-large", "bge-m3"
+  repeated string texts = 2;
+  // Optional routing hint: "local" forces ProcessPool; "remote" forces HTTP.
+  string route = 3;
+  string request_id = 4;
+  TraceContext trace = 5;
+}
+
+message EmbedResponse {
+  string request_id = 1;
+  repeated EmbeddingVector vectors = 2;
+  uint32 dim = 3;
+  string model = 4;
+  ErrorInfo error = 5;
+}
+
+// Renamed from `Vector` to avoid collision with the `Vector` service defined in
+// vector.proto (both live under `corlinman.v1`).
+message EmbeddingVector {
+  // Packed float32; little-endian. len = dim * 4 bytes.
+  bytes data = 1;
+}

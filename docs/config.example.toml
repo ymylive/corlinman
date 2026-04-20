@@ -1,0 +1,124 @@
+# corlinman config.toml — annotated example.
+#
+# Default path: $CORLINMAN_DATA_DIR/config.toml, falling back to
+# ~/.corlinman/config.toml. `corlinman onboard` writes an initial version;
+# `corlinman config {show,get,set,validate}` does safe edits. See
+# docs/architecture.md §7 for the full data-dir layout.
+
+# ---------------------------------------------------------------------------
+# [server] — axum gateway listener + data-dir root.
+# ---------------------------------------------------------------------------
+[server]
+port = 6005
+bind = "0.0.0.0"
+# Files (agents/, plugins/, knowledge/, vector/, logs/) all live under here.
+data_dir = "~/.corlinman"
+
+# ---------------------------------------------------------------------------
+# [admin] — credentials for /admin/* routes (basic auth, argon2id hash).
+# ---------------------------------------------------------------------------
+[admin]
+username = "admin"
+# Generate via `corlinman onboard` (prompts for password) or
+# `corlinman config set admin.password_hash '$argon2id$...'` (pre-hashed).
+# password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+
+# ---------------------------------------------------------------------------
+# [providers.*] — at least one must have enabled = true with an api_key
+# for the gateway to serve chats.
+#
+# api_key shapes:
+#   { env = "ANTHROPIC_API_KEY" }   # value read from env at startup (preferred)
+#   { value = "sk-..." }            # literal; redacted by `config show`
+# ---------------------------------------------------------------------------
+[providers.anthropic]
+api_key = { env = "ANTHROPIC_API_KEY" }
+enabled = true
+
+[providers.openai]
+api_key = { env = "OPENAI_API_KEY" }
+base_url = "https://api.openai.com/v1"
+enabled = false
+
+# [providers.google]
+# [providers.deepseek]
+# [providers.qwen]
+# [providers.glm]
+
+# ---------------------------------------------------------------------------
+# [models] — default + alias table (resolved before routing to providers).
+# ---------------------------------------------------------------------------
+[models]
+default = "claude-sonnet-4-5"
+
+[models.aliases]
+smart = "claude-opus-4-7"
+cheap = "claude-haiku-4-5-20251001"
+
+# ---------------------------------------------------------------------------
+# [channels.qq] — OneBot v11 forward-WS bridge. Disabled by default.
+# ---------------------------------------------------------------------------
+[channels.qq]
+enabled = false
+ws_url = "ws://127.0.0.1:3001"
+# access_token = { env = "QQ_ACCESS_TOKEN" }
+self_ids = []
+# Per-group keyword overrides (empty means channel default applies).
+# [channels.qq.group_keywords]
+# "123456789" = ["bot", "help"]
+
+# ---------------------------------------------------------------------------
+# [rag] — hybrid retrieval knobs. See docs/architecture.md §5 (Vector service).
+# ---------------------------------------------------------------------------
+[rag]
+embedding_model = "mxbai-embed-large"
+top_k = 5
+hybrid_bm25_weight = 1.0
+hybrid_hnsw_weight = 1.0
+rrf_k = 60.0
+
+# ---------------------------------------------------------------------------
+# [[approvals.rules]] — per-plugin / per-tool approval gate.
+# mode = "auto" | "prompt" | "deny"
+# ---------------------------------------------------------------------------
+[[approvals.rules]]
+plugin = "file-ops"
+tool = "file-ops.write"
+mode = "prompt"
+
+# [[approvals.rules]]
+# plugin = "shell"
+# mode = "deny"
+# allow_session_keys = ["abcd1234..."]
+
+# ---------------------------------------------------------------------------
+# [[scheduler.jobs]] — cron-style background jobs (tokio-cron-scheduler).
+# action = { type = "run_agent", prompt = "..." }
+#        | { type = "run_tool",  plugin = "...", tool = "...", args = { ... } }
+# ---------------------------------------------------------------------------
+[[scheduler.jobs]]
+name = "daily-brief"
+cron = "0 8 * * *"
+timezone = "Asia/Shanghai"
+action = { type = "run_agent", prompt = "生成今日简报" }
+
+# [[scheduler.jobs]]
+# name = "weekly-reindex"
+# cron = "0 3 * * 0"
+# action = { type = "run_tool", plugin = "vector", tool = "vector.reindex", args = { collection = "docs" } }
+
+# ---------------------------------------------------------------------------
+# [logging] — tracing subscriber. file_rolling emits daily files under
+# <data_dir>/logs/ in addition to stdout.
+# ---------------------------------------------------------------------------
+[logging]
+level = "info"       # trace | debug | info | warn | error
+format = "json"      # json | text
+file_rolling = true
+
+# ---------------------------------------------------------------------------
+# [meta] — maintained by `corlinman config set` / `save`. Do not edit by hand.
+# ---------------------------------------------------------------------------
+# [meta]
+# last_touched_version = "0.1.0"
+# last_touched_at = "2026-04-20T08:00:00Z"

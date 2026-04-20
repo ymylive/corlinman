@@ -1,0 +1,32 @@
+; corlinman Python-plane layering contract.
+;
+; Enforced by import-linter in the `boundary-check` CI job. The plane is
+; layered top-to-bottom: higher layers may import from lower layers, but
+; never the reverse. Peer packages in the same layer must not import each
+; other.
+;
+; Shape:
+;   corlinman_server            (top — gRPC entrypoint)
+;      └── corlinman_agent      (reasoning loop)
+;             └── corlinman_providers, corlinman_embedding  (peers)
+;                    └── corlinman_grpc  (bottom — generated stubs + client base)
+;
+; Adjust here when adding a new Python package; every package must appear
+; in exactly one layer so the contract stays total.
+
+[importlinter]
+root_packages =
+    corlinman_grpc
+    corlinman_providers
+    corlinman_agent
+    corlinman_embedding
+    corlinman_server
+
+[importlinter:contract:layers]
+name = corlinman Python plane layering
+type = layers
+layers =
+    corlinman_server
+    corlinman_agent
+    corlinman_providers | corlinman_embedding
+    corlinman_grpc

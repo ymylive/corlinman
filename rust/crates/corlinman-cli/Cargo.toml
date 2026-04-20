@@ -1,0 +1,42 @@
+[package]
+name = "corlinman-cli"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "corlinman CLI: onboard/doctor/plugins/config/dev/qa/migrate."
+
+[[bin]]
+name = "corlinman"
+path = "src/main.rs"
+
+[dependencies]
+corlinman-core = { path = "../corlinman-core" }
+corlinman-proto = { path = "../corlinman-proto" }
+corlinman-plugins = { path = "../corlinman-plugins" }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+tabled = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
+dialoguer = { workspace = true }
+argon2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

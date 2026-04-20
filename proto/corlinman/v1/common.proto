@@ -1,0 +1,92 @@
+// common.proto — shared message types across all corlinman gRPC services.
+//
+// Contains:
+//   - Role/Message/Usage: OpenAI-compatible conversation primitives
+//   - TraceContext: W3C traceparent carried in gRPC metadata echoes
+//   - ErrorInfo + FailoverReason: classified error taxonomy for provider/agent failover
+//   - ChannelBinding: stable session_key derivation across QQ/logstream/HTTP clients
+//
+// All services in corlinman.v1 import this file.
+
+syntax = "proto3";
+
+package corlinman.v1;
+
+option optimize_for = SPEED;
+
+// ---- Conversation primitives ---------------------------------------------
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  USER = 1;
+  ASSISTANT = 2;
+  SYSTEM = 3;
+  TOOL = 4;
+}
+
+// Message mirrors OpenAI chat shape but keeps binary-safe content in `content`.
+// Tool messages include `tool_call_id` to correlate with prior ASSISTANT frames.
+message Message {
+  Role role = 1;
+  string content = 2;
+  string name = 3;
+  string tool_call_id = 4;
+  // Multimodal / structured content (JSON-encoded payload); empty for plain text.
+  bytes content_json = 5;
+}
+
+// Token usage counters; matches OpenAI's `/v1/chat/completions` usage block.
+message Usage {
+  uint32 prompt_tokens = 1;
+  uint32 completion_tokens = 2;
+  uint32 total_tokens = 3;
+  uint32 cached_tokens = 4;
+  uint32 reasoning_tokens = 5;
+}
+
+// ---- Trace / error taxonomy ---------------------------------------------
+
+// Optional; primary transport is gRPC metadata (`traceparent`).
+// Kept in payload for SSE relay where metadata is stripped.
+message TraceContext {
+  string traceparent = 1;
+  string tracestate = 2;
+  string request_id = 3;
+}
+
+// Classified failure reason; used by agent-client::classify and providers/failover.py.
+// Order and names are load-bearing — referenced by CorlinmanError::status_code() in Rust.
+enum FailoverReason {
+  FAILOVER_REASON_UNSPECIFIED = 0;
+  BILLING = 1;             // quota exhausted, card declined
+  RATE_LIMIT = 2;          // 429, retryable after backoff
+  AUTH = 3;                // transient auth (key rotation in progress)
+  AUTH_PERMANENT = 4;      // revoked/invalid key — do not retry
+  TIMEOUT = 5;             // upstream timed out
+  MODEL_NOT_FOUND = 6;     // 404 on model id
+  FORMAT = 7;              // malformed response / JSON parse failure
+  CONTEXT_OVERFLOW = 8;    // prompt > context window
+  OVERLOADED = 9;          // 503 / "overloaded_error"
+  UNKNOWN = 10;            // catch-all, retryable once
+}
+
+message ErrorInfo {
+  FailoverReason reason = 1;
+  string message = 2;
+  bool retryable = 3;
+  // Original upstream identifier (e.g. "anthropic.overloaded_error").
+  string upstream_code = 4;
+}
+
+// ---- Channel binding -----------------------------------------------------
+
+// ChannelBinding identifies the conversation locus regardless of transport.
+// corlinman-channels::router derives `session_key` from {channel, account, thread, sender}.
+// session_key is the stable key used by RAG / DailyNote / approval dedup.
+message ChannelBinding {
+  string channel = 1;      // "qq" | "logstream" | "http" | "scheduler"
+  string account = 2;      // self-id on the channel (bot QQ number, gateway id)
+  string thread = 3;       // group id / room id; empty for DM
+  string sender = 4;       // user id / QQ number of the human originator
+  string session_key = 5;  // derived; empty means "let router derive"
+}

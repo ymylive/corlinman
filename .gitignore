@@ -1,0 +1,46 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Node
+node_modules/
+.next/
+.turbo/
+dist/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Data (in-place, never commit user data)
+/config.env
+/Plugin/
+/Agent/
+/VectorStore/
+/dailynote/
+/DebugLog/
+/timed-contacts/
+/OpenWebUISub/
+/SillyTavernSub/
+
+# Logs
+/logs/
+*.log
+
+# Generated
+/proto/_generated/
+**/src/_generated/

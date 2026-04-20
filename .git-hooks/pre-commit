@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# corlinman pre-commit hook.
+# Plan ref: §8 B4 (openclaw FAST_COMMIT=1 escape hatch).
+#
+# Runs fmt/lint/typecheck only on staged file types that are present.
+# Skip entirely:   FAST_COMMIT=1 git commit ...
+#
+# Install (done by scripts/dev-setup.sh):
+#   git config core.hooksPath .git-hooks
+
+set -euo pipefail
+
+if [[ -n "${FAST_COMMIT:-}" ]]; then
+  echo "pre-commit: FAST_COMMIT=1 set, skipping all checks"
+  exit 0
+fi
+
+# Locate repo root (handle hook invoked from subdirs)
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Gather staged files (ACMR = added / copied / modified / renamed)
+mapfile -d '' STAGED < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if [[ ${#STAGED[@]} -eq 0 ]]; then
+  echo "pre-commit: no staged files, nothing to check"
+  exit 0
+fi
+
+# Bucket by language
+rust_files=()
+py_files=()
+ts_files=()
+proto_files=()
+
+for f in "${STAGED[@]}"; do
+  case "$f" in
+    *.rs)              rust_files+=("$f") ;;
+    *.py)              py_files+=("$f") ;;
+    *.ts|*.tsx)        ts_files+=("$f") ;;
+    *.proto)           proto_files+=("$f") ;;
+  esac
+done
+
+modified=()
+
+# --- Rust ---
+if [[ ${#rust_files[@]} -gt 0 ]]; then
+  echo "pre-commit: rust (${#rust_files[@]} file(s))"
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "  cargo not found; install rustup" >&2
+    exit 1
+  fi
+  # fmt: run in-place so the modified[] list can re-stage changes
+  cargo fmt --all
+  cargo clippy --workspace --all-targets -- -D warnings
+  # Re-check staged rust files for post-fmt drift
+  for f in "${rust_files[@]}"; do
+    if ! git diff --quiet -- "$f"; then
+      modified+=("$f")
+    fi
+  done
+fi
+
+# --- Python ---
+if [[ ${#py_files[@]} -gt 0 ]]; then
+  echo "pre-commit: python (${#py_files[@]} file(s))"
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "  uv not found; run scripts/dev-setup.sh" >&2
+    exit 1
+  fi
+  uv run ruff check "${py_files[@]}"
+  uv run mypy "${py_files[@]}"
+fi
+
+# --- TypeScript / React ---
+if [[ ${#ts_files[@]} -gt 0 ]]; then
+  echo "pre-commit: typescript (${#ts_files[@]} file(s))"
+  if ! command -v pnpm >/dev/null 2>&1; then
+    echo "  pnpm not found; enable corepack" >&2
+    exit 1
+  fi
+  pnpm -C ui typecheck
+fi
+
+# --- Proto ---
+if [[ ${#proto_files[@]} -gt 0 ]]; then
+  echo "pre-commit: proto (${#proto_files[@]} file(s))"
+  if command -v buf >/dev/null 2>&1; then
+    buf lint
+  else
+    echo "  buf not installed; skip proto lint"
+  fi
+fi
+
+# Re-stage any files touched by formatters
+if [[ ${#modified[@]} -gt 0 ]]; then
+  echo "pre-commit: re-staging ${#modified[@]} formatter-modified file(s)"
+  git add -- "${modified[@]}"
+fi
+
+echo "pre-commit: ok"

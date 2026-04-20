@@ -1,0 +1,21 @@
+# deps
+node_modules
+.pnp
+.pnp.js
+
+# next
+.next
+out
+
+# testing
+coverage
+playwright-report
+test-results
+
+# env
+.env*.local
+.env
+
+# misc
+.DS_Store
+*.tsbuildinfo

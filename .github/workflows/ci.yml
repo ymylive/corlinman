@@ -1,0 +1,242 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: rust (fmt / clippy / nextest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+
+      # rust-toolchain.toml pins the channel (currently 1.95.0) and components
+      # (rustfmt, clippy); dtolnay/rust-toolchain@master honours that file so
+      # workspace + CI never drift.
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ci
+          cache-on-failure: true
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: nextest
+        run: cargo nextest run --workspace
+
+  python:
+    name: python (ruff / mypy / pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync
+        run: uv sync --dev
+
+      - name: ruff
+        run: uv run ruff check .
+
+      # mypy is scoped to source packages (tests are excluded in pyproject);
+      # strict mode is off while the Python plane is still landing — see
+      # docs/ci-status.md for the re-enablement plan.
+      - name: mypy
+        run: uv run mypy python/packages/
+
+      - name: pytest
+        run: uv run pytest -m "not live_llm and not live_transport"
+
+  ui:
+    name: ui (typecheck / lint / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Get pnpm store dir
+        id: pnpm-store
+        run: echo "dir=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.dir }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: typecheck
+        run: pnpm -C ui typecheck
+
+      - name: lint
+        run: pnpm -C ui lint
+
+      # vitest exits non-zero when no test files match; until the UI gains
+      # real unit tests (M7), pass `--passWithNoTests` at invocation time so
+      # we exercise the full `pnpm test` wiring without red-flagging CI.
+      - name: test
+        run: pnpm -C ui exec vitest run --passWithNoTests
+
+  proto-sync:
+    name: proto-sync (generated stubs committed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: uv sync
+        run: uv sync --dev
+
+      - name: generate Python stubs
+        run: bash scripts/gen-proto.sh
+
+      # Scoped to the generated dir so unrelated dirty files in the workflow
+      # runner (e.g. uv's .venv, pnpm cache) don't spuriously fail the job.
+      - name: verify no drift
+        run: git diff --exit-code python/packages/corlinman-grpc/src/corlinman_grpc/_generated/
+
+  boundary-check:
+    name: boundary-check (no cycles)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ci
+
+      - name: Install cargo-modules
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-modules
+
+      # `corlinman-gateway` has both lib and bin targets; cargo-modules needs
+      # the target specified explicitly.
+      - name: rust module graph (gateway lib)
+        run: cargo modules structure --package corlinman-gateway --lib --no-fns
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync
+        run: uv sync --dev
+
+      # Python plane layering contract — see .importlinter at repo root.
+      - name: python import-linter
+        run: uv run lint-imports
+
+  docker-build:
+    name: docker-build (runtime target, dry-run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build runtime image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: runtime
+          push: false
+          load: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: corlinman:ci
+
+  # Advisory job; does not gate merges while the crate graph is churning.
+  # Promoted to required once M7's dep-stabilisation work lands.
+  cargo-deny:
+    name: cargo-deny (licenses / advisories — advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny --all-features check

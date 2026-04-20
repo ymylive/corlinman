@@ -1,0 +1,79 @@
+// vector.proto — RAG vector store service.
+//
+// Hosted by the Rust gateway (corlinman-vector); called by the Python agent
+// during context_assembler placeholder expansion (RAG injection).
+
+syntax = "proto3";
+
+package corlinman.v1;
+
+import "corlinman/v1/common.proto";
+
+option optimize_for = SPEED;
+
+service Vector {
+  rpc Query(RagQuery) returns (RagHits);
+  // Upsert: client-streamed chunk ingest; server acks batch by batch.
+  rpc Upsert(stream Chunk) returns (UpsertAck);
+}
+
+// ---- Query --------------------------------------------------------------
+
+message RagQuery {
+  // Packed float32; dim must match configured index.
+  bytes query_vector = 1;
+  uint32 top_k = 2;
+  uint32 overfetch = 3;        // top_k * overfetch candidates before rerank
+  // Index scope: "daily_note" | "agent:<name>" | "global" | absolute path.
+  string scope = 4;
+  // session_key filter; empty = no filter.
+  string session_key = 5;
+  repeated string required_tags = 6;
+  repeated string excluded_tags = 7;
+  // JSON-encoded rag_params.json overrides (TagMemo/ResidualPyramid knobs).
+  bytes rag_params_json = 8;
+  TraceContext trace = 9;
+}
+
+message RagHits {
+  repeated RagHit hits = 1;
+  ErrorInfo error = 2;
+  // Diagnostic: number of candidates before rerank.
+  uint32 candidate_count = 3;
+}
+
+message RagHit {
+  string chunk_id = 1;
+  string content = 2;
+  float score = 3;               // post-rerank; 0..1
+  repeated string tags = 4;
+  string path = 5;               // source file relative to data dir
+  // Byte offsets within `path`; -1 if not applicable (in-memory chunk).
+  int64 offset_start = 6;
+  int64 offset_end = 7;
+  // Extra metadata (JSON) for UI hover cards.
+  bytes meta_json = 8;
+}
+
+// ---- Upsert -------------------------------------------------------------
+
+message Chunk {
+  string chunk_id = 1;           // stable id; typically sha256(path + offset)
+  string content = 2;
+  bytes embedding = 3;           // packed float32
+  repeated string tags = 4;
+  string path = 5;
+  int64 offset_start = 6;
+  int64 offset_end = 7;
+  string scope = 8;
+  int64 last_touched_at = 9;     // unix epoch ms; from meta.lastTouchedAt
+  bytes meta_json = 10;
+}
+
+message UpsertAck {
+  uint64 accepted = 1;
+  uint64 replaced = 2;
+  uint64 rejected = 3;
+  repeated string rejected_ids = 4;
+  ErrorInfo error = 5;
+}

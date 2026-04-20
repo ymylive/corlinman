@@ -1,0 +1,40 @@
+# Main corlinman compose file.
+# Usage:
+#   cd docker/compose
+#   docker compose up -d                          # main only
+#   docker compose -f docker-compose.yml -f docker-compose.qq.yml --profile qq up -d
+#   docker compose -f docker-compose.yml -f docker-compose.obs.yml --profile obs up -d
+
+services:
+  corlinman:
+    image: ghcr.io/ymylive/corlinman:dev  # placeholder; not pushed
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+      target: runtime
+    container_name: corlinman
+    restart: unless-stopped
+    ports:
+      - "6005:6005"
+    env_file:
+      - ../../.env
+    environment:
+      CORLINMAN_DATA_DIR: /data
+      CORLINMAN_UI_DIR: /app/ui-static
+    volumes:
+      # Data directory (config.toml / plugins/ / agents/ / knowledge/ / vector/ / logs/)
+      - ~/.corlinman:/data
+      # Docker socket for plugin sandbox (read-only; bollard uses it to spawn children)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:6005/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - corlinman-net
+
+networks:
+  corlinman-net:
+    driver: bridge

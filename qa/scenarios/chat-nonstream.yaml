@@ -1,0 +1,65 @@
+# QA scenario: /v1/chat/completions (non-streaming).
+#
+# Exercises the M1+M2 beachhead happy path end-to-end:
+#   curl -> Rust gateway -> gRPC -> Python reasoning loop -> mock Anthropic
+#   provider -> OpenAI-shaped JSON response.
+#
+# The runner (plan M7) reads this file, brings up the processes listed under
+# `services`, issues each request, and asserts the expected fragments appear
+# in the response.
+
+name: chat-nonstream-happy-path
+description: |
+  Non-streaming chat completion. A mocked AnthropicProvider returns the
+  canned string "hello world"; the gateway must collate that into the
+  OpenAI-compatible `choices[0].message.content` field.
+
+services:
+  - name: python-agent
+    command: uv run corlinman-python-server
+    env:
+      ANTHROPIC_API_KEY: "mock"
+      CORLINMAN_PY_ADDR: "127.0.0.1:50551"
+      CORLINMAN_TEST_MOCK_PROVIDER: "hello world"
+    readiness:
+      type: tcp
+      host: 127.0.0.1
+      port: 50551
+      timeout_s: 10
+
+  - name: rust-gateway
+    command: cargo run -q -p corlinman-gateway --bin corlinman-gateway
+    env:
+      PORT: "6005"
+      CORLINMAN_PY_ADDR: "127.0.0.1:50551"
+    readiness:
+      type: http
+      url: http://127.0.0.1:6005/health
+      expect_status: 200
+      timeout_s: 30
+
+steps:
+  - name: post-chat-completions
+    request:
+      method: POST
+      url: http://127.0.0.1:6005/v1/chat/completions
+      headers:
+        Content-Type: application/json
+      body:
+        model: claude-sonnet-4-5
+        stream: false
+        messages:
+          - role: user
+            content: say hello
+    expect:
+      status: 200
+      content_type_contains: application/json
+      json_fragments:
+        - path: $.object
+          equals: chat.completion
+        - path: $.choices[0].message.role
+          equals: assistant
+        - path: $.choices[0].message.content
+          contains: hello world
+        - path: $.choices[0].finish_reason
+          matches_regex: "^(stop|length|tool_call)$"

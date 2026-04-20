@@ -1,0 +1,72 @@
+// llm.proto — internal LLM provider interface.
+//
+// Python `corlinman_providers` registers one LLMProvider server instance per
+// provider family (anthropic/openai/google/china/…) and the agent dispatches
+// via ModelRedirect.json. Rust-side callers are rare; this is primarily
+// provider <-> agent inside the Python process tree.
+
+syntax = "proto3";
+
+package corlinman.v1;
+
+import "corlinman/v1/common.proto";
+
+option optimize_for = SPEED;
+
+service LLMProvider {
+  // Chat: bidirectional for request cancellation + multi-turn provider-side tool loops.
+  rpc Chat(stream ChatRequest) returns (stream ChatChunk);
+  // Complete: non-streaming completion (legacy /v1/completions endpoint support).
+  rpc Complete(CompleteRequest) returns (CompleteResponse);
+}
+
+// ---- Chat ---------------------------------------------------------------
+
+message ChatRequest {
+  string model = 1;
+  repeated Message messages = 2;
+  float temperature = 3;
+  uint32 max_tokens = 4;
+  float top_p = 5;
+  repeated string stop = 6;
+  bool stream = 7;
+  // JSON-encoded tools spec (OpenAI function-calling shape).
+  bytes tools_json = 8;
+  // Provider-specific overrides (headers, base_url); JSON-encoded.
+  bytes provider_config_json = 9;
+  TraceContext trace = 10;
+}
+
+message ChatChunk {
+  oneof kind {
+    string token = 1;            // text delta
+    Usage usage = 2;             // emitted before Done on supporting providers
+    FinishReason finish = 3;
+    ErrorInfo error = 4;
+  }
+}
+
+enum FinishReason {
+  FINISH_REASON_UNSPECIFIED = 0;
+  FINISH_STOP = 1;
+  FINISH_LENGTH = 2;
+  FINISH_TOOL_CALL = 3;
+  FINISH_CONTENT_FILTER = 4;
+  FINISH_ERROR = 5;
+}
+
+// ---- Complete -----------------------------------------------------------
+
+message CompleteRequest {
+  string model = 1;
+  string prompt = 2;
+  float temperature = 3;
+  uint32 max_tokens = 4;
+  TraceContext trace = 5;
+}
+
+message CompleteResponse {
+  string text = 1;
+  Usage usage = 2;
+  FinishReason finish = 3;
+}

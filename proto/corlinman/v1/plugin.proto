@@ -1,0 +1,68 @@
+// plugin.proto — plugin bridge (Rust-hosted, Python-consumed).
+//
+// When the Python agent receives an OpenAI-standard tool_call, it calls
+// PluginBridge.Execute; the Rust gateway owns the plugin registry, sandboxing,
+// approval gate, and async task callback plumbing.
+
+syntax = "proto3";
+
+package corlinman.v1;
+
+import "corlinman/v1/common.proto";
+
+option optimize_for = SPEED;
+
+service PluginBridge {
+  // Execute: server-streams progress + (optional) awaiting_approval + final result.
+  rpc Execute(PluginToolCall) returns (stream ToolEvent);
+}
+
+// Renamed from `ToolCall` to avoid collision with agent.proto's `ToolCall`
+// (both previously lived in `corlinman.v1`). The plugin bridge variant carries
+// approval bookkeeping that does not apply to the agent-side variant.
+message PluginToolCall {
+  string call_id = 1;
+  string plugin = 2;             // manifest.name
+  string tool = 3;               // for multi-tool plugins; empty = default
+  bytes args_json = 4;           // raw; zero-copy pass-through
+  ChannelBinding binding = 5;
+  string session_key = 6;        // denormalized; matches binding.session_key if present
+  // Whether the caller has already consulted approval config.
+  bool approval_preconsented = 7;
+  TraceContext trace = 8;
+}
+
+message ToolEvent {
+  oneof kind {
+    Progress progress = 1;                           // textual status; optional
+    PluginToolResult result = 2;                     // terminal success
+    ErrorInfo error = 3;                             // terminal failure
+    PluginAwaitingApproval awaiting_approval = 4;    // mid-stream pause
+  }
+}
+
+message Progress {
+  string message = 1;
+  // 0.0..1.0; negative = indeterminate.
+  float fraction = 2;
+}
+
+// Renamed from `ToolResult` to avoid collision with agent.proto's `ToolResult`.
+message PluginToolResult {
+  string call_id = 1;
+  bytes result_json = 2;         // raw JSON payload; passes through unchanged
+  uint64 duration_ms = 3;
+}
+
+// Renamed from `AwaitingApproval` to avoid collision with agent.proto's
+// `AwaitingApproval`. The plugin variant carries a denormalized `session_key`.
+message PluginAwaitingApproval {
+  string call_id = 1;
+  string plugin = 2;
+  string tool = 3;
+  // Short rendering of args for approval UI (JSON).
+  bytes args_preview_json = 4;
+  string session_key = 5;
+  // Rule hit that caused the pause; e.g. "plugin:FileOperator tool:write mode:prompt".
+  string reason = 6;
+}

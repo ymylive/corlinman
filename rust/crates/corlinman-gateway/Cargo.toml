@@ -1,0 +1,46 @@
+[package]
+name = "corlinman-gateway"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "axum HTTP + WebSocket gateway; owns /v1/chat/completions, /logstream, /admin."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "corlinman-gateway"
+path = "src/main.rs"
+
+[dependencies]
+corlinman-core = { path = "../corlinman-core" }
+corlinman-proto = { path = "../corlinman-proto" }
+corlinman-agent-client = { path = "../corlinman-agent-client" }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tonic = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+arc-swap = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

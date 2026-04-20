@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = ["rust/crates/*"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+version = "0.1.0"
+license = "MIT"
+authors = ["corlinman contributors"]
+repository = "https://github.com/ymylive/corlinman"
+
+[workspace.dependencies]
+tokio = { version = "1.40", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip"] }
+tonic = "0.12"
+tonic-build = "0.12"
+prost = "0.13"
+prost-build = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+schemars = "0.8"
+validator = { version = "0.18", features = ["derive"] }
+regex = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+thiserror = "1"
+anyhow = "1"
+async-trait = "0.1"
+futures = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "macros", "parsing"] }
+arc-swap = "1"
+notify = "6"
+walkdir = "2"
+tabled = "0.15"
+clap = { version = "4.5", features = ["derive", "env"] }
+backoff = { version = "0.4", features = ["tokio"] }
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "macros", "time"] }
+usearch = "2"
+bollard = "0.17"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+bytes = "1"
+tokio-tungstenite = "0.23"
+futures-util = "0.3"
+http = "1"
+sha2 = "0.10"
+toml = "0.8"
+argon2 = "0.5"
+dirs = "5"
+dialoguer = "0.11"
+serial_test = "3"
+
+# For the core error/cancel/backoff crate
+once_cell = "1"
+
+# Internal crate short aliases (kept for documentation; real deps declared per-crate)
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 0
+debug = true

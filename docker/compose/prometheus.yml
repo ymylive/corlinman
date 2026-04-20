@@ -1,0 +1,15 @@
+# Minimal Prometheus config for corlinman dev/obs profile.
+# Production tuning (scrape budget, remote_write) lives in docs/runbook.md later.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: corlinman
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["corlinman:6005"]
+        labels:
+          service: corlinman
+          component: gateway

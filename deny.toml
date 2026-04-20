@@ -1,0 +1,45 @@
+# cargo-deny policy for the corlinman workspace.
+#
+# Run locally:  cargo install cargo-deny --locked && cargo deny check
+# CI invocation is `continue-on-error: true` for now — this is a safety net,
+# not a hard gate, while the crate graph is still churning (see M7 plan).
+
+[graph]
+# Only check the host target; cross-compile noise is not useful for policy.
+all-features = false
+no-default-features = false
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "Zlib",
+    "MPL-2.0",
+]
+
+[bans]
+# Multiple versions of the same crate are usually a transitive-dep artefact
+# rather than a policy violation; warn so we can track regressions.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

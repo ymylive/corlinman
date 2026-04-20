@@ -1,0 +1,37 @@
+[package]
+name = "corlinman-plugins"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Plugin manifest discovery, multi-language runtimes, Docker sandbox, approval gate."
+
+[dependencies]
+corlinman-core = { path = "../corlinman-core" }
+corlinman-proto = { path = "../corlinman-proto" }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+notify = { workspace = true }
+walkdir = { workspace = true }
+schemars = { workspace = true }
+validator = { workspace = true }
+toml = { workspace = true }
+bollard = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+regex = { workspace = true }

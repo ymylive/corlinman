@@ -1,0 +1,87 @@
+[project]
+name = "corlinman"
+version = "0.1.0"
+description = "Python AI plane for corlinman (LLM providers, agent reasoning, embedding)"
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "corlinman contributors" }]
+
+# Meta-package: depends on every workspace member so `uv sync` installs them
+# all into the virtualenv for development. Individual publishing happens
+# per-package.
+dependencies = [
+    "corlinman-grpc",
+    "corlinman-providers",
+    "corlinman-embedding",
+    "corlinman-agent",
+    "corlinman-server",
+]
+
+[tool.uv.sources]
+corlinman-grpc = { workspace = true }
+corlinman-providers = { workspace = true }
+corlinman-embedding = { workspace = true }
+corlinman-agent = { workspace = true }
+corlinman-server = { workspace = true }
+
+[tool.uv.workspace]
+members = ["python/packages/*"]
+
+[tool.uv]
+managed = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.0",
+    "respx>=0.21",
+    "syrupy>=4.1",
+    "ruff>=0.8",
+    "mypy>=1.11",
+    # Pin exact versions so `scripts/gen-proto.sh` produces byte-identical stubs
+    # across dev machines and CI. Drift in either of these breaks the
+    # `proto-sync` CI job. Bump together and regenerate stubs in the same PR.
+    "grpcio-tools==1.80.0",
+    "protobuf==6.33.6",
+    "import-linter>=2.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Generated protobuf stubs are never linted; they are regenerated from .proto
+# by `scripts/gen-proto.sh` and formatted with `ruff format`, but the shape
+# of grpcio-tools' output trips many style rules.
+extend-exclude = ["**/_generated/**"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+# Start lenient so CI can go green while the Python plane is still landing;
+# individual packages can opt into strict mode via their own mypy overrides.
+# TODO(M7): flip back to `strict = true` once all packages pass.
+strict = false
+ignore_missing_imports = true
+explicit_package_bases = true
+warn_return_any = true
+warn_unused_configs = true
+exclude = [
+    "^python/packages/[^/]+/tests/",
+    "_generated/",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Use importlib so duplicate module names (e.g. ``tests/``) across uv workspace
+# members don't collide in ``sys.modules``.
+addopts = "--import-mode=importlib"
+markers = [
+    "live_llm: tests that hit real LLM APIs (cost money)",
+    "live_transport: tests that need real channel endpoints",
+]
