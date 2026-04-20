@@ -111,6 +111,11 @@ async fn main() {
                 if let Some(handle) = maybe_spawn_qq_channel(&cfg, backend.clone(), root.clone()) {
                     channel_handles.push(handle);
                 }
+                if let Some(handle) =
+                    maybe_spawn_telegram_channel(&cfg, backend.clone(), root.clone())
+                {
+                    channel_handles.push(handle);
+                }
             }
             Ok(None) => {
                 tracing::debug!("no CORLINMAN_CONFIG / config.toml found; channels disabled");
@@ -195,11 +200,38 @@ fn maybe_spawn_qq_channel(
         config: qq_cfg.clone(),
         model,
         chat_service: svc,
+        rate_limit_hook: None,
     };
     let cancel = root.child_token();
     Some(tokio::spawn(async move {
         if let Err(err) = corlinman_channels::service::run_qq_channel(params, cancel).await {
             tracing::error!(error = %err, "qq channel task exited with error");
+        }
+    }))
+}
+
+/// If `[channels.telegram].enabled` is true, spawn the TG long-poll loop.
+/// Otherwise returns `None`.
+fn maybe_spawn_telegram_channel(
+    cfg: &Config,
+    backend: Arc<dyn ChatBackend>,
+    root: CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let tg_cfg = cfg.channels.telegram.as_ref()?;
+    if !tg_cfg.enabled {
+        return None;
+    }
+    let model = cfg.models.default.clone();
+    let svc: Arc<dyn ChatServiceTrait> = Arc::new(GatewayChatService::new(backend));
+    let params = corlinman_channels::telegram::TelegramParams {
+        config: tg_cfg.clone(),
+        chat_service: svc,
+        model,
+    };
+    let cancel = root.child_token();
+    Some(tokio::spawn(async move {
+        if let Err(err) = corlinman_channels::telegram::run_telegram_channel(params, cancel).await {
+            tracing::error!(error = %err, "telegram channel task exited with error");
         }
     }))
 }

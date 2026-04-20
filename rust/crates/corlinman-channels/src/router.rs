@@ -1,9 +1,13 @@
-//! Channel dispatcher: `MessageEvent` → keyword filter → `ChatRequest`.
+//! Channel dispatcher: `MessageEvent` → keyword filter → rate-limit →
+//! `ChatRequest`.
 //!
 //! The router is the first point inside corlinman that has an opinion about
 //! *whether* to respond. It reads:
 //! - `QQ_GROUP_KEYWORDS` (JSON map) to decide which group messages qualify,
 //! - the bot's `self_id` list so `@mention` triggers bypass keyword filtering,
+//! - optional per-group / per-sender token buckets
+//!   (see [`crate::rate_limit::TokenBucket`]) so runaway keyword hits don't
+//!   blast the backend.
 //!
 //! and emits a transport-agnostic [`ChatRequest`] keyed by `session_key`.
 //!
@@ -12,11 +16,22 @@
 //! up the whole stack.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use corlinman_core::channel_binding::ChannelBinding;
 use corlinman_core::types::ChatRequest;
 
 use crate::qq::message::{is_mentioned, segments_to_text, MessageEvent, MessageType};
+use crate::rate_limit::TokenBucket;
+
+/// Callback invoked by the router whenever a message is silently dropped by
+/// a rate-limit check. The gateway wires this to a Prometheus CounterVec
+/// (`corlinman_channels_rate_limited_total{channel, reason}`); tests pass a
+/// closure that tallies calls in an `Arc<AtomicUsize>`.
+///
+/// The callback MUST be cheap — it runs on the hot path inline with
+/// `dispatch`. Two positional labels: `(channel, reason)`.
+pub type RateLimitHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 /// JSON schema for `QQ_GROUP_KEYWORDS`:
 ///
@@ -44,7 +59,7 @@ pub fn parse_group_keywords(raw: &str) -> Result<GroupKeywords, serde_json::Erro
 /// Router state. Cheap to clone (keeps an `Arc` internally once we wire a real
 /// config store). For now it just owns the keyword map so tests can construct
 /// one in-process.
-#[derive(Debug, Default, Clone)]
+#[derive(Clone, Default)]
 pub struct ChannelRouter {
     /// Per-group keyword filter.
     pub group_keywords: GroupKeywords,
@@ -52,6 +67,28 @@ pub struct ChannelRouter {
     /// OneBot this is the bot's own `self_id`, but we leave it as a `Vec` in
     /// case multiple bot accounts share one gateway.
     pub self_ids: Vec<i64>,
+    /// Optional per-group token bucket. `None` ⇒ dimension disabled.
+    /// Keyed by `"<channel>:<thread>"` (e.g. `"qq:123456"`).
+    pub group_limiter: Option<Arc<TokenBucket>>,
+    /// Optional per-sender token bucket (scoped by `(channel, thread, sender)`).
+    /// Keyed by `"<channel>:<thread>:<sender>"`.
+    pub sender_limiter: Option<Arc<TokenBucket>>,
+    /// Observation hook fired on every silent drop due to a rate-limit check.
+    /// Wired to Prometheus in production; `None` in tests that don't assert
+    /// on it.
+    pub rate_limit_hook: Option<RateLimitHook>,
+}
+
+impl std::fmt::Debug for ChannelRouter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelRouter")
+            .field("group_keywords", &self.group_keywords)
+            .field("self_ids", &self.self_ids)
+            .field("group_limiter", &self.group_limiter.is_some())
+            .field("sender_limiter", &self.sender_limiter.is_some())
+            .field("rate_limit_hook", &self.rate_limit_hook.is_some())
+            .finish()
+    }
 }
 
 impl ChannelRouter {
@@ -59,15 +96,38 @@ impl ChannelRouter {
         Self {
             group_keywords,
             self_ids,
+            group_limiter: None,
+            sender_limiter: None,
+            rate_limit_hook: None,
         }
+    }
+
+    /// Builder: attach per-group and per-sender token buckets. Either
+    /// argument may be `None` to leave that dimension disabled.
+    pub fn with_rate_limits(
+        mut self,
+        group: Option<Arc<TokenBucket>>,
+        sender: Option<Arc<TokenBucket>>,
+    ) -> Self {
+        self.group_limiter = group;
+        self.sender_limiter = sender;
+        self
+    }
+
+    /// Builder: attach a drop-observation hook (typically a Prometheus
+    /// counter increment).
+    pub fn with_rate_limit_hook(mut self, hook: RateLimitHook) -> Self {
+        self.rate_limit_hook = Some(hook);
+        self
     }
 
     /// Apply the keyword/mention gate and return a [`ChatRequest`] if the
     /// message should be forwarded to the chat pipeline.
     ///
     /// Returns `None` when the message is filtered out (heartbeat, wrong
-    /// message_type, keyword mismatch, empty body, ...). All drops are silent
-    /// — callers log at `debug` if they want visibility.
+    /// message_type, keyword mismatch, empty body, rate-limited, ...). All
+    /// drops are silent — callers log at `debug` if they want visibility, and
+    /// rate-limit drops additionally fire [`Self::rate_limit_hook`].
     pub fn dispatch(&self, event: &MessageEvent) -> Option<ChatRequest> {
         let text = flatten_and_trim(&event.message, &event.raw_message);
 
@@ -93,11 +153,34 @@ impl ChannelRouter {
             return None;
         }
 
+        // Rate-limit gates run AFTER keyword/mention so that dropped messages
+        // never consume tokens. Per-group first (cheaper, smaller cardinality).
+        if let Some(limiter) = &self.group_limiter {
+            let key = format!("{}:{}", binding.channel, binding.thread);
+            if !limiter.check(&key) {
+                self.fire_hook(&binding.channel, "group");
+                return None;
+            }
+        }
+        if let Some(limiter) = &self.sender_limiter {
+            let key = format!("{}:{}:{}", binding.channel, binding.thread, binding.sender);
+            if !limiter.check(&key) {
+                self.fire_hook(&binding.channel, "sender");
+                return None;
+            }
+        }
+
         let mut req = ChatRequest::new(binding, text);
         req.message_id = Some(event.message_id.to_string());
         req.timestamp = event.time;
         req.mentioned = mentioned;
         Some(req)
+    }
+
+    fn fire_hook(&self, channel: &str, reason: &str) {
+        if let Some(h) = &self.rate_limit_hook {
+            h(channel, reason);
+        }
     }
 
     fn keyword_match(&self, group_id: i64, text: &str) -> bool {
@@ -228,5 +311,67 @@ mod tests {
         let r1 = router.dispatch(&ev1).unwrap();
         let r2 = router.dispatch(&ev2).unwrap();
         assert_eq!(r1.session_key, r2.session_key);
+    }
+
+    // ------------------------------------------------------------------
+    // Rate-limit integration
+    // ------------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn count_hook() -> (RateLimitHook, Arc<AtomicUsize>) {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        let hook: RateLimitHook = Arc::new(move |_ch: &str, _reason: &str| {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+        (hook, counter)
+    }
+
+    #[test]
+    fn dispatch_drops_when_group_over_limit() {
+        let group_bucket = Arc::new(TokenBucket::per_minute(1));
+        let (hook, count) = count_hook();
+        let router = ChannelRouter::new(GroupKeywords::new(), vec![100])
+            .with_rate_limits(Some(group_bucket), None)
+            .with_rate_limit_hook(hook);
+
+        let ev1 = group_event("msg1", vec![MessageSegment::text("msg1")], 555);
+        let ev2 = group_event("msg2", vec![MessageSegment::text("msg2")], 555);
+        assert!(router.dispatch(&ev1).is_some(), "first msg passes");
+        assert!(router.dispatch(&ev2).is_none(), "second msg dropped");
+        assert_eq!(count.load(Ordering::Relaxed), 1, "hook fired once");
+    }
+
+    #[test]
+    fn dispatch_drops_when_sender_over_limit() {
+        // Per-group high, per-sender tight — second msg from same sender drops.
+        let sender_bucket = Arc::new(TokenBucket::per_minute(1));
+        let (hook, count) = count_hook();
+        let router = ChannelRouter::new(GroupKeywords::new(), vec![100])
+            .with_rate_limits(None, Some(sender_bucket))
+            .with_rate_limit_hook(hook);
+
+        let ev1 = group_event("hi", vec![MessageSegment::text("hi")], 777);
+        let ev2 = group_event("hi again", vec![MessageSegment::text("hi again")], 777);
+        assert!(router.dispatch(&ev1).is_some());
+        assert!(router.dispatch(&ev2).is_none());
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn rate_limit_drops_do_not_cross_groups() {
+        // Different groups → different keys → same-bucket exhaustion on one
+        // group doesn't suppress the other.
+        let group_bucket = Arc::new(TokenBucket::per_minute(1));
+        let router = ChannelRouter::new(GroupKeywords::new(), vec![100])
+            .with_rate_limits(Some(group_bucket), None);
+
+        let a1 = group_event("msg", vec![MessageSegment::text("msg")], 1);
+        let a2 = group_event("msg", vec![MessageSegment::text("msg")], 1);
+        let b1 = group_event("msg", vec![MessageSegment::text("msg")], 2);
+        assert!(router.dispatch(&a1).is_some());
+        assert!(router.dispatch(&a2).is_none());
+        assert!(router.dispatch(&b1).is_some(), "group 2 has its own bucket");
     }
 }

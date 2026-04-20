@@ -26,6 +26,9 @@ from typing import Any
 import grpc
 import structlog
 from corlinman_agent.reasoning_loop import (
+    Attachment as AgentAttachment,
+)
+from corlinman_agent.reasoning_loop import (
     ChatStart as AgentChatStart,
 )
 from corlinman_agent.reasoning_loop import (
@@ -220,6 +223,7 @@ def _to_agent_start(pb_start: agent_pb2.ChatStart) -> AgentChatStart:
         {"role": _role_name(m.role), "content": m.content}
         for m in pb_start.messages
     ]
+    attachments = [_to_agent_attachment(a) for a in pb_start.attachments]
     return AgentChatStart(
         model=pb_start.model,
         messages=messages,
@@ -227,7 +231,41 @@ def _to_agent_start(pb_start: agent_pb2.ChatStart) -> AgentChatStart:
         session_key=pb_start.session_key,
         temperature=pb_start.temperature or None,
         max_tokens=pb_start.max_tokens or None,
+        attachments=attachments,
     )
+
+
+def _to_agent_attachment(pb: agent_pb2.Attachment) -> AgentAttachment:
+    """Convert a protobuf ``Attachment`` to the agent dataclass.
+
+    Empty strings / empty bytes on the proto side (the default for
+    unset fields) map to ``None`` so providers can distinguish "unset"
+    from "explicitly empty".
+    """
+    kind = _attachment_kind_name(pb.kind)
+    return AgentAttachment(
+        kind=kind,
+        url=pb.url or None,
+        bytes_=bytes(pb.bytes) if pb.bytes else None,
+        mime=pb.mime or None,
+        file_name=pb.file_name or None,
+    )
+
+
+def _attachment_kind_name(kind: Any) -> str:
+    """Map ``AttachmentKind`` enum → lower-case string used in the dataclass.
+
+    ``kind`` is the protobuf ``AttachmentKind`` wrapper (behaves like an
+    int); typed as ``Any`` because the generated stub exposes the enum
+    values as a custom wrapper class that mypy can't index against.
+    """
+    if kind == agent_pb2.ATTACHMENT_KIND_IMAGE:
+        return "image"
+    if kind == agent_pb2.ATTACHMENT_KIND_AUDIO:
+        return "audio"
+    if kind == agent_pb2.ATTACHMENT_KIND_VIDEO:
+        return "video"
+    return "file"
 
 
 def _role_name(role: common_pb2.Role) -> str:

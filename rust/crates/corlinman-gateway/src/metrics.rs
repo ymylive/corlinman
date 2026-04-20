@@ -18,6 +18,7 @@
 //! | `corlinman_plugin_execute_duration_seconds`| HistogramV| `plugin`            |
 //! | `corlinman_backoff_retries_total`          | CounterV  | `reason`            |
 //! | `corlinman_agent_grpc_inflight`            | IntGauge  | —                   |
+//! | `corlinman_channels_rate_limited_total`    | CounterV  | `channel`, `reason` |
 //! | `corlinman_vector_query_duration_seconds`  | HistogramV| `stage`             |
 //!
 //! # Wiring
@@ -132,6 +133,27 @@ pub static AGENT_GRPC_INFLIGHT: Lazy<IntGauge> = Lazy::new(|| {
     g
 });
 
+/// `corlinman_channels_rate_limited_total{channel, reason}`.
+///
+/// Bumped by [`corlinman_channels::router::ChannelRouter`] every time a
+/// message is silently dropped by a token-bucket check. `reason ∈
+/// {"group", "sender"}`; `channel` mirrors `ChannelBinding.channel`
+/// (e.g. `"qq"`, later `"telegram"`).
+pub static CHANNELS_RATE_LIMITED: Lazy<CounterVec> = Lazy::new(|| {
+    let cv = CounterVec::new(
+        Opts::new(
+            "corlinman_channels_rate_limited_total",
+            "Inbound channel messages silently dropped by a rate-limit check",
+        ),
+        &["channel", "reason"],
+    )
+    .expect("valid metric");
+    REGISTRY
+        .register(Box::new(cv.clone()))
+        .expect("register channels_rate_limited");
+    cv
+});
+
 /// `corlinman_vector_query_duration_seconds{stage}` — `stage ∈ {hnsw, bm25, fuse}`.
 pub static VECTOR_QUERY_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
     let opts = HistogramOpts::new(
@@ -173,6 +195,7 @@ pub fn init() {
     Lazy::force(&PLUGIN_EXECUTE_DURATION);
     Lazy::force(&BACKOFF_RETRIES);
     Lazy::force(&AGENT_GRPC_INFLIGHT);
+    Lazy::force(&CHANNELS_RATE_LIMITED);
     Lazy::force(&VECTOR_QUERY_DURATION);
 
     // Zero-valued sentinels. `inc_by(0.0)` on a counter realises the series
@@ -184,6 +207,9 @@ pub fn init() {
         .with_label_values(&["startup", "ok"])
         .inc_by(0.0);
     BACKOFF_RETRIES.with_label_values(&["startup"]).inc_by(0.0);
+    CHANNELS_RATE_LIMITED
+        .with_label_values(&["startup", "startup"])
+        .inc_by(0.0);
     // Histograms don't have a cheap "no-op"; a single 0-second observation
     // is negligible and confined to a `startup` label so it's easy to
     // ignore in dashboards.
@@ -232,6 +258,9 @@ mod tests {
             .observe(0.12);
         BACKOFF_RETRIES.with_label_values(&["rate_limit"]).inc();
         AGENT_GRPC_INFLIGHT.inc();
+        CHANNELS_RATE_LIMITED
+            .with_label_values(&["qq", "group"])
+            .inc();
         VECTOR_QUERY_DURATION
             .with_label_values(&["hnsw"])
             .observe(0.008);
@@ -244,6 +273,7 @@ mod tests {
             "corlinman_plugin_execute_duration_seconds",
             "corlinman_backoff_retries_total",
             "corlinman_agent_grpc_inflight",
+            "corlinman_channels_rate_limited_total",
             "corlinman_vector_query_duration_seconds",
         ] {
             assert!(body.contains(needle), "missing {needle} in:\n{body}");

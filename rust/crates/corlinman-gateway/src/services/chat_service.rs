@@ -17,11 +17,14 @@ use async_trait::async_trait;
 use corlinman_agent_client::tool_callback::{PlaceholderExecutor, ToolExecutor};
 use corlinman_core::FailoverReason;
 use corlinman_gateway_api::{
+    Attachment as ApiAttachment, AttachmentKind as ApiAttachmentKind, ChannelBinding,
     ChatEventStream, ChatService as ChatServiceTrait, InternalChatError, InternalChatEvent,
     InternalChatRequest, Role as ApiRole, Usage as ApiUsage,
 };
 use corlinman_proto::v1::{
-    client_frame, server_frame, ChatStart, ClientFrame, Message as PbMessage, Role as PbRole,
+    client_frame, server_frame, Attachment as PbAttachment, AttachmentKind as PbAttachmentKind,
+    ChannelBinding as PbChannelBinding, ChatStart, ClientFrame, Message as PbMessage,
+    Role as PbRole,
 };
 use futures::{stream, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -216,18 +219,53 @@ fn build_chat_start(req: &InternalChatRequest) -> ChatStart {
             content_json: Default::default(),
         })
         .collect();
+    let attachments = req.attachments.iter().map(attachment_to_proto).collect();
+    let binding = req.binding.as_ref().map(binding_to_proto);
     ChatStart {
         model: req.model.clone(),
         messages,
         tools_json: Vec::new(),
         session_key: req.session_key.clone(),
-        binding: None,
+        binding,
         placeholders: Default::default(),
         temperature: req.temperature.unwrap_or(0.0),
         max_tokens: req.max_tokens.unwrap_or(0),
         stream: req.stream,
         trace: None,
         provider_config_json: Vec::new(),
+        attachments,
+    }
+}
+
+/// Convert the in-process [`ChannelBinding`] to its protobuf twin. The
+/// `session_key` field on the proto side is the pre-derived key so the
+/// Python agent doesn't need to re-hash.
+fn binding_to_proto(b: &ChannelBinding) -> PbChannelBinding {
+    PbChannelBinding {
+        channel: b.channel.clone(),
+        account: b.account.clone(),
+        thread: b.thread.clone(),
+        sender: b.sender.clone(),
+        session_key: b.session_key(),
+    }
+}
+
+/// Convert the in-process [`ApiAttachment`] to its protobuf twin. The enum
+/// mapping is explicit — silently defaulting to `UNSPECIFIED` would drop
+/// multimodal inputs without a trace.
+fn attachment_to_proto(a: &ApiAttachment) -> PbAttachment {
+    let kind = match a.kind {
+        ApiAttachmentKind::Image => PbAttachmentKind::Image,
+        ApiAttachmentKind::Audio => PbAttachmentKind::Audio,
+        ApiAttachmentKind::Video => PbAttachmentKind::Video,
+        ApiAttachmentKind::File => PbAttachmentKind::File,
+    };
+    PbAttachment {
+        kind: kind as i32,
+        url: a.url.clone().unwrap_or_default(),
+        bytes: a.bytes.clone().unwrap_or_default(),
+        mime: a.mime.clone().unwrap_or_default(),
+        file_name: a.file_name.clone().unwrap_or_default(),
     }
 }
 
@@ -312,6 +350,8 @@ mod tests {
             stream: true,
             max_tokens: None,
             temperature: None,
+            attachments: Vec::new(),
+            binding: None,
         }
     }
 
@@ -415,6 +455,31 @@ mod tests {
             other => panic!("expected Error, got {other:?}"),
         }
         assert!(s.next().await.is_none());
+    }
+
+    #[test]
+    fn binding_propagates_to_chat_start() {
+        // When the caller supplies a ChannelBinding, build_chat_start must
+        // copy every field verbatim and include the derived session_key.
+        let mut req = sample_req();
+        let b = ChannelBinding::qq_group(100, 200, 300);
+        let expected_key = b.session_key();
+        req.binding = Some(b);
+
+        let start = build_chat_start(&req);
+        let got = start.binding.expect("binding filled through");
+        assert_eq!(got.channel, "qq");
+        assert_eq!(got.account, "100");
+        assert_eq!(got.thread, "200");
+        assert_eq!(got.sender, "300");
+        assert_eq!(got.session_key, expected_key);
+    }
+
+    #[test]
+    fn absent_binding_stays_none() {
+        let req = sample_req(); // binding: None
+        let start = build_chat_start(&req);
+        assert!(start.binding.is_none(), "None in → None out");
     }
 
     #[tokio::test]

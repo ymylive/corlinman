@@ -162,23 +162,121 @@ class AnthropicProvider:
         return model.startswith("claude-")
 
 
-def _split_system(messages: Sequence[Any]) -> tuple[str | None, list[dict[str, str]]]:
+def _split_system(messages: Sequence[Any]) -> tuple[str | None, list[dict[str, Any]]]:
     """Split out ``role="system"`` messages — Anthropic takes ``system`` as a
-    top-level parameter rather than an entry in ``messages``."""
+    top-level parameter rather than an entry in ``messages``.
+
+    ``content`` may be either a string (text-only turn, pre-multimodal
+    callers) or a list of OpenAI-shaped content parts (``{"type": "text",
+    ...}`` / ``{"type": "image_url", ...}`` — see
+    :func:`corlinman_agent.reasoning_loop._inject_attachments`). For
+    multi-part content we translate to Anthropic's vendor blocks
+    in-place: ``image_url`` → ``{"type": "image", "source": {...}}``.
+    Non-text system messages carrying list content collapse into
+    concatenated text (Anthropic's system parameter is a string).
+    """
     system_parts: list[str] = []
-    chat: list[dict[str, str]] = []
+    chat: list[dict[str, Any]] = []
     for m in messages:
         role = _get(m, "role")
-        content = _get(m, "content") or ""
+        content = _get(m, "content")
         if role == "system":
-            if content:
-                system_parts.append(content)
+            text = _content_to_text(content)
+            if text:
+                system_parts.append(text)
         else:
             # Anthropic requires role in {"user", "assistant"}; collapse "tool" for now.
             anth_role = "user" if role in ("user", "tool") else "assistant"
-            chat.append({"role": anth_role, "content": content})
+            if isinstance(content, list):
+                blocks = _parts_to_anthropic_blocks(content)
+                chat.append({"role": anth_role, "content": blocks})
+            else:
+                chat.append({"role": anth_role, "content": content or ""})
     system = "\n\n".join(system_parts) if system_parts else None
     return system, chat
+
+
+def _content_to_text(content: Any) -> str:
+    """Flatten content (str or list of parts) to a plain string."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                text = part.get("text") or ""
+                if text:
+                    out.append(text)
+        return "".join(out)
+    return str(content)
+
+
+def _parts_to_anthropic_blocks(parts: Sequence[Any]) -> list[dict[str, Any]]:
+    """Translate OpenAI-shape content parts to Anthropic content blocks.
+
+    Supported:
+    * ``{"type": "text", "text": "..."}`` → ``{"type": "text", "text": "..."}``
+    * ``{"type": "image_url", "image_url": {"url": "..."}}`` →
+      ``{"type": "image", "source": {"type": "url", "url": "..."}}``
+      or ``{"type": "image", "source": {"type": "base64", ...}}`` when
+      the url is a ``data:`` URI.
+
+    Unsupported (audio / generic file): logged at warn and dropped.
+    Anthropic's current content-block vocabulary is text + image only
+    (file API is beta and not wired here yet — TODO). A downstream
+    ``TODO: multimodal file support`` covers the gap.
+    """
+    blocks: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype == "text":
+            text = part.get("text") or ""
+            blocks.append({"type": "text", "text": text})
+        elif ptype == "image_url":
+            url = (part.get("image_url") or {}).get("url") or ""
+            block = _image_block_from_url(url)
+            if block is not None:
+                blocks.append(block)
+        elif ptype == "file":
+            # Audio / video / generic files — not yet representable as
+            # an Anthropic content block. Skip with a warn so the chat
+            # proceeds with text only instead of failing the request.
+            logger.warning(
+                "anthropic.unsupported_attachment",
+                kind=(part.get("file") or {}).get("kind"),
+            )
+        # Unknown part types quietly skipped — forward compat.
+    if not blocks:
+        # Anthropic rejects empty content arrays; fall back to an empty
+        # text block so the turn is at least syntactically valid.
+        blocks = [{"type": "text", "text": ""}]
+    return blocks
+
+
+def _image_block_from_url(url: str) -> dict[str, Any] | None:
+    """Build an Anthropic ``image`` content block from a URL.
+
+    Accepts both ``https://...`` (url source, Claude 4+) and
+    ``data:<mime>;base64,...`` URIs (base64 source — works on earlier
+    Claude versions too). Returns ``None`` for an empty / malformed url.
+    """
+    if not url:
+        return None
+    if url.startswith("data:") and ";base64," in url:
+        header, b64 = url.split(",", 1)
+        # header is "data:<mime>;base64"
+        mime = header[5:].split(";", 1)[0] or "image/jpeg"
+        return {
+            "type": "image",
+            "source": {"type": "base64", "media_type": mime, "data": b64},
+        }
+    return {"type": "image", "source": {"type": "url", "url": url}}
 
 
 def _get(obj: Any, key: str) -> Any:

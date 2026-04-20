@@ -126,6 +126,7 @@ mod tests {
             access_token: None,
             self_ids: vec![],
             group_keywords: HashMap::new(),
+            rate_limit: Default::default(),
         });
         let ctx = ctx_with(Some(cfg));
         let res = ChannelsCheck::new().run(&ctx).await;
@@ -141,6 +142,7 @@ mod tests {
             access_token: None,
             self_ids: vec![1],
             group_keywords: HashMap::new(),
+            rate_limit: Default::default(),
         });
         let ctx = ctx_with(Some(cfg));
         let res = ChannelsCheck::new().run(&ctx).await;
@@ -157,6 +159,7 @@ mod tests {
             access_token: None,
             self_ids: vec![1],
             group_keywords: HashMap::new(),
+            rate_limit: Default::default(),
         });
         let ctx = ctx_with(Some(cfg));
         let res = ChannelsCheck::new().run(&ctx).await;

@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Inbound channel adapters: QQ/OneBot v11 WebSocket, log stream, (telegram reserved)."
+description = "Inbound channel adapters: QQ/OneBot v11 WebSocket, log stream, Telegram Bot HTTPS long-poll."
 
 [dependencies]
 corlinman-core = { path = "../corlinman-core" }
@@ -28,6 +28,8 @@ uuid = { workspace = true }
 http = { workspace = true }
 tokio-util = { workspace = true }
 time = { workspace = true }
+dashmap = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

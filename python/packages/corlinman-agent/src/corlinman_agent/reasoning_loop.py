@@ -41,6 +41,28 @@ logger = structlog.get_logger(__name__)
 
 
 @dataclass(slots=True)
+class Attachment:
+    """Non-text input attached to the trailing user turn.
+
+    Mirrors the Rust ``corlinman_gateway_api::Attachment`` type and the
+    proto ``corlinman.v1.Attachment`` message. ``kind`` is one of
+    ``"image"``, ``"audio"``, ``"video"``, ``"file"``.
+
+    ``url`` and ``bytes_`` are mutually complementary — channel adapters
+    typically populate ``url`` only (the provider downloads or the
+    vendor accepts URL-form inputs directly); callers with the payload
+    in hand (scheduler, admin imports) populate ``bytes_``. Both-None is
+    valid but useless — providers will skip the attachment with a warn.
+    """
+
+    kind: str
+    url: str | None = None
+    bytes_: bytes | None = None
+    mime: str | None = None
+    file_name: str | None = None
+
+
+@dataclass(slots=True)
 class ChatStart:
     """Minimal descriptor fed to the reasoning loop."""
 
@@ -50,6 +72,7 @@ class ChatStart:
     session_key: str = ""
     temperature: float | None = None
     max_tokens: int | None = None
+    attachments: Sequence[Attachment] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -165,7 +188,9 @@ class ReasoningLoop:
 
     async def run(self, start: ChatStart) -> AsyncIterator[Event]:
         """Execute the loop, yielding events until the stream ends."""
-        messages: list[dict[str, Any]] = list(start.messages)
+        messages: list[dict[str, Any]] = _inject_attachments(
+            list(start.messages), start.attachments
+        )
         rounds = 0
 
         while rounds < _MAX_ROUNDS:
@@ -405,6 +430,116 @@ def _extend_with_tool_round(
             }
         )
     return extended
+
+
+def _inject_attachments(
+    messages: list[dict[str, Any]],
+    attachments: Sequence[Attachment],
+) -> list[dict[str, Any]]:
+    """Merge ``attachments`` into the trailing user turn of ``messages``.
+
+    The returned shape follows the OpenAI multimodal content-parts contract
+    (``[{"type": "text", "text": ...}, {"type": "image_url", ...}]``).
+    Providers translate this into their own vendor blocks — see
+    :mod:`corlinman_providers.anthropic_provider` which maps ``image_url``
+    parts to Anthropic's ``{"type": "image", "source": {"type": "url", ...}}``
+    shape.
+
+    Strategy:
+    * no attachments → return ``messages`` unchanged (zero-cost fast path
+      preserves every existing test assumption about plain string content);
+    * otherwise find the last ``role="user"`` message; if none exists,
+      append a new one carrying an empty text prompt;
+    * rewrite that message's ``content`` from ``str`` to a content-parts
+      list with the original text first, followed by one part per
+      attachment. Non-image attachments are forwarded as
+      ``{"type": "file", ...}`` so providers that don't support them can
+      log-and-skip in one place instead of every channel adapter
+      guessing.
+
+    Only the trailing user turn is rewritten: providers treat earlier
+    turns as already-normalised history, and reshaping them would diverge
+    from what the provider itself returned on a prior round.
+    """
+    if not attachments:
+        return messages
+
+    # Find the last user turn (the one the current channel message is on).
+    target_idx: int | None = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            target_idx = i
+            break
+    if target_idx is None:
+        # No user message yet (degenerate — shouldn't happen on the QQ
+        # path, but easier to handle than to crash on). Synthesise one.
+        messages.append({"role": "user", "content": ""})
+        target_idx = len(messages) - 1
+
+    target = dict(messages[target_idx])
+    existing = target.get("content", "")
+    parts: list[dict[str, Any]]
+    if isinstance(existing, list):
+        # Already multi-part (prior round). Preserve and append.
+        parts = list(existing)
+    else:
+        text = str(existing) if existing else ""
+        parts = [{"type": "text", "text": text}] if text else []
+
+    for att in attachments:
+        part = _attachment_to_content_part(att)
+        if part is not None:
+            parts.append(part)
+
+    if not parts:
+        # Attachments couldn't be represented and original content was
+        # empty — fall back to an empty-string placeholder so providers
+        # don't reject the turn.
+        parts = [{"type": "text", "text": ""}]
+
+    target["content"] = parts
+    out = list(messages)
+    out[target_idx] = target
+    return out
+
+
+def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
+    """Convert an :class:`Attachment` into one OpenAI content part.
+
+    Returns ``None`` when neither ``url`` nor ``bytes_`` is populated
+    (useless attachment — drop quietly).
+    """
+    if att.kind == "image":
+        if att.url:
+            return {"type": "image_url", "image_url": {"url": att.url}}
+        if att.bytes_:
+            # base64 data URL; providers that prefer raw bytes unwrap.
+            import base64
+            mime = att.mime or "image/*"
+            b64 = base64.b64encode(att.bytes_).decode("ascii")
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            }
+        return None
+    # Audio / video / file — not universally supported. Forward as a
+    # generic "file" part so providers that DO handle them (future
+    # Gemini audio, future Claude file API) can opt in; text-only
+    # providers will skip with a warn.
+    if not att.url and not att.bytes_:
+        return None
+    return {
+        "type": "file",
+        "file": {
+            "kind": att.kind,
+            "url": att.url,
+            "mime": att.mime,
+            "file_name": att.file_name,
+            # bytes deliberately omitted from the part (providers
+            # download from url; in-memory bytes stay on the Attachment
+            # for providers that introspect).
+        },
+    }
 
 
 def _is_awaiting_placeholder(content: str) -> bool:

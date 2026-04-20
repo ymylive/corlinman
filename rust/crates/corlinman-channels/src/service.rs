@@ -29,9 +29,12 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::qq::message::{Action, Event, MessageEvent, MessageSegment, MessageType};
+use crate::qq::message::{
+    segments_to_attachments, Action, Event, MessageEvent, MessageSegment, MessageType,
+};
 use crate::qq::onebot::{OneBotClient, OneBotConfig};
-use crate::router::{ChannelRouter, GroupKeywords};
+use crate::rate_limit::TokenBucket;
+use crate::router::{ChannelRouter, GroupKeywords, RateLimitHook};
 
 /// Parameters the caller (gateway main) passes in. A simple struct so future
 /// additions (model overrides per channel, rate limits) don't churn the
@@ -42,6 +45,11 @@ pub struct QqChannelParams {
     pub model: String,
     /// Shared chat pipeline.
     pub chat_service: Arc<dyn ChatService>,
+    /// Observation hook fired each time a message is dropped by a rate-limit
+    /// check. Wired to the gateway's
+    /// `corlinman_channels_rate_limited_total{channel, reason}` counter in
+    /// production; tests leave it `None`.
+    pub rate_limit_hook: Option<RateLimitHook>,
 }
 
 /// Spawn the QQ channel loop and run until `cancel` fires. Returns `Ok(())`
@@ -55,6 +63,7 @@ pub async fn run_qq_channel(
         config,
         model,
         chat_service,
+        rate_limit_hook,
     } = params;
 
     if config.ws_url.is_empty() {
@@ -69,10 +78,34 @@ pub async fn run_qq_channel(
         None => None,
     };
 
-    let router = Arc::new(ChannelRouter::new(
+    // Build token buckets up front; `None` on a field = dimension disabled.
+    let group_limiter = config
+        .rate_limit
+        .group_per_min
+        .map(|n| Arc::new(TokenBucket::per_minute(n)));
+    let sender_limiter = config
+        .rate_limit
+        .sender_per_min
+        .map(|n| Arc::new(TokenBucket::per_minute(n)));
+
+    // GC the live buckets on a child cancel so we stop sweeping at shutdown.
+    let gc_cancel = cancel.child_token();
+    let _gc_group = group_limiter
+        .as_ref()
+        .map(|b| b.clone().start_gc(gc_cancel.clone()));
+    let _gc_sender = sender_limiter
+        .as_ref()
+        .map(|b| b.clone().start_gc(gc_cancel.clone()));
+
+    let mut router = ChannelRouter::new(
         keywords_to_router(&config.group_keywords),
         config.self_ids.clone(),
-    ));
+    )
+    .with_rate_limits(group_limiter, sender_limiter);
+    if let Some(hook) = rate_limit_hook {
+        router = router.with_rate_limit_hook(hook);
+    }
+    let router = Arc::new(router);
 
     // Channels the OneBotClient and the dispatch loop share.
     let (event_tx, mut event_rx) = mpsc::channel::<Event>(64);
@@ -162,17 +195,7 @@ async fn handle_one(
     action_tx: mpsc::Sender<Action>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let internal = InternalChatRequest {
-        model,
-        messages: vec![ApiMessage {
-            role: ApiRole::User,
-            content: req.content.clone(),
-        }],
-        session_key: req.session_key.clone(),
-        stream: true,
-        max_tokens: None,
-        temperature: None,
-    };
+    let internal = build_internal_request(&req, &event, model);
 
     let mut stream = chat_service.run(internal, cancel.clone()).await;
     let mut text = String::new();
@@ -211,6 +234,36 @@ async fn handle_one(
     Ok(())
 }
 
+/// Convert a routed [`ChatRequest`] + the original [`MessageEvent`] into the
+/// `InternalChatRequest` handed to the chat service.
+///
+/// Attachments are derived from the raw QQ segments here rather than on the
+/// router to keep `ChatRequest` purely text; that way schedulers and other
+/// non-multimodal callers don't need to thread empty vectors everywhere.
+fn build_internal_request(
+    req: &ChatRequest,
+    event: &MessageEvent,
+    model: String,
+) -> InternalChatRequest {
+    let attachments = segments_to_attachments(&event.message);
+    InternalChatRequest {
+        model,
+        messages: vec![ApiMessage {
+            role: ApiRole::User,
+            content: req.content.clone(),
+        }],
+        session_key: req.session_key.clone(),
+        stream: true,
+        max_tokens: None,
+        temperature: None,
+        attachments,
+        // Backfill the transport binding so gateway-side consumers
+        // (context_assembler, approval scoping, daily-note tagging) can reason
+        // about provenance without re-deriving it from the session_key.
+        binding: Some(req.binding.clone()),
+    }
+}
+
 /// Build a `send_group_msg` / `send_private_msg` action carrying a single
 /// text segment. Group messages prepend an `@sender` so the reply is clearly
 /// addressed (matches qqBot.js behaviour for keyword-triggered responses).
@@ -238,6 +291,8 @@ fn build_reply_action(event: &MessageEvent, body: &str) -> Action {
 mod tests {
     use super::*;
     use crate::qq::message::{KnownSegment, MessageSegment};
+    use corlinman_core::channel_binding::ChannelBinding;
+    use corlinman_gateway_api::AttachmentKind;
 
     fn sample_group_event() -> MessageEvent {
         MessageEvent {
@@ -274,6 +329,43 @@ mod tests {
             }
             other => panic!("expected SendGroupMsg, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dispatch_propagates_attachments() {
+        let mut ev = sample_group_event();
+        ev.message = vec![
+            MessageSegment::text("look at this "),
+            MessageSegment::Known(KnownSegment::Image {
+                url: "https://cdn/pic.png".into(),
+                file: Some("pic.png".into()),
+            }),
+        ];
+        ev.raw_message = "look at this [CQ:image,url=https://cdn/pic.png]".into();
+
+        let binding = ChannelBinding::qq_group(ev.self_id, ev.group_id.unwrap(), ev.user_id);
+        let mut req = ChatRequest::new(binding, "look at this".into());
+        req.message_id = Some(ev.message_id.to_string());
+
+        let internal = build_internal_request(&req, &ev, "claude-sonnet-4-5".into());
+
+        assert_eq!(internal.attachments.len(), 1);
+        assert_eq!(internal.attachments[0].kind, AttachmentKind::Image);
+        assert_eq!(
+            internal.attachments[0].url.as_deref(),
+            Some("https://cdn/pic.png")
+        );
+        assert_eq!(internal.messages.len(), 1);
+        assert_eq!(internal.messages[0].content, "look at this");
+    }
+
+    #[test]
+    fn dispatch_empty_attachments_when_text_only() {
+        let ev = sample_group_event();
+        let binding = ChannelBinding::qq_group(ev.self_id, ev.group_id.unwrap(), ev.user_id);
+        let req = ChatRequest::new(binding, ev.raw_message.clone());
+        let internal = build_internal_request(&req, &ev, "claude-sonnet-4-5".into());
+        assert!(internal.attachments.is_empty());
     }
 
     #[test]

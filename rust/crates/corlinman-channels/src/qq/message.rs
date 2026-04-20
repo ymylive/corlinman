@@ -8,6 +8,7 @@
 //! References:
 //! - OneBot v11 spec: https://github.com/botuniverse/onebot-11
 
+use corlinman_gateway_api::{Attachment, AttachmentKind};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -257,6 +258,40 @@ pub fn segments_to_text(segs: &[MessageSegment]) -> String {
     out
 }
 
+/// Extract attachments (image/voice) from a QQ segment list.
+///
+/// OneBot's `image` and `record` segments carry a remote `url` (gocq/NapCat
+/// pre-upload to their CDN). We pass the URL through — providers that accept
+/// URL-form inputs (Anthropic Claude 4 image blocks, OpenAI vision) use it
+/// directly; providers that need bytes download on demand. QQ has no `file`
+/// segment in the current `KnownSegment` set, so this helper handles the two
+/// multimodal variants corlinman actually decodes today. Other kinds
+/// (video, generic file) can be added here when their segment variants land.
+pub fn segments_to_attachments(segments: &[MessageSegment]) -> Vec<Attachment> {
+    segments
+        .iter()
+        .filter_map(|seg| match seg.known()? {
+            KnownSegment::Image { url, file } if !url.is_empty() => Some(Attachment {
+                kind: AttachmentKind::Image,
+                url: Some(url.clone()),
+                bytes: None,
+                // OneBot doesn't tell us the concrete mime; "image/*" signals
+                // the provider to infer from the URL path or content.
+                mime: Some("image/*".into()),
+                file_name: file.clone(),
+            }),
+            KnownSegment::Record { url } if !url.is_empty() => Some(Attachment {
+                kind: AttachmentKind::Audio,
+                url: Some(url.clone()),
+                bytes: None,
+                mime: Some("audio/*".into()),
+                file_name: None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether any `at` segment targets `self_id` (or is `@all`).
 pub fn is_mentioned(segs: &[MessageSegment], self_id: i64) -> bool {
     let self_s = self_id.to_string();
@@ -357,6 +392,53 @@ mod tests {
         assert_eq!(s["params"]["message"][0]["type"], "reply");
         assert_eq!(s["params"]["message"][0]["data"]["id"], "42");
         assert_eq!(s["params"]["message"][1]["type"], "text");
+    }
+
+    #[test]
+    fn segments_to_attachments_covers_image_and_record() {
+        let segs = vec![
+            MessageSegment::text("caption"),
+            MessageSegment::Known(KnownSegment::Image {
+                url: "https://cdn/img.jpg".into(),
+                file: Some("img.jpg".into()),
+            }),
+            MessageSegment::Known(KnownSegment::Record {
+                url: "https://cdn/voice.amr".into(),
+            }),
+            // Unknown segment (e.g. `video`) is passed through unchanged.
+            MessageSegment::Other(serde_json::json!({"type": "video"})),
+            // Face / at / reply don't produce attachments.
+            MessageSegment::at("100"),
+            MessageSegment::face("1"),
+            MessageSegment::reply("42"),
+        ];
+        let atts = segments_to_attachments(&segs);
+        assert_eq!(atts.len(), 2);
+
+        let image = &atts[0];
+        assert_eq!(image.kind, AttachmentKind::Image);
+        assert_eq!(image.url.as_deref(), Some("https://cdn/img.jpg"));
+        assert_eq!(image.file_name.as_deref(), Some("img.jpg"));
+        assert!(image.bytes.is_none());
+
+        let audio = &atts[1];
+        assert_eq!(audio.kind, AttachmentKind::Audio);
+        assert_eq!(audio.url.as_deref(), Some("https://cdn/voice.amr"));
+    }
+
+    #[test]
+    fn segments_to_attachments_skips_empty_urls() {
+        let segs = vec![MessageSegment::Known(KnownSegment::Image {
+            url: String::new(),
+            file: None,
+        })];
+        assert!(segments_to_attachments(&segs).is_empty());
+    }
+
+    #[test]
+    fn segments_to_attachments_empty_when_text_only() {
+        let segs = vec![MessageSegment::text("hi"), MessageSegment::at("100")];
+        assert!(segments_to_attachments(&segs).is_empty());
     }
 
     #[test]

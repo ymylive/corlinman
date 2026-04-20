@@ -10,6 +10,7 @@ protocol is standard OpenAI JSON.
 from __future__ import annotations
 
 from corlinman_agent.reasoning_loop import (
+    Attachment,
     ChatStart,
     DoneEvent,
     ErrorEvent,
@@ -21,6 +22,7 @@ from corlinman_agent.reasoning_loop import (
 )
 
 __all__ = [
+    "Attachment",
     "ChatStart",
     "DoneEvent",
     "ErrorEvent",

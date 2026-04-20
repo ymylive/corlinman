@@ -31,6 +31,11 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+// Re-export the binding type so downstream crates (channels, scheduler) can
+// populate [`InternalChatRequest::binding`] without importing
+// `corlinman-core::channel_binding` directly.
+pub use corlinman_core::channel_binding::ChannelBinding;
+
 /// Internal chat request submitted by a channel / scheduler / admin task.
 ///
 /// A deliberately thin shape. Everything else (placeholders, provider config,
@@ -48,6 +53,53 @@ pub struct InternalChatRequest {
     pub stream: bool,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// Non-text inputs attached to the user turn (images, audio, files).
+    /// Populated by channel adapters that parse multimodal segments; the HTTP
+    /// REST surface currently leaves this empty. Providers that don't support
+    /// a given kind are expected to skip + warn (see per-provider adapters).
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    /// Transport-level conversation locus (channel / account / thread / sender)
+    /// backfilled by channel adapters for audit, per-tool approval, and
+    /// context-assembler scoping. The HTTP REST path leaves this `None`
+    /// today — the gateway derives a synthetic binding on the fly when it
+    /// needs one. Wired through to `proto::v1::ChatStart.binding` by
+    /// `corlinman-gateway::services::chat_service::build_chat_start`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<ChannelBinding>,
+}
+
+/// Non-text payload attached to a chat turn. One message can carry multiple.
+///
+/// `url` and `bytes` are mutually complementary: channel adapters that receive
+/// the payload as a remote URL (QQ's `image.url`, Telegram's `file_id` after
+/// resolution) leave `bytes = None` so no download cost is paid on the hot
+/// path. Callers that already have the bytes in hand (`scheduler`, admin
+/// imports) set `bytes = Some(..)` and leave `url = None`. Providers that
+/// need bytes (e.g. base64-only vendors) download on demand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub kind: AttachmentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+}
+
+/// Coarse-grained attachment category. Mirrored 1:1 by the proto enum
+/// `corlinman.v1.AttachmentKind` so the channels → gateway → Python path
+/// doesn't need a translation table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentKind {
+    Image,
+    Audio,
+    Video,
+    File,
 }
 
 /// A chat message as submitted to the internal pipeline. Mirrors the OpenAI

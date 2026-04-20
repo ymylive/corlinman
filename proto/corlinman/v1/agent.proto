@@ -51,6 +51,37 @@ message ChatStart {
   TraceContext trace = 10;
   // Provider-config override (JSON); passed verbatim to provider adapter.
   bytes provider_config_json = 11;
+  // Multimodal inputs on the trailing user turn (QQ image segments, Telegram
+  // photos, scheduler pre-loaded files). Text still travels in `messages`;
+  // attachments are sidecar so channels can pass through URLs without
+  // reshaping the primary content block.
+  repeated Attachment attachments = 12;
+}
+
+// Non-text input attached to a chat turn. Mirrors the Rust
+// `corlinman_gateway_api::Attachment` struct 1:1.
+//
+// `url` and `bytes` are mutually complementary:
+//   - channel adapters that receive a CDN URL (QQ's `image.url`, Telegram
+//     `file_id` after resolution) leave `bytes` empty so no download cost
+//     is paid on the hot path;
+//   - callers that already hold the payload (`scheduler`, admin imports)
+//     populate `bytes` and leave `url` empty;
+//   - providers that need bytes (base64-only vendors) download on demand.
+message Attachment {
+  AttachmentKind kind = 1;
+  string url = 2;            // optional; empty when bytes is populated
+  bytes bytes = 3;            // optional; empty when url is populated
+  string mime = 4;            // e.g. "image/jpeg"; "image/*" if unknown
+  string file_name = 5;       // optional
+}
+
+enum AttachmentKind {
+  ATTACHMENT_KIND_UNSPECIFIED = 0;
+  ATTACHMENT_KIND_IMAGE = 1;
+  ATTACHMENT_KIND_AUDIO = 2;
+  ATTACHMENT_KIND_VIDEO = 3;
+  ATTACHMENT_KIND_FILE = 4;
 }
 
 message ToolResult {

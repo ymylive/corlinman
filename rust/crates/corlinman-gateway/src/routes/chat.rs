@@ -1308,6 +1308,10 @@ fn build_chat_start(req: &ChatRequest, session_key: Option<&str>) -> ChatStart {
         stream: req.stream,
         trace: None,
         provider_config_json: Default::default(),
+        // HTTP REST body carries no attachments today; multimodal inputs flow
+        // through the in-process ChatService (channels path). See
+        // `services::chat_service::build_chat_start` for the real conversion.
+        attachments: Vec::new(),
     }
 }
 

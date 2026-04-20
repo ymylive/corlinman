@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from corlinman_agent import (
+    Attachment,
     ChatStart,
     DoneEvent,
     ErrorEvent,
@@ -254,3 +255,87 @@ async def test_awaiting_placeholder_result_ends_loop() -> None:
     # Exactly one provider round; loop terminated without a follow-up call.
     assert len(prov.calls_seen) == 1
     assert isinstance(events[-1], DoneEvent)
+
+
+@pytest.mark.asyncio
+async def test_attachments_forwarded_as_content_parts() -> None:
+    """ChatStart.attachments rewrite the trailing user turn's content into
+    OpenAI-shape multi-part blocks before the provider sees it."""
+    prov = _MultiRoundProvider(
+        [[ProviderChunk(kind="done", finish_reason="stop")]]
+    )
+    loop = ReasoningLoop(prov)
+    start = ChatStart(
+        model="x",
+        messages=[{"role": "user", "content": "look at this"}],
+        attachments=[
+            Attachment(kind="image", url="https://cdn/pic.png", mime="image/png"),
+        ],
+    )
+    await _collect(loop, start)
+    # Exactly one round; the provider saw the rewritten user message.
+    assert len(prov.calls_seen) == 1
+    msgs = prov.calls_seen[0]
+    assert len(msgs) == 1
+    content = msgs[0]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": "look at this"}
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {"url": "https://cdn/pic.png"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_attachments_none_leaves_messages_unchanged() -> None:
+    """Without attachments the loop must not touch the original messages."""
+    prov = _MultiRoundProvider(
+        [[ProviderChunk(kind="done", finish_reason="stop")]]
+    )
+    loop = ReasoningLoop(prov)
+    msg = {"role": "user", "content": "plain text"}
+    await _collect(loop, ChatStart(model="x", messages=[msg]))
+    assert prov.calls_seen[0][0]["content"] == "plain text"
+
+
+@pytest.mark.asyncio
+async def test_attachments_audio_forwarded_as_file_part() -> None:
+    """Non-image attachments land as a generic ``file`` content part so the
+    provider adapter (not the loop) decides whether to skip or translate."""
+    prov = _MultiRoundProvider(
+        [[ProviderChunk(kind="done", finish_reason="stop")]]
+    )
+    loop = ReasoningLoop(prov)
+    start = ChatStart(
+        model="x",
+        messages=[{"role": "user", "content": "voice note"}],
+        attachments=[Attachment(kind="audio", url="https://cdn/v.amr")],
+    )
+    await _collect(loop, start)
+    content = prov.calls_seen[0][0]["content"]
+    assert isinstance(content, list)
+    assert any(p.get("type") == "file" for p in content)
+    file_part = next(p for p in content if p.get("type") == "file")
+    assert file_part["file"]["kind"] == "audio"
+    assert file_part["file"]["url"] == "https://cdn/v.amr"
+
+
+@pytest.mark.asyncio
+async def test_attachment_image_bytes_become_data_url() -> None:
+    """Attachment with bytes (no url) encodes into a data: URI."""
+    prov = _MultiRoundProvider(
+        [[ProviderChunk(kind="done", finish_reason="stop")]]
+    )
+    loop = ReasoningLoop(prov)
+    raw = b"\x89PNGFAKE"
+    start = ChatStart(
+        model="x",
+        messages=[{"role": "user", "content": ""}],
+        attachments=[Attachment(kind="image", bytes_=raw, mime="image/png")],
+    )
+    await _collect(loop, start)
+    content = prov.calls_seen[0][0]["content"]
+    assert isinstance(content, list)
+    img = next(p for p in content if p.get("type") == "image_url")
+    url = img["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")

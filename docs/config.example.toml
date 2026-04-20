@@ -67,6 +67,45 @@ self_ids = []
 # [channels.qq.group_keywords]
 # "123456789" = ["bot", "help"]
 
+# Token-bucket rate limits (Sprint 4 T2).
+#   - Omitting the whole `[channels.qq.rate_limit]` section applies the
+#     built-in defaults (group 20/min, sender 5/min).
+#   - Inside the section, omitting a single field disables *that* dimension
+#     (serde maps absent Option → None → "no check"). Set a value to enable.
+#   - Token buckets refill linearly: capacity = n, refill = n/60 tokens/sec.
+# Example (keep defaults): leave this block commented out.
+# Example (disable per-sender, keep per-group at 30/min):
+# [channels.qq.rate_limit]
+# group_per_min = 30
+# Example (disable both — not recommended):
+# [channels.qq.rate_limit]
+# (empty body — both fields absent → both disabled)
+
+# ---------------------------------------------------------------------------
+# [channels.telegram] — Telegram Bot API long-poll adapter (Sprint 4 T4).
+# Disabled by default. Inbound via `getUpdates`, outbound via `sendMessage`;
+# see `corlinman_channels::telegram::run_telegram_channel`.
+# ---------------------------------------------------------------------------
+[channels.telegram]
+enabled = false
+# bot_token = { env = "TELEGRAM_BOT_TOKEN" }
+# Whitelist of chat ids (group or private). Empty list = all chats allowed.
+allowed_chat_ids = []
+# Case-insensitive substring filter applied to non-mention group messages.
+# Empty list = no filter (dispatch-all in groups). Private chats bypass this.
+keyword_filter = []
+# When true, group messages are only forwarded if the bot is @mentioned
+# (mention / text_mention entity targeting the bot). Private chats are
+# unaffected.
+require_mention_in_groups = false
+
+# Token-bucket rate limits. Shape mirrors [channels.qq.rate_limit]; same
+# semantics (omit section = defaults 20/min chat, 5/min sender; omit a
+# single field = that dimension disabled).
+# [channels.telegram.rate_limit]
+# chat_per_min = 20
+# sender_per_min = 5
+
 # ---------------------------------------------------------------------------
 # [rag] — hybrid retrieval knobs. See docs/architecture.md §5 (Vector service).
 # ---------------------------------------------------------------------------

@@ -1,11 +1,26 @@
 from corlinman_grpc._generated.corlinman.v1 import common_pb2 as _common_pb2
 from google.protobuf.internal import containers as _containers
+from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from collections.abc import Iterable as _Iterable, Mapping as _Mapping
 from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
+
+class AttachmentKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    ATTACHMENT_KIND_UNSPECIFIED: _ClassVar[AttachmentKind]
+    ATTACHMENT_KIND_IMAGE: _ClassVar[AttachmentKind]
+    ATTACHMENT_KIND_AUDIO: _ClassVar[AttachmentKind]
+    ATTACHMENT_KIND_VIDEO: _ClassVar[AttachmentKind]
+    ATTACHMENT_KIND_FILE: _ClassVar[AttachmentKind]
+
+ATTACHMENT_KIND_UNSPECIFIED: AttachmentKind
+ATTACHMENT_KIND_IMAGE: AttachmentKind
+ATTACHMENT_KIND_AUDIO: AttachmentKind
+ATTACHMENT_KIND_VIDEO: AttachmentKind
+ATTACHMENT_KIND_FILE: AttachmentKind
 
 class ClientFrame(_message.Message):
     __slots__ = ("start", "tool_result", "cancel", "approval")
@@ -38,6 +53,7 @@ class ChatStart(_message.Message):
         "stream",
         "trace",
         "provider_config_json",
+        "attachments",
     )
     class PlaceholdersEntry(_message.Message):
         __slots__ = ("key", "value")
@@ -60,6 +76,7 @@ class ChatStart(_message.Message):
     STREAM_FIELD_NUMBER: _ClassVar[int]
     TRACE_FIELD_NUMBER: _ClassVar[int]
     PROVIDER_CONFIG_JSON_FIELD_NUMBER: _ClassVar[int]
+    ATTACHMENTS_FIELD_NUMBER: _ClassVar[int]
     model: str
     messages: _containers.RepeatedCompositeFieldContainer[_common_pb2.Message]
     tools_json: bytes
@@ -71,6 +88,7 @@ class ChatStart(_message.Message):
     stream: bool
     trace: _common_pb2.TraceContext
     provider_config_json: bytes
+    attachments: _containers.RepeatedCompositeFieldContainer[Attachment]
     def __init__(
         self,
         model: _Optional[str] = ...,
@@ -84,6 +102,28 @@ class ChatStart(_message.Message):
         stream: bool = ...,
         trace: _Optional[_Union[_common_pb2.TraceContext, _Mapping]] = ...,
         provider_config_json: _Optional[bytes] = ...,
+        attachments: _Optional[_Iterable[_Union[Attachment, _Mapping]]] = ...,
+    ) -> None: ...
+
+class Attachment(_message.Message):
+    __slots__ = ("kind", "url", "bytes", "mime", "file_name")
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    URL_FIELD_NUMBER: _ClassVar[int]
+    BYTES_FIELD_NUMBER: _ClassVar[int]
+    MIME_FIELD_NUMBER: _ClassVar[int]
+    FILE_NAME_FIELD_NUMBER: _ClassVar[int]
+    kind: AttachmentKind
+    url: str
+    bytes: bytes
+    mime: str
+    file_name: str
+    def __init__(
+        self,
+        kind: _Optional[_Union[AttachmentKind, str]] = ...,
+        url: _Optional[str] = ...,
+        bytes: _Optional[bytes] = ...,
+        mime: _Optional[str] = ...,
+        file_name: _Optional[str] = ...,
     ) -> None: ...
 
 class ToolResult(_message.Message):

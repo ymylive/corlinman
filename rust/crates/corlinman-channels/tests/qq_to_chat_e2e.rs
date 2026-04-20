@@ -118,6 +118,7 @@ async fn qq_message_triggers_chat_and_replies_via_send_group_msg() {
         access_token: None,
         self_ids: vec![100],
         group_keywords,
+        rate_limit: Default::default(),
     };
 
     let chat_service: Arc<dyn ChatService> = Arc::new(FakeChatService);
@@ -125,6 +126,7 @@ async fn qq_message_triggers_chat_and_replies_via_send_group_msg() {
         config: cfg,
         model: "fake-model".into(),
         chat_service,
+        rate_limit_hook: None,
     };
 
     let cancel = CancellationToken::new();

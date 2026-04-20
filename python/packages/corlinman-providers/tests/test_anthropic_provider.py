@@ -205,3 +205,128 @@ def test_registry_resolves_claude_prefix() -> None:
 def test_registry_raises_for_unknown() -> None:
     with pytest.raises(KeyError):
         resolve("mystery-llm-9")
+
+
+def test_split_system_translates_image_url_part_to_anthropic_block() -> None:
+    """OpenAI-shape ``image_url`` content part becomes Anthropic's
+    ``{"type": "image", "source": {"type": "url", ...}}`` block."""
+    _, chat = _split_system(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "look at this"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://cdn/pic.png"},
+                    },
+                ],
+            }
+        ]
+    )
+    assert len(chat) == 1
+    content = chat[0]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": "look at this"}
+    assert content[1] == {
+        "type": "image",
+        "source": {"type": "url", "url": "https://cdn/pic.png"},
+    }
+
+
+def test_split_system_translates_data_url_to_base64_block() -> None:
+    """``data:image/png;base64,...`` URI decodes into Anthropic's base64 source."""
+    _, chat = _split_system(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,iVBORw0KGgo="
+                        },
+                    },
+                ],
+            }
+        ]
+    )
+    content = chat[0]["content"]
+    assert content[0] == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "iVBORw0KGgo=",
+        },
+    }
+
+
+def test_split_system_drops_unsupported_file_part() -> None:
+    """``file`` part (audio/video) is skipped with a warn — text survives."""
+    _, chat = _split_system(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "transcript:"},
+                    {
+                        "type": "file",
+                        "file": {"kind": "audio", "url": "https://x/a.amr"},
+                    },
+                ],
+            }
+        ]
+    )
+    content = chat[0]["content"]
+    assert content == [{"type": "text", "text": "transcript:"}]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_with_image_url_part(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: multipart user content reaches the SDK with Anthropic
+    blocks, and the stream still yields token + done chunks."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    captured: dict[str, Any] = {}
+
+    class _CapturingMessages:
+        def stream(self, **kwargs: Any) -> _FakeStream:
+            captured.update(kwargs)
+            return _FakeStream([_text_event("ack")], stop_reason="end_turn")
+
+    class _CapturingClient:
+        def __init__(self) -> None:
+            self.messages = _CapturingMessages()
+
+    fake = _CapturingClient()
+    _patch_anthropic(monkeypatch, fake)
+
+    prov = AnthropicProvider()
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://cdn/pic.png"},
+                },
+            ],
+        }
+    ]
+    tokens: list[str] = []
+    async for chunk in prov.chat_stream(
+        model="claude-sonnet-4-5", messages=messages
+    ):
+        if chunk.kind == "token":
+            tokens.append(chunk.text)
+
+    assert tokens == ["ack"]
+    sent_messages = captured["messages"]
+    assert len(sent_messages) == 1
+    content = sent_messages[0]["content"]
+    assert content[0] == {"type": "text", "text": "describe"}
+    assert content[1] == {
+        "type": "image",
+        "source": {"type": "url", "url": "https://cdn/pic.png"},
+    }

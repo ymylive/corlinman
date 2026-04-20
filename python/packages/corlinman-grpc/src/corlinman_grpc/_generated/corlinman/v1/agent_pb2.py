@@ -25,7 +25,7 @@ from corlinman_grpc._generated.corlinman.v1 import (
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n\x18\x63orlinman/v1/agent.proto\x12\x0c\x63orlinman.v1\x1a\x19\x63orlinman/v1/common.proto"\xcc\x01\n\x0b\x43lientFrame\x12(\n\x05start\x18\x01 \x01(\x0b\x32\x17.corlinman.v1.ChatStartH\x00\x12/\n\x0btool_result\x18\x02 \x01(\x0b\x32\x18.corlinman.v1.ToolResultH\x00\x12&\n\x06\x63\x61ncel\x18\x03 \x01(\x0b\x32\x14.corlinman.v1.CancelH\x00\x12\x32\n\x08\x61pproval\x18\x04 \x01(\x0b\x32\x1e.corlinman.v1.ApprovalDecisionH\x00\x42\x06\n\x04kind"\x93\x03\n\tChatStart\x12\r\n\x05model\x18\x01 \x01(\t\x12\'\n\x08messages\x18\x02 \x03(\x0b\x32\x15.corlinman.v1.Message\x12\x12\n\ntools_json\x18\x03 \x01(\x0c\x12\x13\n\x0bsession_key\x18\x04 \x01(\t\x12-\n\x07\x62inding\x18\x05 \x01(\x0b\x32\x1c.corlinman.v1.ChannelBinding\x12?\n\x0cplaceholders\x18\x06 \x03(\x0b\x32).corlinman.v1.ChatStart.PlaceholdersEntry\x12\x13\n\x0btemperature\x18\x07 \x01(\x02\x12\x12\n\nmax_tokens\x18\x08 \x01(\r\x12\x0e\n\x06stream\x18\t \x01(\x08\x12)\n\x05trace\x18\n \x01(\x0b\x32\x1a.corlinman.v1.TraceContext\x12\x1c\n\x14provider_config_json\x18\x0b \x01(\x0c\x1a\x33\n\x11PlaceholdersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x0c:\x02\x38\x01"Y\n\nToolResult\x12\x0f\n\x07\x63\x61ll_id\x18\x01 \x01(\t\x12\x13\n\x0bresult_json\x18\x02 \x01(\x0c\x12\x10\n\x08is_error\x18\x03 \x01(\x08\x12\x13\n\x0b\x64uration_ms\x18\x04 \x01(\x04"\x18\n\x06\x43\x61ncel\x12\x0e\n\x06reason\x18\x01 \x01(\t"Z\n\x10\x41pprovalDecision\x12\x0f\n\x07\x63\x61ll_id\x18\x01 \x01(\t\x12\x10\n\x08\x61pproved\x18\x02 \x01(\x08\x12\r\n\x05scope\x18\x03 \x01(\t\x12\x14\n\x0c\x64\x65ny_message\x18\x04 \x01(\t"\x95\x02\n\x0bServerFrame\x12)\n\x05token\x18\x01 \x01(\x0b\x32\x18.corlinman.v1.TokenDeltaH\x00\x12+\n\ttool_call\x18\x02 \x01(\x0b\x32\x16.corlinman.v1.ToolCallH\x00\x12\x32\n\x08\x61waiting\x18\x03 \x01(\x0b\x32\x1e.corlinman.v1.AwaitingApprovalH\x00\x12$\n\x05usage\x18\x04 \x01(\x0b\x32\x13.corlinman.v1.UsageH\x00\x12"\n\x04\x64one\x18\x05 \x01(\x0b\x32\x12.corlinman.v1.DoneH\x00\x12(\n\x05\x65rror\x18\x06 \x01(\x0b\x32\x17.corlinman.v1.ErrorInfoH\x00\x42\x06\n\x04kind"=\n\nTokenDelta\x12\x0c\n\x04text\x18\x01 \x01(\t\x12\x14\n\x0cis_reasoning\x18\x02 \x01(\x08\x12\x0b\n\x03seq\x18\x03 \x01(\x04"Y\n\x08ToolCall\x12\x0f\n\x07\x63\x61ll_id\x18\x01 \x01(\t\x12\x0e\n\x06plugin\x18\x02 \x01(\t\x12\x0c\n\x04tool\x18\x03 \x01(\t\x12\x11\n\targs_json\x18\x04 \x01(\x0c\x12\x0b\n\x03seq\x18\x05 \x01(\x04"l\n\x10\x41waitingApproval\x12\x0f\n\x07\x63\x61ll_id\x18\x01 \x01(\t\x12\x0e\n\x06plugin\x18\x02 \x01(\t\x12\x0c\n\x04tool\x18\x03 \x01(\t\x12\x19\n\x11\x61rgs_preview_json\x18\x04 \x01(\x0c\x12\x0e\n\x06reason\x18\x05 \x01(\t"r\n\x04\x44one\x12\x15\n\rfinish_reason\x18\x01 \x01(\t\x12"\n\x05usage\x18\x02 \x01(\x0b\x32\x13.corlinman.v1.Usage\x12\x19\n\x11total_tokens_seen\x18\x03 \x01(\x04\x12\x14\n\x0cwall_time_ms\x18\x04 \x01(\x04\x32I\n\x05\x41gent\x12@\n\x04\x43hat\x12\x19.corlinman.v1.ClientFrame\x1a\x19.corlinman.v1.ServerFrame(\x01\x30\x01\x42\x02H\x01\x62\x06proto3'
+    b'\n\x18\x63orlinman/v1/agent.proto\x12\x0c\x63orlinman.v1\x1a\x19\x63orlinman/v1/common.proto"\xcc\x01\n\x0b\x43lientFrame\x12(\n\x05start\x18\x01 \x01(\x0b\x32\x17.corlinman.v1.ChatStartH\x00\x12/\n\x0btool_result\x18\x02 \x01(\x0b\x32\x18.corlinman.v1.ToolResultH\x00\x12&\n\x06\x63\x61ncel\x18\x03 \x01(\x0b\x32\x14.corlinman.v1.CancelH\x00\x12\x32\n\x08\x61pproval\x18\x04 \x01(\x0b\x32\x1e.corlinman.v1.ApprovalDecisionH\x00\x42\x06\n\x04kind"\xc2\x03\n\tChatStart\x12\r\n\x05model\x18\x01 \x01(\t\x12\'\n\x08messages\x18\x02 \x03(\x0b\x32\x15.corlinman.v1.Message\x12\x12\n\ntools_json\x18\x03 \x01(\x0c\x12\x13\n\x0bsession_key\x18\x04 \x01(\t\x12-\n\x07\x62inding\x18\x05 \x01(\x0b\x32\x1c.corlinman.v1.ChannelBinding\x12?\n\x0cplaceholders\x18\x06 \x03(\x0b\x32).corlinman.v1.ChatStart.PlaceholdersEntry\x12\x13\n\x0btemperature\x18\x07 \x01(\x02\x12\x12\n\nmax_tokens\x18\x08 \x01(\r\x12\x0e\n\x06stream\x18\t \x01(\x08\x12)\n\x05trace\x18\n \x01(\x0b\x32\x1a.corlinman.v1.TraceContext\x12\x1c\n\x14provider_config_json\x18\x0b \x01(\x0c\x12-\n\x0b\x61ttachments\x18\x0c \x03(\x0b\x32\x18.corlinman.v1.Attachment\x1a\x33\n\x11PlaceholdersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x0c:\x02\x38\x01"u\n\nAttachment\x12*\n\x04kind\x18\x01 \x01(\x0e\x32\x1c.corlinman.v1.AttachmentKind\x12\x0b\n\x03url\x18\x02 \x01(\t\x12\r\n\x05\x62ytes\x18\x03 \x01(\x0c\x12\x0c\n\x04mime\x18\x04 \x01(\t\x12\x11\n\tfile_name\x18\x05 \x01(\t"Y\n\nToolResult\x12\x0f\n\x07\x63\x61ll_id\x18\x01 \x01(\t\x12\x13\n\x0bresult_json\x18\x02 \x01(\x0c\x12\x10\n\x08is_error\x18\x03 \x01(\x08\x12\x13\n\x0b\x64uration_ms\x18\x04 \x01(\x04"\x18\n\x06\x43\x61ncel\x12\x0e\n\x06reason\x18\x01 \x01(\t"Z\n\x10\x41pprovalDecision\x12\x0f\n\x07\x63\x61ll_id\x18\x01 \x01(\t\x12\x10\n\x08\x61pproved\x18\x02 \x01(\x08\x12\r\n\x05scope\x18\x03 \x01(\t\x12\x14\n\x0c\x64\x65ny_message\x18\x04 \x01(\t"\x95\x02\n\x0bServerFrame\x12)\n\x05token\x18\x01 \x01(\x0b\x32\x18.corlinman.v1.TokenDeltaH\x00\x12+\n\ttool_call\x18\x02 \x01(\x0b\x32\x16.corlinman.v1.ToolCallH\x00\x12\x32\n\x08\x61waiting\x18\x03 \x01(\x0b\x32\x1e.corlinman.v1.AwaitingApprovalH\x00\x12$\n\x05usage\x18\x04 \x01(\x0b\x32\x13.corlinman.v1.UsageH\x00\x12"\n\x04\x64one\x18\x05 \x01(\x0b\x32\x12.corlinman.v1.DoneH\x00\x12(\n\x05\x65rror\x18\x06 \x01(\x0b\x32\x17.corlinman.v1.ErrorInfoH\x00\x42\x06\n\x04kind"=\n\nTokenDelta\x12\x0c\n\x04text\x18\x01 \x01(\t\x12\x14\n\x0cis_reasoning\x18\x02 \x01(\x08\x12\x0b\n\x03seq\x18\x03 \x01(\x04"Y\n\x08ToolCall\x12\x0f\n\x07\x63\x61ll_id\x18\x01 \x01(\t\x12\x0e\n\x06plugin\x18\x02 \x01(\t\x12\x0c\n\x04tool\x18\x03 \x01(\t\x12\x11\n\targs_json\x18\x04 \x01(\x0c\x12\x0b\n\x03seq\x18\x05 \x01(\x04"l\n\x10\x41waitingApproval\x12\x0f\n\x07\x63\x61ll_id\x18\x01 \x01(\t\x12\x0e\n\x06plugin\x18\x02 \x01(\t\x12\x0c\n\x04tool\x18\x03 \x01(\t\x12\x19\n\x11\x61rgs_preview_json\x18\x04 \x01(\x0c\x12\x0e\n\x06reason\x18\x05 \x01(\t"r\n\x04\x44one\x12\x15\n\rfinish_reason\x18\x01 \x01(\t\x12"\n\x05usage\x18\x02 \x01(\x0b\x32\x13.corlinman.v1.Usage\x12\x19\n\x11total_tokens_seen\x18\x03 \x01(\x04\x12\x14\n\x0cwall_time_ms\x18\x04 \x01(\x04*\x9c\x01\n\x0e\x41ttachmentKind\x12\x1f\n\x1b\x41TTACHMENT_KIND_UNSPECIFIED\x10\x00\x12\x19\n\x15\x41TTACHMENT_KIND_IMAGE\x10\x01\x12\x19\n\x15\x41TTACHMENT_KIND_AUDIO\x10\x02\x12\x19\n\x15\x41TTACHMENT_KIND_VIDEO\x10\x03\x12\x18\n\x14\x41TTACHMENT_KIND_FILE\x10\x04\x32I\n\x05\x41gent\x12@\n\x04\x43hat\x12\x19.corlinman.v1.ClientFrame\x1a\x19.corlinman.v1.ServerFrame(\x01\x30\x01\x42\x02H\x01\x62\x06proto3'
 )
 
 _globals = globals()
@@ -36,28 +36,32 @@ if not _descriptor._USE_C_DESCRIPTORS:
     _globals["DESCRIPTOR"]._serialized_options = b"H\001"
     _globals["_CHATSTART_PLACEHOLDERSENTRY"]._loaded_options = None
     _globals["_CHATSTART_PLACEHOLDERSENTRY"]._serialized_options = b"8\001"
+    _globals["_ATTACHMENTKIND"]._serialized_start = 1718
+    _globals["_ATTACHMENTKIND"]._serialized_end = 1874
     _globals["_CLIENTFRAME"]._serialized_start = 70
     _globals["_CLIENTFRAME"]._serialized_end = 274
     _globals["_CHATSTART"]._serialized_start = 277
-    _globals["_CHATSTART"]._serialized_end = 680
-    _globals["_CHATSTART_PLACEHOLDERSENTRY"]._serialized_start = 629
-    _globals["_CHATSTART_PLACEHOLDERSENTRY"]._serialized_end = 680
-    _globals["_TOOLRESULT"]._serialized_start = 682
-    _globals["_TOOLRESULT"]._serialized_end = 771
-    _globals["_CANCEL"]._serialized_start = 773
-    _globals["_CANCEL"]._serialized_end = 797
-    _globals["_APPROVALDECISION"]._serialized_start = 799
-    _globals["_APPROVALDECISION"]._serialized_end = 889
-    _globals["_SERVERFRAME"]._serialized_start = 892
-    _globals["_SERVERFRAME"]._serialized_end = 1169
-    _globals["_TOKENDELTA"]._serialized_start = 1171
-    _globals["_TOKENDELTA"]._serialized_end = 1232
-    _globals["_TOOLCALL"]._serialized_start = 1234
-    _globals["_TOOLCALL"]._serialized_end = 1323
-    _globals["_AWAITINGAPPROVAL"]._serialized_start = 1325
-    _globals["_AWAITINGAPPROVAL"]._serialized_end = 1433
-    _globals["_DONE"]._serialized_start = 1435
-    _globals["_DONE"]._serialized_end = 1549
-    _globals["_AGENT"]._serialized_start = 1551
-    _globals["_AGENT"]._serialized_end = 1624
+    _globals["_CHATSTART"]._serialized_end = 727
+    _globals["_CHATSTART_PLACEHOLDERSENTRY"]._serialized_start = 676
+    _globals["_CHATSTART_PLACEHOLDERSENTRY"]._serialized_end = 727
+    _globals["_ATTACHMENT"]._serialized_start = 729
+    _globals["_ATTACHMENT"]._serialized_end = 846
+    _globals["_TOOLRESULT"]._serialized_start = 848
+    _globals["_TOOLRESULT"]._serialized_end = 937
+    _globals["_CANCEL"]._serialized_start = 939
+    _globals["_CANCEL"]._serialized_end = 963
+    _globals["_APPROVALDECISION"]._serialized_start = 965
+    _globals["_APPROVALDECISION"]._serialized_end = 1055
+    _globals["_SERVERFRAME"]._serialized_start = 1058
+    _globals["_SERVERFRAME"]._serialized_end = 1335
+    _globals["_TOKENDELTA"]._serialized_start = 1337
+    _globals["_TOKENDELTA"]._serialized_end = 1398
+    _globals["_TOOLCALL"]._serialized_start = 1400
+    _globals["_TOOLCALL"]._serialized_end = 1489
+    _globals["_AWAITINGAPPROVAL"]._serialized_start = 1491
+    _globals["_AWAITINGAPPROVAL"]._serialized_end = 1599
+    _globals["_DONE"]._serialized_start = 1601
+    _globals["_DONE"]._serialized_end = 1715
+    _globals["_AGENT"]._serialized_start = 1876
+    _globals["_AGENT"]._serialized_end = 1949
 # @@protoc_insertion_point(module_scope)

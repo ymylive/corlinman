@@ -225,7 +225,8 @@ fn default_model() -> String {
 #[serde(default, deny_unknown_fields)]
 pub struct ChannelsConfig {
     pub qq: Option<QqChannelConfig>,
-    // telegram / discord: reserved for future milestones.
+    pub telegram: Option<TelegramChannelConfig>,
+    // discord: reserved for future milestones.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -240,6 +241,84 @@ pub struct QqChannelConfig {
     /// `group_id (as string) -> keywords` override; empty means channel default.
     #[serde(default)]
     pub group_keywords: HashMap<String, Vec<String>>,
+    /// Per-group / per-sender token-bucket rate limits. Absent section =
+    /// built-in defaults (20/min per group, 5/min per sender); `None` on a
+    /// field disables that dimension.
+    #[serde(default)]
+    pub rate_limit: QqRateLimit,
+}
+
+/// QQ channel rate-limit knobs.
+///
+/// `group_per_min` / `sender_per_min` map 1:1 onto token buckets inside
+/// `corlinman-channels::rate_limit::TokenBucket`:
+/// - `Some(n)`: capacity = n, refill = n/60 tokens per second.
+/// - `None`: that dimension is disabled (no check performed).
+///
+/// Both default to conservative values that match the original qqBot.js
+/// behaviour of "chatty but not spammy".
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QqRateLimit {
+    #[serde(default)]
+    pub group_per_min: Option<u32>,
+    #[serde(default)]
+    pub sender_per_min: Option<u32>,
+}
+
+impl Default for QqRateLimit {
+    fn default() -> Self {
+        Self {
+            group_per_min: Some(20),
+            sender_per_min: Some(5),
+        }
+    }
+}
+
+/// Telegram Bot API adapter config (S4 T4, optional).
+///
+/// We talk to `api.telegram.org` over bare HTTPS — `getUpdates` long-poll
+/// inbound, `sendMessage` outbound. See
+/// `corlinman_channels::telegram::run_telegram_channel`.
+///
+/// `bot_token` accepts the same `SecretRef` forms as provider api_keys:
+/// `{ env = "TELEGRAM_BOT_TOKEN" }` (preferred) or `{ value = "123:abc" }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TelegramChannelConfig {
+    pub enabled: bool,
+    pub bot_token: Option<SecretRef>,
+    /// Whitelist of chat ids (group or private). Empty list = all chats allowed.
+    pub allowed_chat_ids: Vec<i64>,
+    /// Substring keyword filter applied to non-mention group messages.
+    /// Case-insensitive. Empty list = no filter (dispatch-all in groups).
+    pub keyword_filter: Vec<String>,
+    /// When true, group messages are only forwarded if the bot is @mentioned
+    /// (mention / text_mention entity targeting the bot). Private chats are
+    /// unaffected.
+    pub require_mention_in_groups: bool,
+    /// Token-bucket rate limits; shape mirrors [`QqRateLimit`].
+    pub rate_limit: TelegramRateLimit,
+}
+
+/// Telegram channel rate-limit knobs. Shape matches [`QqRateLimit`] so the
+/// same `TokenBucket` primitive can be reused.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramRateLimit {
+    #[serde(default)]
+    pub chat_per_min: Option<u32>,
+    #[serde(default)]
+    pub sender_per_min: Option<u32>,
+}
+
+impl Default for TelegramRateLimit {
+    fn default() -> Self {
+        Self {
+            chat_per_min: Some(20),
+            sender_per_min: Some(5),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +688,18 @@ impl Config {
             }
         }
 
+        // 3b. Telegram channel sanity.
+        if let Some(tg) = &self.channels.telegram {
+            if tg.enabled && tg.bot_token.is_none() {
+                issues.push(ValidationIssue {
+                    path: "channels.telegram.bot_token".into(),
+                    code: "empty_bot_token".into(),
+                    message: "channels.telegram.enabled = true but bot_token is missing".into(),
+                    level: IssueLevel::Error,
+                });
+            }
+        }
+
         // 4. Scheduler cron: shallow check only (non-empty; full cron parse lives in scheduler crate).
         for (idx, job) in self.scheduler.jobs.iter().enumerate() {
             if job.cron.trim().is_empty() {
@@ -651,6 +742,11 @@ impl Config {
         redact_providers(&mut out.providers);
         if let Some(qq) = out.channels.qq.as_mut() {
             if let Some(tok) = qq.access_token.as_mut() {
+                *tok = tok.redacted();
+            }
+        }
+        if let Some(tg) = out.channels.telegram.as_mut() {
+            if let Some(tok) = tg.bot_token.as_mut() {
                 *tok = tok.redacted();
             }
         }
