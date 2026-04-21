@@ -4,6 +4,38 @@ All notable changes to corlinman are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] — 2026-04-21
+
+zh-CN / en internationalisation + static-bundle API fix. Pure frontend
+release — no Rust, Python, or Dockerfile changes.
+
+### Added
+
+- Full zh-CN / en i18n across every admin page, layout, login, dashboard,
+  and `⌘K` palette. `react-i18next` + two TypeScript locale bundles
+  (378 keys each, compile-time parity enforced).
+- Language toggle in the topnav + command-palette action. Choice persists
+  in `localStorage`; first-visit detection falls back to
+  `navigator.language` (`zh*` → Chinese, else English).
+- Inline pre-hydration boot script sets `<html lang>` so language
+  selection applies before React mounts (no FOUC).
+
+### Fixed
+
+- **`GATEWAY_BASE_URL` default**: changed from `"http://localhost:6005"`
+  to `""`. The static export used to bake localhost into the visitor's
+  bundle, making every `/admin`, `/health`, `/v1` call from a deployed
+  origin fail with `ERR_CONNECTION_REFUSED`. Relative URLs now resolve
+  through the current origin, which nginx already reverse-proxies to
+  the gateway. `NEXT_PUBLIC_GATEWAY_URL` remains the local-dev
+  override; mock-server paths untouched.
+
+### Dependencies
+
+- Added: `i18next`, `react-i18next`, `i18next-browser-languagedetector`.
+
+[0.1.3]: https://github.com/ymylive/corlinman/releases/tag/v0.1.3
+
 ## [0.1.2] — 2026-04-21
 
 Admin UI redesign. Pure frontend release — no Rust, Python, or
