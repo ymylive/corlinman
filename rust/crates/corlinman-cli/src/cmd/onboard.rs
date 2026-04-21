@@ -186,6 +186,7 @@ fn interactive_config(data_dir: &Path) -> Result<Config> {
         api_key: Some(SecretRef::EnvVar { env: env_var }),
         base_url: None,
         enabled: true,
+        ..Default::default()
     };
     match provider_name {
         "anthropic" => cfg.providers.anthropic = Some(entry),

@@ -375,6 +375,7 @@ mod tests {
             }),
             base_url: None,
             enabled: true,
+            ..Default::default()
         });
         cfg
     }
@@ -780,6 +781,7 @@ mode = "prompt"
             }),
             base_url: None,
             enabled: true,
+            ..Default::default()
         });
         let state = AdminState::new(
             Arc::new(PluginRegistry::default()),

@@ -118,6 +118,7 @@ mod tests {
             }),
             base_url: None,
             enabled: true,
+            ..Default::default()
         });
         let ctx = ctx_with(Some(cfg));
         let res = UpstreamCheck::new().run(&ctx).await;
@@ -133,6 +134,7 @@ mod tests {
             }),
             base_url: None,
             enabled: true,
+            ..Default::default()
         });
         // SAFETY: test-only env clear, no threads racing on this name.
         unsafe { std::env::remove_var("CORLINMAN_DOCTOR_TEST_UNSET_KEY") };

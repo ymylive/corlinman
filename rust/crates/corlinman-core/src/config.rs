@@ -15,7 +15,7 @@
 //! serialisation redacts `Literal` values so `corlinman config show` never
 //! prints raw secrets.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
@@ -23,6 +23,18 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::error::CorlinmanError;
+
+/// Per-entity parameter map.
+///
+/// Provider-level defaults, per-alias overrides, and per-request overrides all
+/// use this shape. Values are `serde_json::Value` so a schema-driven UI can
+/// round-trip arbitrary JSON scalars / objects and so the Python side can
+/// validate them against the provider's declared JSON Schema. `BTreeMap` is
+/// used (not `HashMap`) so the TOML serialiser emits stable key order.
+///
+/// `serde_json::Value::Null` is not representable in TOML — callers should
+/// omit optional fields rather than storing `null`.
+pub type ParamsMap = BTreeMap<String, serde_json::Value>;
 
 // ---------------------------------------------------------------------------
 // Top-level config
@@ -40,6 +52,9 @@ pub struct Config {
     pub providers: ProvidersConfig,
     #[validate(nested)]
     pub models: ModelsConfig,
+    /// Optional embedding provider binding. Absent = embedding disabled
+    /// (RAG dense / rerank stages gracefully degrade to BM25-only).
+    pub embedding: Option<EmbeddingConfig>,
     pub channels: ChannelsConfig,
     #[validate(nested)]
     pub rag: RagConfig,
@@ -145,16 +160,80 @@ impl ProvidersConfig {
             .map(|(k, _)| k)
             .collect()
     }
+
+    /// Resolve the kind for a provider slot, honouring the explicit field
+    /// first and falling back to inferring from the well-known slot name so
+    /// legacy configs without `kind` still load.
+    pub fn kind_for(&self, name: &str, entry: &ProviderEntry) -> Option<ProviderKind> {
+        entry.kind.or_else(|| ProviderKind::from_slot_name(name))
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderEntry {
+    /// Provider discriminator. `None` on legacy configs; callers should use
+    /// [`ProvidersConfig::kind_for`] which falls back to inferring the kind
+    /// from the slot name for first-party providers (feature-c backward
+    /// compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ProviderKind>,
     /// `{ env = "ANTHROPIC_API_KEY" }` or `{ value = "sk-..." }`.
     pub api_key: Option<SecretRef>,
     pub base_url: Option<String>,
     #[serde(default)]
     pub enabled: bool,
+    /// Provider-level default params. Merged under alias.params / request
+    /// params before being forwarded to the SDK.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: ParamsMap,
+}
+
+/// Provider kind discriminator. `openai_compatible` is the escape hatch for
+/// vLLM / Ollama / SiliconFlow / any local OpenAI-wire-format gateway (that
+/// branch requires [`ProviderEntry::base_url`]).
+///
+/// Wire format is the lowercase snake_case of the variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    Anthropic,
+    Openai,
+    Google,
+    Deepseek,
+    Qwen,
+    Glm,
+    OpenaiCompatible,
+}
+
+impl ProviderKind {
+    /// Lowercase wire name (matches `#[serde(rename_all = "snake_case")]`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
+            Self::Google => "google",
+            Self::Deepseek => "deepseek",
+            Self::Qwen => "qwen",
+            Self::Glm => "glm",
+            Self::OpenaiCompatible => "openai_compatible",
+        }
+    }
+
+    /// Infer a kind from a well-known first-party provider slot name.
+    /// Returns `None` for unknown names (forces an explicit `kind` field on
+    /// user-defined providers).
+    pub fn from_slot_name(name: &str) -> Option<Self> {
+        match name {
+            "anthropic" => Some(Self::Anthropic),
+            "openai" => Some(Self::Openai),
+            "google" => Some(Self::Google),
+            "deepseek" => Some(Self::Deepseek),
+            "qwen" => Some(Self::Qwen),
+            "glm" => Some(Self::Glm),
+            _ => None,
+        }
+    }
 }
 
 /// Indirect / literal secret reference.
@@ -201,7 +280,10 @@ impl SecretRef {
 pub struct ModelsConfig {
     #[validate(length(min = 1))]
     pub default: String,
-    pub aliases: HashMap<String, String>,
+    /// alias → entry. Values accept either a shorthand string
+    /// (`smart = "claude-opus-4-7"`) or a full table with `provider` /
+    /// `model` / `params`. See [`AliasEntry`].
+    pub aliases: HashMap<String, AliasEntry>,
 }
 
 impl Default for ModelsConfig {
@@ -215,6 +297,118 @@ impl Default for ModelsConfig {
 
 fn default_model() -> String {
     "claude-sonnet-4-5".into()
+}
+
+/// One alias entry. Accepts two TOML shapes:
+///
+/// - **Shorthand**: `smart = "claude-opus-4-7"` — rewrites the requested model
+///   string to the literal target. Provider inferred from target at call time;
+///   no per-alias params.
+/// - **Full**: `[models.aliases.smart]\n model = "claude-opus-4-7"\n
+///   provider = "anthropic"\n params = { temperature = 0.7 }` — provider
+///   explicit, optional per-alias params merged into the reasoning loop.
+///
+/// Stored as an untagged enum so existing configs keep working. Use
+/// [`AliasEntry::target`] / [`AliasEntry::params`] / [`AliasEntry::provider`]
+/// in call sites that just want the resolved values.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum AliasEntry {
+    Shorthand(String),
+    Full(AliasSpec),
+}
+
+/// Full-form alias entry. See [`AliasEntry`] for the shorthand variant.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AliasSpec {
+    /// Upstream model id (e.g. `"claude-opus-4-7"`).
+    pub model: String,
+    /// Optional explicit provider slot. When absent, the resolver falls back
+    /// to the legacy model-prefix table (Python side).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Per-alias param overrides. Merged over the provider-level defaults.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: ParamsMap,
+}
+
+impl AliasEntry {
+    /// The upstream model id this alias resolves to.
+    pub fn target(&self) -> &str {
+        match self {
+            Self::Shorthand(s) => s.as_str(),
+            Self::Full(spec) => spec.model.as_str(),
+        }
+    }
+
+    /// The configured provider slot, if any (only set on the full form).
+    pub fn provider(&self) -> Option<&str> {
+        match self {
+            Self::Shorthand(_) => None,
+            Self::Full(spec) => spec.provider.as_deref(),
+        }
+    }
+
+    /// Per-alias param overrides (empty for the shorthand form).
+    pub fn params(&self) -> &ParamsMap {
+        static EMPTY: once_cell::sync::Lazy<ParamsMap> = once_cell::sync::Lazy::new(ParamsMap::new);
+        match self {
+            Self::Shorthand(_) => &EMPTY,
+            Self::Full(spec) => &spec.params,
+        }
+    }
+}
+
+impl Default for AliasEntry {
+    fn default() -> Self {
+        Self::Shorthand(String::new())
+    }
+}
+
+impl From<String> for AliasEntry {
+    fn from(s: String) -> Self {
+        Self::Shorthand(s)
+    }
+}
+
+impl From<&str> for AliasEntry {
+    fn from(s: &str) -> Self {
+        Self::Shorthand(s.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [embedding]
+// ---------------------------------------------------------------------------
+
+/// Embedding provider binding. One embedder is active at a time; absent
+/// section / `enabled = false` degrades RAG to BM25-only.
+///
+/// `provider` references a key under `[providers.*]`; the Python side asserts
+/// the referenced provider is capable of embedding (OpenAI-kind providers
+/// and `openai_compatible` usually are; Anthropic is not).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingConfig {
+    /// Provider slot name under `[providers.*]`.
+    pub provider: String,
+    /// Upstream embedding model id (e.g. `"text-embedding-3-small"`).
+    pub model: String,
+    /// Declared output dimension; asserted on first successful call so a
+    /// mid-life model swap can't silently break stored vectors.
+    pub dimension: u32,
+    /// Master switch. `true` by default — set to `false` to keep the
+    /// section around for reference while disabling dense retrieval.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Provider-specific request params (e.g. `encoding_format`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: ParamsMap,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -647,7 +841,8 @@ impl Config {
 
         // aliases must not collide with themselves pointing to themselves, and
         // must resolve in <=1 hop (keep it simple — we don't want alias chains).
-        for (alias, target) in &self.models.aliases {
+        for (alias, entry) in &self.models.aliases {
+            let target = entry.target();
             if alias == target {
                 issues.push(ValidationIssue {
                     path: format!("models.aliases.{alias}"),
@@ -665,6 +860,47 @@ impl Config {
                     ),
                     level: IssueLevel::Error,
                 });
+            }
+        }
+
+        // Embedding section: if present + enabled, `provider` must reference
+        // a declared slot.
+        if let Some(emb) = &self.embedding {
+            if emb.enabled {
+                if emb.provider.trim().is_empty() {
+                    issues.push(ValidationIssue {
+                        path: "embedding.provider".into(),
+                        code: "embedding_provider_empty".into(),
+                        message: "embedding.enabled = true but provider is empty".into(),
+                        level: IssueLevel::Error,
+                    });
+                } else if !self.providers.iter().any(|(name, _)| name == emb.provider) {
+                    issues.push(ValidationIssue {
+                        path: "embedding.provider".into(),
+                        code: "embedding_provider_missing".into(),
+                        message: format!(
+                            "embedding.provider = '{}' but no [providers.{}] block is declared",
+                            emb.provider, emb.provider
+                        ),
+                        level: IssueLevel::Error,
+                    });
+                }
+                if emb.model.trim().is_empty() {
+                    issues.push(ValidationIssue {
+                        path: "embedding.model".into(),
+                        code: "embedding_model_empty".into(),
+                        message: "embedding.model must be non-empty".into(),
+                        level: IssueLevel::Error,
+                    });
+                }
+                if emb.dimension == 0 {
+                    issues.push(ValidationIssue {
+                        path: "embedding.dimension".into(),
+                        code: "embedding_dimension_zero".into(),
+                        message: "embedding.dimension must be > 0".into(),
+                        level: IssueLevel::Error,
+                    });
+                }
             }
         }
 
@@ -1062,6 +1298,7 @@ bogus = "field"
             }),
             base_url: None,
             enabled: true,
+            ..Default::default()
         });
         let issues = cfg.validate_report();
         assert!(
@@ -1109,6 +1346,7 @@ bogus = "field"
             }),
             base_url: None,
             enabled: true,
+            ..Default::default()
         });
         cfg.admin.password_hash = Some("$argon2id$v=19$m=...".into());
         let red = cfg.redacted();
@@ -1131,6 +1369,7 @@ bogus = "field"
             }),
             base_url: None,
             enabled: true,
+            ..Default::default()
         });
         cfg.save_to_path(&p).unwrap();
         let loaded = Config::load_from_path(&p).unwrap();
@@ -1152,6 +1391,7 @@ bogus = "field"
             }),
             base_url: None,
             enabled: true,
+            ..Default::default()
         });
 
         assert_eq!(get_dotted(&cfg, "server.port").unwrap(), "6005");

@@ -155,6 +155,7 @@ mod tests {
             api_key: Some(SecretRef::Literal { value: "x".into() }),
             base_url: Some("https://127.0.0.1:1/v1".into()),
             enabled: true,
+            ..Default::default()
         });
         let ctx = ctx_with(Some(cfg));
         let res = ProviderHttpsSmokeCheck::new().run(&ctx).await;

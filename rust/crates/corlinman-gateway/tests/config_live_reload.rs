@@ -67,6 +67,7 @@ fn seed_config() -> Config {
         }),
         base_url: None,
         enabled: true,
+        ..Default::default()
     });
     cfg
 }
@@ -225,7 +226,7 @@ async fn live_reload_end_to_end() {
     let snap = cfg.load();
     assert_eq!(snap.models.default, "claude-opus-4-7");
     assert_eq!(
-        snap.models.aliases.get("smart").map(|s| s.as_str()),
+        snap.models.aliases.get("smart").map(|e| e.target()),
         Some("claude-opus-4-7")
     );
 
