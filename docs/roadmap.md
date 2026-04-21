@@ -441,8 +441,8 @@
 
 ### S8.T3 — Docker image build + push（1 天）
 
-- `docker build -t ghcr.io/ymylive/corlinma:0.1.0 -f docker/Dockerfile .`
-- `docker build -t ghcr.io/ymylive/corlinma:0.1.0-ml --build-arg FEATURES=ml ...`
+- `docker build -t ghcr.io/ymylive/corlinman:0.1.0 -f docker/Dockerfile .`
+- `docker build -t ghcr.io/ymylive/corlinman:0.1.0-ml --build-arg FEATURES=ml ...`
 - 测试 `docker run` + `curl /health`
 - push ghcr.io（需 GITHUB_TOKEN）
 

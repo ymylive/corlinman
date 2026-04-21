@@ -135,8 +135,12 @@ RUN apt-get update \
 COPY --from=rust-builder /build/target/release/corlinman-gateway /usr/local/bin/corlinman-gateway
 COPY --from=rust-builder /build/target/release/corlinman         /usr/local/bin/corlinman
 
-# Python venv (uv-managed)
+# Python venv (uv-managed). Workspace packages install as editable
+# regardless of `--no-editable` (uv treats `workspace = true` members as
+# always-editable), so also carry the source tree the .pth files point
+# to. Small (~2 MB) and makes imports resolve at runtime.
 COPY --from=py-builder /opt/venv /opt/venv
+COPY --from=py-builder /build/python /build/python
 
 # Next.js exported static bundle
 COPY --from=ui-builder /build/ui/out /app/ui-static

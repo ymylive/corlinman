@@ -24,7 +24,7 @@ scenario runner (`corlinman qa run`) is green on 7 of 8 scenarios
 
 ## Install
 
-**Build from source.** A prebuilt docker image on `ghcr.io/ymylive/corlinma`
+**Build from source.** A prebuilt docker image on `ghcr.io/ymylive/corlinman`
 is planned for 0.1.1 once a docker-equipped build host is available.
 
 ```bash
@@ -54,7 +54,7 @@ methodology.
 ## Known gaps
 
 - **No prebuilt docker image yet** — build from source for now.
-  `ghcr.io/ymylive/corlinma:0.1.0` will ship with 0.1.1.
+  `ghcr.io/ymylive/corlinman:0.1.0` will ship with 0.1.1.
 - **Dashboard screenshot placeholder** in `README.md`
   (`docs/assets/dashboard.png`) pending the install screencast.
 - **Fresh-install scenario** (`qa/scenarios/fresh-install.yaml`) is marked
