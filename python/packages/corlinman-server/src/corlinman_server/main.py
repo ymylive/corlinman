@@ -16,14 +16,17 @@ in :mod:`corlinman_grpc`.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import sys
-from typing import Final
+from pathlib import Path
+from typing import Any, Final
 
 import grpc.aio
 import structlog
 from corlinman_grpc import agent_pb2_grpc
+from corlinman_providers import AliasEntry, ProviderRegistry, ProviderSpec
 
 from corlinman_server.agent_servicer import CorlinmanAgentServicer
 from corlinman_server.middleware import install_tracecontext_interceptor
@@ -35,6 +38,65 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_SOCKET: Final[str] = "/tmp/corlinman-py.sock"
 _DEFAULT_TCP_ADDR: Final[str] = "127.0.0.1:50051"
 _SIGTERM_EXIT_CODE: Final[int] = 143
+
+
+def _load_config() -> tuple[list[ProviderSpec], dict[str, AliasEntry]]:
+    """Read the Python-side config from ``CORLINMAN_PY_CONFIG`` if set.
+
+    The Rust gateway writes a JSON file with ``providers`` + ``aliases``
+    blocks translated from its ``config.toml`` before spawning this
+    subprocess. The schema is:
+
+    .. code-block:: json
+
+        {
+          "providers": [{"name": "...", "kind": "...",
+                         "api_key": "...", "base_url": "...",
+                         "enabled": true, "params": {...}}, ...],
+          "aliases":   {"<alias>": {"provider": "...",
+                                    "model": "...",
+                                    "params": {...}}, ...}
+        }
+
+    When the env var is unset we return empty collections — the registry
+    then serves every request via the legacy prefix fallback (M2
+    behaviour), which keeps existing deployments working without any
+    config-file migration.
+
+    Env-based IPC (vs a second gRPC admin channel) was chosen because the
+    Python side already learns about transport config from env vars
+    (``CORLINMAN_PY_SOCKET`` / ``CORLINMAN_PY_PORT``); staying inside that
+    same channel is the surgical path that doesn't introduce a new
+    circular bootstrap problem between the two processes.
+    """
+    path = os.environ.get("CORLINMAN_PY_CONFIG")
+    if not path:
+        return [], {}
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("py_config.load_failed", path=path, error=str(exc))
+        return [], {}
+
+    specs: list[ProviderSpec] = []
+    for entry in data.get("providers", []) or []:
+        try:
+            specs.append(ProviderSpec.model_validate(entry))
+        except Exception as exc:
+            logger.warning("py_config.provider_invalid", entry=entry, error=str(exc))
+
+    aliases: dict[str, AliasEntry] = {}
+    raw_aliases: Any = data.get("aliases") or {}
+    if isinstance(raw_aliases, dict):
+        for name, body in raw_aliases.items():
+            try:
+                aliases[name] = AliasEntry.model_validate(body)
+            except Exception as exc:
+                logger.warning(
+                    "py_config.alias_invalid", alias=name, error=str(exc)
+                )
+
+    return specs, aliases
 
 
 def _bind_address() -> str:
@@ -82,10 +144,24 @@ async def _serve() -> int:
     )
 
     # M2: real Agent servicer drives corlinman_agent.ReasoningLoop.
-    # TODO(M3): register EmbeddingServiceServicer once implemented:
-    #   from corlinman_grpc import embedding_pb2_grpc
-    #   embedding_pb2_grpc.add_EmbeddingServicer_to_server(EmbeddingServicer(), server)
-    agent_pb2_grpc.add_AgentServicer_to_server(CorlinmanAgentServicer(), server)
+    # Feature C: load the spec-driven provider registry + alias table from
+    # the Rust gateway's JSON drop (path in ``CORLINMAN_PY_CONFIG``). Empty
+    # config is valid — the servicer falls back to the legacy prefix table.
+    specs, aliases = _load_config()
+    registry = ProviderRegistry(specs)
+    logger.info(
+        "providers.registered",
+        count=len(specs),
+        enabled=sum(1 for s in specs if s.enabled),
+        aliases=len(aliases),
+    )
+    agent_pb2_grpc.add_AgentServicer_to_server(
+        CorlinmanAgentServicer(
+            provider_resolver=registry.resolve,
+            aliases=aliases,
+        ),
+        server,
+    )
 
     bind = _bind_address()
     server.add_insecure_port(bind)

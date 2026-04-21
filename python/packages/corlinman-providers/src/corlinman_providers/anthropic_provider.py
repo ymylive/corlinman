@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import Any, ClassVar
 
 import structlog
 
@@ -38,6 +38,7 @@ from corlinman_providers.failover import (
     RateLimitError,
     TimeoutError,  # noqa: A004 — intentional shadowing; see failover.TimeoutError
 )
+from corlinman_providers.specs import ProviderKind, ProviderSpec
 
 logger = structlog.get_logger(__name__)
 
@@ -50,10 +51,20 @@ class AnthropicProvider:
     ``anthropic.AsyncAnthropic`` so import-time failures stay benign.
     """
 
-    name = "anthropic"
+    name: ClassVar[str] = "anthropic"
+    kind: ClassVar[ProviderKind] = ProviderKind.ANTHROPIC
 
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY") or None
+
+    @classmethod
+    def build(cls, spec: ProviderSpec) -> AnthropicProvider:
+        return cls(api_key=spec.api_key)
+
+    @classmethod
+    def params_schema(cls) -> dict[str, Any]:
+        """Per-request params accepted by the Anthropic messages API."""
+        return _ANTHROPIC_PARAMS_SCHEMA
 
     async def chat_stream(
         self,
@@ -344,3 +355,42 @@ def _map_anthropic_error(exc: Exception, *, model: str) -> CorlinmanError:
             return ModelNotFoundError(str(exc), status_code=status, **ctx)
         return CorlinmanError(str(exc), status_code=status, **ctx)
     return CorlinmanError(str(exc), **ctx)
+
+
+# Hand-authored JSON Schema (draft 2020-12). Anthropic accepts ``top_p`` via
+# ``extra`` — the SDK forwards unknown-to-us kwargs to the HTTP body, so we
+# declare it here and the adapter threads it through.
+_ANTHROPIC_PARAMS_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "temperature": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Sampling temperature (Anthropic caps at 1.0).",
+        },
+        "top_p": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Nucleus sampling probability mass.",
+        },
+        "max_tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum tokens in the completion (required by Anthropic).",
+        },
+        "system_prompt": {
+            "type": "string",
+            "maxLength": 16000,
+            "description": "Top-level Anthropic system parameter.",
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "description": "Client-side request timeout in milliseconds.",
+        },
+    },
+}

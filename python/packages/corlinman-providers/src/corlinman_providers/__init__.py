@@ -26,10 +26,14 @@ from corlinman_providers.failover import (
     TimeoutError,  # noqa: A004 — intentional shadowing; see failover.TimeoutError
 )
 from corlinman_providers.google_provider import GoogleProvider
+from corlinman_providers.openai_compatible import OpenAICompatibleProvider
 from corlinman_providers.openai_provider import OpenAIProvider
-from corlinman_providers.registry import ProviderRegistry, resolve
+from corlinman_providers.registry import MODEL_PREFIX_DEFAULTS, ProviderRegistry, resolve
+from corlinman_providers.specs import AliasEntry, EmbeddingSpec, ProviderKind, ProviderSpec
 
 __all__ = [
+    "MODEL_PREFIX_DEFAULTS",
+    "AliasEntry",
     "AnthropicProvider",
     "AuthError",
     "AuthPermanentError",
@@ -38,14 +42,18 @@ __all__ = [
     "CorlinmanError",
     "CorlinmanProvider",
     "DeepSeekProvider",
+    "EmbeddingSpec",
     "FormatError",
     "GLMProvider",
     "GoogleProvider",
     "ModelNotFoundError",
+    "OpenAICompatibleProvider",
     "OpenAIProvider",
     "OverloadedError",
     "ProviderChunk",
+    "ProviderKind",
     "ProviderRegistry",
+    "ProviderSpec",
     "QwenProvider",
     "RateLimitError",
     "TimeoutError",

@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 
 import grpc
@@ -41,7 +41,8 @@ from corlinman_agent.reasoning_loop import (
 )
 from corlinman_grpc import agent_pb2, agent_pb2_grpc, common_pb2
 from corlinman_providers import registry as provider_registry
-from corlinman_providers.base import ProviderChunk
+from corlinman_providers.base import CorlinmanProvider, ProviderChunk
+from corlinman_providers.specs import AliasEntry
 
 logger = structlog.get_logger(__name__)
 
@@ -67,16 +68,35 @@ def _mock_resolver(_model: str) -> Any:
     return _MockProvider(text)
 
 
+# Feature C: the spec-driven resolver signature returns the merged params
+# too. The injection surface still accepts the legacy 1-arg callable
+# ``(model) -> provider`` used by every existing test; ``_call_resolver``
+# normalises both shapes to the new triple.
+_ResolvedTriple = tuple[CorlinmanProvider, str, dict[str, Any]]
+_ResolverCallable = Callable[..., Any]
+
+
 class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
     """Concrete implementation — replaces the default UNIMPLEMENTED stub."""
 
-    def __init__(self, provider_resolver: Any | None = None) -> None:
-        """``provider_resolver`` defaults to :mod:`corlinman_providers.registry`.
+    def __init__(
+        self,
+        provider_resolver: _ResolverCallable | None = None,
+        *,
+        aliases: Mapping[str, AliasEntry] | None = None,
+    ) -> None:
+        """Construct the servicer.
 
+        ``provider_resolver`` defaults to :mod:`corlinman_providers.registry`.
         The indirection exists so tests can inject a fake provider without
         touching the global registry. If the caller doesn't supply one and
         ``CORLINMAN_TEST_MOCK_PROVIDER`` is set, a mock resolver is used —
         this drives the E2E smoke script without hitting the real network.
+
+        ``aliases`` — the ``[models.aliases.<name>]`` map; forwarded to the
+        registry's spec-driven ``resolve()``. Passing ``None`` leaves the
+        resolver to fall through to the legacy prefix table for raw model
+        ids (preserves M2 behaviour for existing deployments).
         """
         if provider_resolver is not None:
             self._resolve = provider_resolver
@@ -84,6 +104,7 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
             self._resolve = _mock_resolver
         else:
             self._resolve = provider_registry.resolve
+        self._aliases: dict[str, AliasEntry] = dict(aliases or {})
 
     async def Chat(  # noqa: N802 — gRPC method name
         self,
@@ -102,10 +123,19 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
         logger.info("agent.chat.start", model=start.model, session=start.session_key)
 
         try:
-            provider = self._resolve(start.model)
+            provider, upstream_model, merged_params = _call_resolver(
+                self._resolve, start.model, self._aliases
+            )
         except KeyError as exc:
             yield _error_frame("model_not_found", str(exc))
             return
+
+        # Feature C: thread merged params into the reasoning loop.
+        # ``temperature`` and ``max_tokens`` have dedicated slots on
+        # ``ChatStart``; everything else flows through as ``extra`` so the
+        # provider adapter forwards it to the SDK call body.
+        start.model = upstream_model
+        _apply_merged_params(start, merged_params)
 
         # Bump the tool-result timeout above the M2 default (0.05s) so the
         # loop actually waits long enough for the gateway to round-trip a
@@ -276,6 +306,55 @@ def _role_name(role: common_pb2.Role) -> str:
         common_pb2.TOOL: "tool",
     }
     return mapping.get(role, "user")
+
+
+def _call_resolver(
+    resolve: _ResolverCallable,
+    alias_or_model: str,
+    aliases: Mapping[str, AliasEntry],
+) -> _ResolvedTriple:
+    """Call ``resolve`` with whichever signature it exposes.
+
+    New-style resolvers (``ProviderRegistry.resolve``) take
+    ``alias_or_model=`` + ``aliases=`` kwargs and return a triple. Legacy
+    test resolvers are 1-arg ``(model) -> provider`` callables — for those
+    we normalise to ``(provider, model, {})`` so the downstream code is
+    signature-agnostic.
+    """
+    # Prefer the new keyword-only form; fall back to the legacy 1-arg form.
+    try:
+        result = resolve(alias_or_model=alias_or_model, aliases=aliases)
+    except TypeError:
+        result = resolve(alias_or_model)
+    if isinstance(result, tuple) and len(result) == 3:
+        provider, model, params = result
+        return provider, model, dict(params or {})
+    # Legacy single-provider return.
+    return result, alias_or_model, {}
+
+
+def _apply_merged_params(start: AgentChatStart, params: Mapping[str, Any]) -> None:
+    """Apply merged params onto a :class:`ChatStart`.
+
+    ``temperature`` / ``max_tokens`` live in dedicated fields — a
+    non-``None`` request-level value already on ``start`` wins over the
+    merged default (request ≻ alias ≻ provider). Everything else is
+    dumped into ``start.extra`` for the provider adapter to forward.
+    """
+    if not params:
+        return
+    extra: dict[str, Any] = dict(start.extra or {})
+    for key, value in params.items():
+        if key == "temperature":
+            if start.temperature is None:
+                start.temperature = float(value)
+            continue
+        if key == "max_tokens":
+            if start.max_tokens is None:
+                start.max_tokens = int(value)
+            continue
+        extra[key] = value
+    start.extra = extra
 
 
 def _error_frame(reason: str, message: str) -> agent_pb2.ServerFrame:

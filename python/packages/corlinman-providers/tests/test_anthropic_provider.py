@@ -197,9 +197,12 @@ def test_map_stop_reason_defaults_to_stop() -> None:
 
 
 def test_registry_resolves_claude_prefix() -> None:
+    # Feature C: resolve() returns a (provider, upstream_model, params) triple.
     reg = ProviderRegistry()
-    p = reg.resolve("claude-sonnet-4-5")
-    assert p.__class__.__name__ == "AnthropicProvider"
+    provider, model, params = reg.resolve("claude-sonnet-4-5")
+    assert provider.__class__.__name__ == "AnthropicProvider"
+    assert model == "claude-sonnet-4-5"
+    assert params == {}
 
 
 def test_registry_raises_for_unknown() -> None:

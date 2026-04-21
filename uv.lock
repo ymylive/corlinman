@@ -302,6 +302,7 @@ name = "corlinman-embedding"
 version = "0.1.0"
 source = { editable = "python/packages/corlinman-embedding" }
 dependencies = [
+    { name = "corlinman-providers" },
     { name = "httpx" },
     { name = "pydantic" },
     { name = "structlog" },
@@ -314,6 +315,7 @@ local = [
 
 [package.metadata]
 requires-dist = [
+    { name = "corlinman-providers", editable = "python/packages/corlinman-providers" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "sentence-transformers", marker = "extra == 'local'", specifier = ">=3.1" },

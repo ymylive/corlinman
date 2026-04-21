@@ -13,20 +13,28 @@ the Bearer-key path; signed tokens rotate every 30 minutes.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from corlinman_providers.openai_provider import OpenAIProvider
+from corlinman_providers.specs import ProviderKind, ProviderSpec
 
 
 class GLMProvider(OpenAIProvider):
     """GLM / 智谱 BigModel adapter — reuses OpenAI-standard tool_calls support."""
 
-    name = "glm"
+    name: ClassVar[str] = "glm"
+    kind: ClassVar[ProviderKind] = ProviderKind.GLM
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
         super().__init__(
             api_key=api_key,
-            base_url="https://open.bigmodel.cn/api/paas/v4",
+            base_url=base_url or "https://open.bigmodel.cn/api/paas/v4",
             env_key="ZHIPU_API_KEY",
         )
+
+    @classmethod
+    def build(cls, spec: ProviderSpec) -> GLMProvider:
+        return cls(api_key=spec.api_key, base_url=spec.base_url)
 
     @classmethod
     def supports(cls, model: str) -> bool:

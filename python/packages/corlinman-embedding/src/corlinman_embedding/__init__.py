@@ -13,6 +13,12 @@ TODO(M4): implement the router, local pool, and remote client.
 
 from __future__ import annotations
 
+from corlinman_embedding.benchmark import BenchmarkReport, benchmark_embedding
+from corlinman_embedding.provider import (
+    CorlinmanEmbeddingProvider,
+    GoogleEmbeddingProvider,
+    OpenAICompatibleEmbeddingProvider,
+)
 from corlinman_embedding.rerank_client import (
     LocalRerankProvider,
     RemoteRerankProvider,
@@ -21,8 +27,13 @@ from corlinman_embedding.rerank_client import (
 )
 
 __all__: list[str] = [
+    "BenchmarkReport",
+    "CorlinmanEmbeddingProvider",
+    "GoogleEmbeddingProvider",
     "LocalRerankProvider",
+    "OpenAICompatibleEmbeddingProvider",
     "RemoteRerankProvider",
     "RerankHit",
     "RerankProvider",
+    "benchmark_embedding",
 ]

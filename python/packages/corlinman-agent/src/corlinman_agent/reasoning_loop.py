@@ -64,7 +64,14 @@ class Attachment:
 
 @dataclass(slots=True)
 class ChatStart:
-    """Minimal descriptor fed to the reasoning loop."""
+    """Minimal descriptor fed to the reasoning loop.
+
+    ``extra`` carries Feature-C provider-specific params (e.g. ``top_p``,
+    ``reasoning_effort``, ``safety_settings``) that the servicer computed
+    by merging ``[providers.<name>].params`` under
+    ``[models.aliases.<alias>].params``. The loop forwards it verbatim to
+    :meth:`CorlinmanProvider.chat_stream`.
+    """
 
     model: str
     messages: Sequence[dict[str, Any]]
@@ -73,6 +80,7 @@ class ChatStart:
     temperature: float | None = None
     max_tokens: int | None = None
     attachments: Sequence[Attachment] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -279,6 +287,7 @@ class ReasoningLoop:
             tools=start.tools or None,
             temperature=start.temperature,
             max_tokens=start.max_tokens,
+            extra=start.extra or None,
         )
         async for chunk in stream:
             kind = chunk.kind

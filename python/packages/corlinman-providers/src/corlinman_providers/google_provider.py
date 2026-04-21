@@ -24,12 +24,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import Any, ClassVar
 
 import structlog
 
 from corlinman_providers.base import ProviderChunk
 from corlinman_providers.failover import CorlinmanError
+from corlinman_providers.specs import ProviderKind, ProviderSpec
 
 logger = structlog.get_logger(__name__)
 
@@ -37,10 +38,26 @@ logger = structlog.get_logger(__name__)
 class GoogleProvider:
     """Google Gemini adapter (text-only for M2; see module docstring TODO)."""
 
-    name = "google"
+    name: ClassVar[str] = "google"
+    kind: ClassVar[ProviderKind] = ProviderKind.GOOGLE
 
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("GOOGLE_API_KEY") or None
+
+    @classmethod
+    def build(cls, spec: ProviderSpec) -> GoogleProvider:
+        return cls(api_key=spec.api_key)
+
+    @classmethod
+    def params_schema(cls) -> dict[str, Any]:
+        """Per-request params accepted by the Gemini generate_content API.
+
+        Note: google-genai maps ``top_p`` to ``top_p`` inside its
+        ``GenerateContentConfig`` — we forward it verbatim via ``extra``.
+        ``safety_settings`` is the Gemini-specific escape hatch; declared as
+        a free-form object because the SDK validates its own shape.
+        """
+        return _GOOGLE_PARAMS_SCHEMA
 
     async def chat_stream(
         self,
@@ -120,3 +137,47 @@ def _get(obj: Any, key: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(key)
     return getattr(obj, key, None)
+
+
+# Hand-authored JSON Schema (draft 2020-12). ``safety_settings`` is
+# free-form: the google-genai SDK validates its internal shape and we don't
+# want to duplicate that here — declare as an object with no constraints.
+_GOOGLE_PARAMS_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "temperature": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 2.0,
+            "description": "Sampling temperature.",
+        },
+        "top_p": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Nucleus sampling probability mass.",
+        },
+        "max_tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "max_output_tokens in Gemini terminology.",
+        },
+        "system_prompt": {
+            "type": "string",
+            "maxLength": 16000,
+            "description": "System instruction; concatenated with any history.",
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "description": "Client-side request timeout in milliseconds.",
+        },
+        "safety_settings": {
+            "type": "object",
+            "additionalProperties": True,
+            "description": "Forwarded verbatim to google-genai (shape validated by SDK).",
+        },
+    },
+}

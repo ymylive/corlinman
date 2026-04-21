@@ -11,20 +11,28 @@ tool calls are returned; if we run into vendor quirks, override
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from corlinman_providers.openai_provider import OpenAIProvider
+from corlinman_providers.specs import ProviderKind, ProviderSpec
 
 
 class QwenProvider(OpenAIProvider):
     """Qwen / DashScope adapter — reuses OpenAI-standard tool_calls support."""
 
-    name = "qwen"
+    name: ClassVar[str] = "qwen"
+    kind: ClassVar[ProviderKind] = ProviderKind.QWEN
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
         super().__init__(
             api_key=api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            base_url=base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1",
             env_key="DASHSCOPE_API_KEY",
         )
+
+    @classmethod
+    def build(cls, spec: ProviderSpec) -> QwenProvider:
+        return cls(api_key=spec.api_key, base_url=spec.base_url)
 
     @classmethod
     def supports(cls, model: str) -> bool:

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import Any, ClassVar
 
 import structlog
 
@@ -40,6 +40,7 @@ from corlinman_providers.failover import (
     RateLimitError,
     TimeoutError,  # noqa: A004 — intentional shadowing; see failover.TimeoutError
 )
+from corlinman_providers.specs import ProviderKind, ProviderSpec
 
 logger = structlog.get_logger(__name__)
 
@@ -47,7 +48,8 @@ logger = structlog.get_logger(__name__)
 class OpenAIProvider:
     """OpenAI adapter (and base for OpenAI-compatible endpoints)."""
 
-    name = "openai"
+    name: ClassVar[str] = "openai"
+    kind: ClassVar[ProviderKind] = ProviderKind.OPENAI
 
     def __init__(
         self,
@@ -58,6 +60,29 @@ class OpenAIProvider:
     ) -> None:
         self._api_key = api_key or os.environ.get(env_key) or None
         self._base_url = base_url
+
+    @classmethod
+    def build(cls, spec: ProviderSpec) -> OpenAIProvider:
+        """Construct from a :class:`ProviderSpec`.
+
+        Falls back to the ``OPENAI_API_KEY`` env var when the spec omits one
+        — matches the historic constructor behaviour so existing envs keep
+        working even when the new config path is active.
+        """
+        return cls(
+            api_key=spec.api_key,
+            base_url=spec.base_url,
+        )
+
+    @classmethod
+    def params_schema(cls) -> dict[str, Any]:
+        """JSON Schema (draft 2020-12) for per-request params.
+
+        Covers the portable chat-completion knobs plus the ``reasoning_effort``
+        escape hatch for the ``o1``/``o3`` reasoning family (forwarded via
+        ``extra``; ignored by models that don't accept it).
+        """
+        return _OPENAI_PARAMS_SCHEMA
 
     async def chat_stream(
         self,
@@ -262,3 +287,47 @@ def _map_openai_error(exc: Exception, *, model: str, provider: str) -> Corlinman
             return ModelNotFoundError(str(exc), status_code=status, **ctx)
         return CorlinmanError(str(exc), status_code=status, **ctx)
     return CorlinmanError(str(exc), **ctx)
+
+
+# Hand-authored JSON Schema (draft 2020-12). Kept tight per the contract:
+# common knobs as a slider-friendly ``number`` with bounds, plus the one
+# OpenAI-family-specific extra (``reasoning_effort``).
+_OPENAI_PARAMS_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "temperature": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 2.0,
+            "description": "Sampling temperature. 0 = deterministic.",
+        },
+        "top_p": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Nucleus sampling probability mass.",
+        },
+        "max_tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum tokens in the completion.",
+        },
+        "system_prompt": {
+            "type": "string",
+            "maxLength": 16000,
+            "description": "System message prepended to the conversation.",
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "description": "Client-side request timeout in milliseconds.",
+        },
+        "reasoning_effort": {
+            "type": "string",
+            "enum": ["minimal", "low", "medium", "high"],
+            "description": "o1/o3-family reasoning effort hint.",
+        },
+    },
+}
