@@ -70,6 +70,18 @@ pub enum Cmd {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// List the distinct `chunks.namespace` values with their chunk counts.
+    ///
+    /// Sprint 9 T1: namespaces partition the corpus into general / diary:<agent> /
+    /// papers / etc. Legacy chunks default to `general`.
+    Namespaces {
+        /// Emit JSON instead of the text summary.
+        #[arg(long)]
+        json: bool,
+        /// Explicit config path; defaults to `$CORLINMAN_DATA_DIR/config.toml`.
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
 }
 
 pub async fn run(cmd: Cmd) -> Result<()> {
@@ -88,6 +100,7 @@ pub async fn run(cmd: Cmd) -> Result<()> {
             confirm,
             path,
         } => rebuild(path, source, confirm).await,
+        Cmd::Namespaces { json, path } => namespaces_cmd(path, json).await,
     }
 }
 
@@ -246,6 +259,44 @@ async fn query_cmd(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// namespaces
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+struct NamespaceOutput {
+    namespace: String,
+    chunks: u64,
+}
+
+async fn namespaces_cmd(config_path: Option<PathBuf>, json: bool) -> Result<()> {
+    let cfg = load_config(config_path)?;
+    let (sqlite_path, _usearch_path) = index_paths(&cfg);
+
+    if let Some(parent) = sqlite_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let store = SqliteStore::open(&sqlite_path)
+        .await
+        .with_context(|| format!("open sqlite '{}'", sqlite_path.display()))?;
+    let rows = store.list_namespaces().await?;
+    let out: Vec<NamespaceOutput> = rows
+        .into_iter()
+        .map(|(namespace, chunks)| NamespaceOutput { namespace, chunks })
+        .collect();
+
+    if json {
+        println!("{}", serde_json::to_string(&out)?);
+    } else if out.is_empty() {
+        println!("(no namespaces — index is empty)");
+    } else {
+        for ns in &out {
+            println!("{:<24} {:>8} chunks", ns.namespace, ns.chunks);
+        }
+    }
+    Ok(())
+}
+
 fn build_tag_filter(required: &[String], excluded: &[String]) -> Option<TagFilter> {
     if required.is_empty() && excluded.is_empty() {
         return None;
@@ -330,7 +381,7 @@ async fn rebuild(
         for (i, piece) in chunk_markdown(&text).into_iter().enumerate() {
             let v = stub_embed(&piece, STUB_DIM);
             let chunk_id = store
-                .insert_chunk(file_id, i as i64, &piece, Some(&v))
+                .insert_chunk(file_id, i as i64, &piece, Some(&v), "general")
                 .await?;
             index
                 .add(chunk_id as u64, &v)

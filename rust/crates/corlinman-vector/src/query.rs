@@ -150,7 +150,7 @@ mod tests {
         let mut chunk_ids = [0_i64; 3];
         for (i, (text, vec)) in corpus.iter().enumerate() {
             chunk_ids[i] = sqlite
-                .insert_chunk(file_id, i as i64, text, Some(vec))
+                .insert_chunk(file_id, i as i64, text, Some(vec), "general")
                 .await
                 .unwrap();
         }

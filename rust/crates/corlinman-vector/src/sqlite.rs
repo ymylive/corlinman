@@ -1,9 +1,11 @@
 //! sqlx pool + file/chunk/kv access + BM25 FTS5 search.
 //!
-//! Tables (corlinman-native, schema v4):
+//! Tables (corlinman-native, schema v5):
 //!
 //! - `files` — one row per indexed source file.
-//! - `chunks` — text chunks + little-endian f32 BLOB vector.
+//! - `chunks` — text chunks + little-endian f32 BLOB vector + namespace tag
+//!   (Sprint 9 T1, `default 'general'`). Namespace partitions the corpus for
+//!   the diary / paper-reader / general RAG split.
 //! - `chunks_fts` — FTS5 contentless-linked virtual table mirroring
 //!   `chunks.content`, maintained by INSERT/DELETE/UPDATE triggers.
 //! - `chunk_tags` — (chunk_id, tag) many-to-many used for tag-filter
@@ -46,6 +48,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_index INTEGER NOT NULL,
     content TEXT NOT NULL,
     vector BLOB,
+    namespace TEXT NOT NULL DEFAULT 'general',
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 );
 
@@ -57,6 +60,7 @@ CREATE TABLE IF NOT EXISTS kv_store (
 
 CREATE INDEX IF NOT EXISTS idx_files_diary ON files(diary_name);
 CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_namespace ON chunks(namespace, id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     content,
@@ -126,6 +130,10 @@ pub struct ChunkRow {
     /// Decoded vector (little-endian f32). `None` if the BLOB is NULL or the
     /// length wasn't a multiple of 4.
     pub vector: Option<Vec<f32>>,
+    /// Sprint 9 T1: namespace partition this chunk belongs to. Legacy rows
+    /// default to `"general"` per the v4→v5 migration; callers that don't
+    /// care pass `"general"` to [`SqliteStore::insert_chunk`].
+    pub namespace: String,
 }
 
 /// Row from `pending_approvals` — one per tool call intercepted by an
@@ -221,7 +229,7 @@ impl SqliteStore {
     /// Chunks belonging to `file_id`, ordered by `chunk_index`.
     pub async fn get_chunks(&self, file_id: i64) -> Result<Vec<ChunkRow>> {
         let rows = sqlx::query(
-            "SELECT id, file_id, chunk_index, content, vector \
+            "SELECT id, file_id, chunk_index, content, vector, namespace \
              FROM chunks WHERE file_id = ?1 ORDER BY chunk_index ASC",
         )
         .bind(file_id)
@@ -241,7 +249,7 @@ impl SqliteStore {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT id, file_id, chunk_index, content, vector \
+            "SELECT id, file_id, chunk_index, content, vector, namespace \
              FROM chunks WHERE id IN ({placeholders})"
         );
         let mut q = sqlx::query(&sql);
@@ -479,6 +487,64 @@ impl SqliteStore {
         Ok(rows.into_iter().map(|r| r.get::<i64, _>("id")).collect())
     }
 
+    // ---- namespace helpers (schema v5) -----------------------------------
+
+    /// List every distinct `chunks.namespace` value along with the chunk
+    /// count in that namespace. Sorted ascending by name.
+    ///
+    /// Sprint 9 T1: powers `corlinman vector namespaces` + the admin UI's
+    /// future memory-dashboard namespace picker.
+    pub async fn list_namespaces(&self) -> Result<Vec<(String, u64)>> {
+        let rows = sqlx::query(
+            "SELECT namespace, COUNT(*) AS n \
+             FROM chunks GROUP BY namespace ORDER BY namespace ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("list_namespaces")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let name: String = r.get("namespace");
+                let n: i64 = r.get("n");
+                (name, n.max(0) as u64)
+            })
+            .collect())
+    }
+
+    /// Intersect a (possibly-`None`) tag-filtered id whitelist with the
+    /// set of chunk ids that live in one of `namespaces`. When both are
+    /// `None` this returns `None` (meaning "no filter"); otherwise the
+    /// returned `Vec<i64>` is the sorted intersection.
+    ///
+    /// An empty `namespaces` slice is treated as "no namespace filter" —
+    /// callers who want to restrict to zero namespaces should short-circuit
+    /// before calling this.
+    pub async fn filter_chunk_ids_by_namespace(&self, namespaces: &[String]) -> Result<Vec<i64>> {
+        if namespaces.is_empty() {
+            // No filter ⇒ all ids. Caller combines with any tag-filter result.
+            let rows = sqlx::query("SELECT id FROM chunks ORDER BY id ASC")
+                .fetch_all(&self.pool)
+                .await
+                .context("filter_chunk_ids_by_namespace: list all")?;
+            return Ok(rows.into_iter().map(|r| r.get::<i64, _>("id")).collect());
+        }
+        let placeholders = std::iter::repeat_n("?", namespaces.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql =
+            format!("SELECT id FROM chunks WHERE namespace IN ({placeholders}) ORDER BY id ASC");
+        let mut q = sqlx::query(&sql);
+        for ns in namespaces {
+            q = q.bind(ns);
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .context("filter_chunk_ids_by_namespace")?;
+        Ok(rows.into_iter().map(|r| r.get::<i64, _>("id")).collect())
+    }
+
     /// Total row count in `files`.
     pub async fn count_files(&self) -> Result<i64> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM files")
@@ -539,22 +605,28 @@ impl SqliteStore {
     }
 
     /// Insert a chunk; returns its auto-assigned `id`.
+    ///
+    /// Sprint 9 T1: `namespace` partitions the corpus for the diary /
+    /// paper-reader / general RAG split. Legacy callers pass `"general"`
+    /// (matching the column default) to preserve pre-S9 behaviour.
     pub async fn insert_chunk(
         &self,
         file_id: i64,
         chunk_index: i64,
         content: &str,
         vector: Option<&[f32]>,
+        namespace: &str,
     ) -> Result<i64> {
         let blob = vector.map(crate::f32_slice_to_blob);
         let res = sqlx::query(
-            "INSERT INTO chunks(file_id, chunk_index, content, vector) \
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO chunks(file_id, chunk_index, content, vector, namespace) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .bind(file_id)
         .bind(chunk_index)
         .bind(content)
         .bind(blob)
+        .bind(namespace)
         .execute(&self.pool)
         .await
         .context("insert_chunk")?;
@@ -722,6 +794,7 @@ fn row_to_chunk(r: sqlx::sqlite::SqliteRow) -> ChunkRow {
         vector: r
             .get::<Option<Vec<u8>>, _>("vector")
             .and_then(|b| crate::blob_to_f32_vec(&b)),
+        namespace: r.get::<String, _>("namespace"),
     }
 }
 
@@ -757,15 +830,15 @@ mod tests {
             .await
             .unwrap();
         let _ = store
-            .insert_chunk(file_id, 0, "the quick brown fox jumps", None)
+            .insert_chunk(file_id, 0, "the quick brown fox jumps", None, "general")
             .await
             .unwrap();
         let target = store
-            .insert_chunk(file_id, 1, "lazy dog sleeps in the sun", None)
+            .insert_chunk(file_id, 1, "lazy dog sleeps in the sun", None, "general")
             .await
             .unwrap();
         let _ = store
-            .insert_chunk(file_id, 2, "unrelated content about cats", None)
+            .insert_chunk(file_id, 2, "unrelated content about cats", None, "general")
             .await
             .unwrap();
 
@@ -790,7 +863,7 @@ mod tests {
             .await
             .unwrap();
         let _ = store
-            .insert_chunk(file_id, 0, "alpha bravo charlie", None)
+            .insert_chunk(file_id, 0, "alpha bravo charlie", None, "general")
             .await
             .unwrap();
         assert_eq!(store.search_bm25("alpha", 5).await.unwrap().len(), 1);
@@ -826,11 +899,11 @@ mod tests {
         let v1 = vec![0.1_f32, 0.2, 0.3];
         let v2 = vec![0.4_f32, 0.5, 0.6];
         let c1 = store
-            .insert_chunk(file_id, 0, "hello world", Some(&v1))
+            .insert_chunk(file_id, 0, "hello world", Some(&v1), "general")
             .await
             .unwrap();
         let c2 = store
-            .insert_chunk(file_id, 1, "second chunk", Some(&v2))
+            .insert_chunk(file_id, 1, "second chunk", Some(&v2), "general")
             .await
             .unwrap();
 
@@ -881,7 +954,7 @@ mod tests {
             .await
             .unwrap();
         let _ = store
-            .insert_chunk(file_id, 0, "hello rebuild world", None)
+            .insert_chunk(file_id, 0, "hello rebuild world", None, "general")
             .await
             .unwrap();
 
@@ -902,6 +975,9 @@ mod tests {
         assert!(SCHEMA_SQL.contains("chunks_fts"));
         assert!(SCHEMA_SQL.contains("pending_approvals"));
         assert!(SCHEMA_SQL.contains("chunk_tags"));
+        // Sprint 9 T1 — namespace lives on chunks with a 'general' default.
+        assert!(SCHEMA_SQL.contains("namespace TEXT NOT NULL DEFAULT 'general'"));
+        assert!(SCHEMA_SQL.contains("idx_chunks_namespace"));
     }
 
     // ---- chunk_tags -----------------------------------------------------
@@ -916,15 +992,15 @@ mod tests {
             .await
             .unwrap();
         let a = store
-            .insert_chunk(file_id, 0, "rust backend content", None)
+            .insert_chunk(file_id, 0, "rust backend content", None, "general")
             .await
             .unwrap();
         let b = store
-            .insert_chunk(file_id, 1, "rust frontend content", None)
+            .insert_chunk(file_id, 1, "rust frontend content", None, "general")
             .await
             .unwrap();
         let c = store
-            .insert_chunk(file_id, 2, "untagged note", None)
+            .insert_chunk(file_id, 2, "untagged note", None, "general")
             .await
             .unwrap();
         store.insert_tag(a, "rust").await.unwrap();
