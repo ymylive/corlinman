@@ -192,7 +192,14 @@ fn resolve_addr() -> SocketAddr {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(6005);
-    SocketAddr::from(([127, 0, 0, 1], port))
+    // Default to 127.0.0.1 for safety on developer laptops. Containerised
+    // deploys set `BIND=0.0.0.0` so docker port-publishing actually reaches
+    // the listener (docker-proxy dials 0.0.0.0:PORT inside the netns).
+    let bind = std::env::var("BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let ip: std::net::IpAddr = bind
+        .parse()
+        .unwrap_or_else(|_| std::net::IpAddr::from([127, 0, 0, 1]));
+    SocketAddr::new(ip, port)
 }
 
 /// Load config from `CORLINMAN_CONFIG` if set; otherwise return `Ok(None)` so

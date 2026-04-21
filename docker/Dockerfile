@@ -89,8 +89,11 @@ COPY python ./python
 COPY proto ./proto
 COPY scripts ./scripts
 
-# Create venv via uv sync (frozen, no dev deps for runtime image)
-RUN uv sync --frozen --no-dev
+# Create venv via uv sync. --no-editable copies wheels into the venv
+# instead of emitting .pth shims that reference /build/* source paths —
+# otherwise the runtime image can't import workspace packages because
+# their source tree isn't carried over from the builder.
+RUN uv sync --frozen --no-dev --no-editable
 
 # Generate Python gRPC stubs into corlinman_grpc package
 RUN chmod +x scripts/gen-proto.sh && scripts/gen-proto.sh
