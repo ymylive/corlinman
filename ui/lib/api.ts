@@ -460,7 +460,17 @@ export function saveAgent(
 
 export interface HealthCheck {
   name: string;
+  /** Normalised boolean (true iff status === "ok"). Populated by fetchHealth. */
   ok: boolean;
+  /** Raw gateway status string ("ok" | "warn" | "unhealthy" | ...). */
+  status?: string;
+  detail?: string;
+  checked_at?: string;
+}
+
+interface GatewayHealthCheck {
+  name: string;
+  status: string;
   detail?: string;
   checked_at?: string;
 }
@@ -471,13 +481,33 @@ export interface HealthStatus {
   version?: string;
 }
 
+interface GatewayHealthStatus {
+  status: string;
+  checks?: GatewayHealthCheck[];
+  version?: string;
+}
+
 /**
- * GET /health — returns aggregated gateway health. The gateway exposes a
- * simple JSON shape; we accept the loosest superset so older 200/OK-string
- * responses still parse.
+ * GET /health — returns aggregated gateway health.
+ *
+ * The gateway reports each check as `{ name, status, detail }` where
+ * `status` is a string ("ok" / "warn" / "unhealthy" / ...). The admin UI
+ * wants a boolean, so we normalise here — `ok` is true iff the raw
+ * `status` equals "ok".
  */
 export async function fetchHealth(): Promise<HealthStatus> {
-  return apiFetch<HealthStatus>("/health");
+  const raw = await apiFetch<GatewayHealthStatus>("/health");
+  return {
+    status: raw.status,
+    version: raw.version,
+    checks: (raw.checks ?? []).map((c) => ({
+      name: c.name,
+      status: c.status,
+      ok: c.status === "ok",
+      detail: c.detail,
+      checked_at: c.checked_at,
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------
