@@ -94,6 +94,12 @@ pub struct HybridParams {
     /// the whitelisted ids) and post-filters HNSW (usearch has no
     /// predicate support, so we over-fetch then prune).
     pub tag_filter: Option<TagFilter>,
+    /// Sprint 9 T1: restrict the search to one or more `chunks.namespace`
+    /// partitions. `None` preserves legacy behaviour → only the
+    /// `"general"` namespace is searched. `Some(vec![])` is treated the
+    /// same as `None` to keep JSON callers from accidentally killing
+    /// recall. Multi-valued vectors union the listed namespaces.
+    pub namespaces: Option<Vec<String>>,
     /// Run the [`HybridSearcher`]'s [`Reranker`] after RRF fusion when
     /// `true`. Default: `false`. When `false` the fused list is simply
     /// truncated to `top_k` (the noop reranker behaviour), so callers
@@ -103,7 +109,7 @@ pub struct HybridParams {
 
 impl HybridParams {
     /// Library defaults: `top_k=10`, `overfetch=3`, equal weights, `k=60`,
-    /// no tag filter, rerank disabled.
+    /// no tag filter, namespace unset (→ `"general"`), rerank disabled.
     pub const fn new() -> Self {
         Self {
             top_k: 10,
@@ -112,6 +118,7 @@ impl HybridParams {
             hnsw_weight: 1.0,
             rrf_k: 60.0,
             tag_filter: None,
+            namespaces: None,
             rerank_enabled: false,
         }
     }
@@ -222,6 +229,13 @@ impl HybridSearcher {
     /// - HNSW: we over-fetch `fetch` candidates and drop any whose
     ///   `chunk_id` is not on the whitelist; usearch has no predicate
     ///   support so this is the best we can do without paginating.
+    ///
+    /// Sprint 9 T1: `params.namespaces` further restricts both paths to
+    /// chunks whose `namespace` is on the list. `None` (or empty-vec)
+    /// defaults to `["general"]` so legacy callers — none of whom set
+    /// the field — see the same single-namespace recall they used
+    /// before S9. The namespace whitelist intersects with `tag_filter`
+    /// when both are set.
     pub async fn search(
         &self,
         query_text: &str,
@@ -235,7 +249,7 @@ impl HybridSearcher {
         let fetch = p.top_k.saturating_mul(p.overfetch_multiplier.max(1));
 
         // --- Tag filter: resolve once, reuse for both paths. ---------------
-        let allowed_ids: Option<Vec<i64>> = match &p.tag_filter {
+        let tag_ids: Option<Vec<i64>> = match &p.tag_filter {
             Some(tf) if !tf.is_empty() => Some(
                 self.sqlite
                     .filter_chunk_ids_by_tags(tf)
@@ -243,6 +257,29 @@ impl HybridSearcher {
                     .context("tag filter pushdown")?,
             ),
             _ => None,
+        };
+
+        // --- Namespace filter (S9 T1). Default = ["general"] ---------------
+        let ns_ids: Vec<i64> = {
+            let effective: Vec<String> = match &p.namespaces {
+                Some(v) if !v.is_empty() => v.clone(),
+                _ => vec!["general".to_string()],
+            };
+            self.sqlite
+                .filter_chunk_ids_by_namespace(&effective)
+                .await
+                .context("namespace filter pushdown")?
+        };
+
+        // Combine namespace + tag filter. Namespace is always active, so
+        // `allowed_ids` is always `Some` from S9 onwards. Intersection
+        // preserves the stricter of the two when a caller supplies both.
+        let allowed_ids: Option<Vec<i64>> = match tag_ids {
+            None => Some(ns_ids),
+            Some(tags) => {
+                let ns_set: std::collections::HashSet<i64> = ns_ids.into_iter().collect();
+                Some(tags.into_iter().filter(|id| ns_set.contains(id)).collect())
+            }
         };
         let allowed_set: Option<std::collections::HashSet<i64>> =
             allowed_ids.as_ref().map(|v| v.iter().copied().collect());
@@ -522,6 +559,7 @@ mod tests {
             hnsw_weight: 0.1,
             rrf_k: 60.0,
             tag_filter: None,
+            namespaces: None,
             rerank_enabled: false,
         };
         let fused = rrf_fuse(&dense, &sparse, &p);
@@ -548,6 +586,7 @@ mod tests {
             hnsw_weight: 1.0,
             rrf_k: 0.0,
             tag_filter: None,
+            namespaces: None,
             rerank_enabled: false,
         };
         let fused = rrf_fuse(&[(1, 0.0)], &[(1, 0.0)], &p);
@@ -579,7 +618,7 @@ mod tests {
         let mut ids = [0_i64; 3];
         for (i, (text, vec)) in corpus.iter().enumerate() {
             ids[i] = sqlite
-                .insert_chunk(file_id, i as i64, text, Some(vec))
+                .insert_chunk(file_id, i as i64, text, Some(vec), "general")
                 .await
                 .unwrap();
         }
@@ -610,6 +649,7 @@ mod tests {
             hnsw_weight: 1.0,
             rrf_k: 60.0,
             tag_filter: Some(tf),
+            namespaces: None,
             rerank_enabled: false,
         }
     }
@@ -717,6 +757,140 @@ mod tests {
         assert!(hits[0].content.contains("apple"));
     }
 
+    // ---- namespace filter (Sprint 9 T1) -------------------------------
+
+    /// Seed a searcher with 4 chunks split across two namespaces:
+    /// - ids[0..2] → `general` ("apple banana cherry", "banana dog")
+    /// - ids[2..4] → `diary:a`  ("banana rain", "banana snow")
+    async fn namespaced_store() -> (HybridSearcher, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let sqlite = SqliteStore::open(&tmp.path().join("kb.sqlite"))
+            .await
+            .unwrap();
+        let file_id = sqlite.insert_file("ns.md", "ns", "h", 0, 0).await.unwrap();
+
+        let rows: &[(&str, [f32; 4], &str)] = &[
+            ("apple banana cherry", [1.0, 0.0, 0.0, 0.0], "general"),
+            ("banana dog", [0.9, 0.1, 0.0, 0.0], "general"),
+            ("banana rain", [0.8, 0.0, 0.2, 0.0], "diary:a"),
+            ("banana snow", [0.0, 1.0, 0.0, 0.0], "diary:a"),
+        ];
+        let mut ids = [0_i64; 4];
+        let mut index = UsearchIndex::create_with_capacity(4, 16).unwrap();
+        for (i, (text, v, ns)) in rows.iter().enumerate() {
+            ids[i] = sqlite
+                .insert_chunk(file_id, i as i64, text, Some(v), ns)
+                .await
+                .unwrap();
+            index.add(ids[i] as u64, v).unwrap();
+        }
+        let hybrid = HybridSearcher::new(
+            Arc::new(sqlite),
+            Arc::new(RwLock::new(index)),
+            HybridParams::new(),
+        );
+        (hybrid, tmp)
+    }
+
+    fn ns_params(namespaces: Option<Vec<String>>) -> HybridParams {
+        HybridParams {
+            top_k: 10,
+            overfetch_multiplier: 3,
+            bm25_weight: 1.0,
+            hnsw_weight: 1.0,
+            rrf_k: 60.0,
+            tag_filter: None,
+            namespaces,
+            rerank_enabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn namespace_filter_restricts_to_named_namespace() {
+        let (searcher, _tmp) = namespaced_store().await;
+        let hits = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(ns_params(Some(vec!["diary:a".into()]))),
+            )
+            .await
+            .unwrap();
+        // Only the two diary:a rows should survive.
+        assert_eq!(
+            hits.len(),
+            2,
+            "got: {:?}",
+            hits.iter().map(|h| &h.content).collect::<Vec<_>>()
+        );
+        for h in &hits {
+            assert!(
+                h.content.contains("rain") || h.content.contains("snow"),
+                "unexpected leakage: {}",
+                h.content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn namespace_none_defaults_to_general_only() {
+        // Legacy callers who don't set `namespaces` must continue to see
+        // the pre-S9 behaviour: only the `general` namespace is searched.
+        let (searcher, _tmp) = namespaced_store().await;
+        let hits = searcher
+            .search("banana", &[1.0, 0.0, 0.0, 0.0], Some(ns_params(None)))
+            .await
+            .unwrap();
+        // 2 general rows — 0 diary:a rows.
+        assert_eq!(hits.len(), 2);
+        for h in &hits {
+            assert!(
+                h.content.contains("apple") || h.content.contains("dog"),
+                "non-general leaked: {}",
+                h.content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn namespace_empty_vec_treated_as_none() {
+        let (searcher, _tmp) = namespaced_store().await;
+        let hits = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(ns_params(Some(vec![]))),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 2); // same as None → general only.
+    }
+
+    #[tokio::test]
+    async fn namespace_multi_value_union() {
+        let (searcher, _tmp) = namespaced_store().await;
+        let hits = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(ns_params(Some(vec!["general".into(), "diary:a".into()]))),
+            )
+            .await
+            .unwrap();
+        // All 4 rows match "banana".
+        assert_eq!(hits.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn list_namespaces_counts_rows_per_namespace() {
+        let (searcher, _tmp) = namespaced_store().await;
+        let nss = searcher.sqlite.list_namespaces().await.unwrap();
+        assert_eq!(
+            nss,
+            vec![("diary:a".to_string(), 2u64), ("general".to_string(), 2u64),]
+        );
+    }
+
     // ---- reranker integration (Sprint 3 T6) ----------------------------
 
     use crate::rerank::Reranker;
@@ -749,6 +923,7 @@ mod tests {
             hnsw_weight: 1.0,
             rrf_k: 60.0,
             tag_filter: None,
+            namespaces: None,
             rerank_enabled: enabled,
         }
     }

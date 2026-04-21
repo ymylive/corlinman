@@ -43,7 +43,13 @@ pub async fn run(sc: &RagHybridScenario) -> anyhow::Result<()> {
 
     for (i, entry) in sc.corpus.iter().enumerate() {
         let chunk_id = store
-            .insert_chunk(file_id, i as i64, &entry.content, Some(&entry.vector))
+            .insert_chunk(
+                file_id,
+                i as i64,
+                &entry.content,
+                Some(&entry.vector),
+                "general",
+            )
             .await?;
         usearch.add(chunk_id as u64, &entry.vector)?;
     }

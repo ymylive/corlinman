@@ -6,7 +6,8 @@
 //! it" instead of "edit the ladder and pray".
 //!
 //! Shipped steps: [`V1ToV2FtsBackfill`], [`V2ToV3PendingApprovals`],
-//! [`V3ToV4ChunkTags`]. [`MigrationRegistry::target_version`] is `4`.
+//! [`V3ToV4ChunkTags`], [`V4ToV5ChunksNamespace`].
+//! [`MigrationRegistry::target_version`] is `5`.
 //!
 //! # Architecture
 //!
@@ -103,13 +104,15 @@ impl MigrationRegistry {
     }
 
     /// The scripts shipped by corlinman-vector today: v1→v2 (FTS5
-    /// backfill), v2→v3 (pending_approvals), v3→v4 (chunk_tags).
+    /// backfill), v2→v3 (pending_approvals), v3→v4 (chunk_tags), v4→v5
+    /// (chunks.namespace).
     pub fn builtin() -> Self {
         Self {
             scripts: vec![
                 Arc::new(V1ToV2FtsBackfill) as Arc<dyn MigrationScript>,
                 Arc::new(V2ToV3PendingApprovals) as Arc<dyn MigrationScript>,
                 Arc::new(V3ToV4ChunkTags) as Arc<dyn MigrationScript>,
+                Arc::new(V4ToV5ChunksNamespace) as Arc<dyn MigrationScript>,
             ],
         }
     }
@@ -443,6 +446,179 @@ impl MigrationScript for V3ToV4ChunkTags {
     }
 }
 
+/// v4 → v5: add `chunks.namespace TEXT NOT NULL DEFAULT 'general'` plus
+/// `idx_chunks_namespace(namespace, id)` (Sprint 9 T1). Fresh DBs already
+/// ship the column via [`SqliteStore::SCHEMA_SQL`]; the `up()` path uses
+/// `ALTER TABLE … ADD COLUMN` guarded by a `PRAGMA table_info` probe so it's
+/// idempotent on both fresh and pre-existing v4 files. Existing rows pick up
+/// the column default value (`'general'`), which is exactly the behaviour we
+/// want: legacy callers see `'general'`-namespaced chunks.
+///
+/// `down()` is reversible: drops the index, then rebuilds `chunks` without
+/// the namespace column by copying rows + re-hooking FTS + re-firing the
+/// `chunks_fts` rebuild so BM25 survives the round-trip.
+pub struct V4ToV5ChunksNamespace;
+
+#[async_trait]
+impl MigrationScript for V4ToV5ChunksNamespace {
+    fn from(&self) -> u32 {
+        4
+    }
+    fn to(&self) -> u32 {
+        5
+    }
+    fn name(&self) -> &'static str {
+        "v4_to_v5_chunks_namespace"
+    }
+
+    async fn up(&self, tx: &mut SqliteTransaction<'_>) -> Result<(), CorlinmanError> {
+        // Idempotency probe: only ALTER when the column is absent. Fresh
+        // DBs already have it via SCHEMA_SQL so the up() is a no-op for
+        // them; legacy v4 files get the ALTER.
+        let already_has_namespace = chunks_has_namespace_column(tx).await?;
+        if !already_has_namespace {
+            // SQLite requires a literal (not an expression) for a column
+            // default added via ALTER TABLE; `'general'` satisfies that.
+            sqlx::query("ALTER TABLE chunks ADD COLUMN namespace TEXT NOT NULL DEFAULT 'general'")
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| {
+                    CorlinmanError::Storage(format!("v4→v5 alter chunks add namespace: {e}"))
+                })?;
+        }
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_chunks_namespace ON chunks(namespace, id)")
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| {
+                CorlinmanError::Storage(format!("v4→v5 create idx_chunks_namespace: {e}"))
+            })?;
+        Ok(())
+    }
+
+    async fn down(&self, tx: &mut SqliteTransaction<'_>) -> Result<(), CorlinmanError> {
+        // SQLite doesn't support DROP COLUMN before 3.35; even on newer
+        // engines, dropping a column blows the FTS5 triggers on `chunks`.
+        // Safe rollback: rebuild `chunks` without the column.
+        sqlx::query("DROP INDEX IF EXISTS idx_chunks_namespace")
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| {
+                CorlinmanError::Storage(format!("v5→v4 drop idx_chunks_namespace: {e}"))
+            })?;
+
+        // If the column isn't there (e.g. fresh v4 DB the registry stamped
+        // as v5 without running up()), the index drop is the only thing
+        // we need to do. Short-circuit to keep the table untouched.
+        if !chunks_has_namespace_column(tx).await? {
+            return Ok(());
+        }
+
+        // Drop the FTS triggers so the table rebuild doesn't fire them
+        // during the INSERT … SELECT copy; we rebuild the FTS index at
+        // the end.
+        for trig in ["chunks_ai", "chunks_ad", "chunks_au"] {
+            sqlx::query(&format!("DROP TRIGGER IF EXISTS {trig}"))
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| CorlinmanError::Storage(format!("v5→v4 drop trigger {trig}: {e}")))?;
+        }
+
+        sqlx::query(
+            "CREATE TABLE chunks_v4_tmp (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                vector BLOB,
+                FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| CorlinmanError::Storage(format!("v5→v4 create chunks_v4_tmp: {e}")))?;
+
+        sqlx::query(
+            "INSERT INTO chunks_v4_tmp(id, file_id, chunk_index, content, vector) \
+             SELECT id, file_id, chunk_index, content, vector FROM chunks",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| CorlinmanError::Storage(format!("v5→v4 copy chunks: {e}")))?;
+
+        sqlx::query("DROP TABLE chunks")
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| CorlinmanError::Storage(format!("v5→v4 drop chunks: {e}")))?;
+        sqlx::query("ALTER TABLE chunks_v4_tmp RENAME TO chunks")
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| CorlinmanError::Storage(format!("v5→v4 rename chunks_v4_tmp: {e}")))?;
+
+        // Re-create the v4 secondary index on (file_id).
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id)")
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| CorlinmanError::Storage(format!("v5→v4 recreate idx_chunks_file: {e}")))?;
+
+        // Re-hook the FTS5 triggers (same definitions as SCHEMA_SQL).
+        sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN \
+                INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content); \
+             END",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| CorlinmanError::Storage(format!("v5→v4 recreate chunks_ai: {e}")))?;
+        sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN \
+                INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content); \
+             END",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| CorlinmanError::Storage(format!("v5→v4 recreate chunks_ad: {e}")))?;
+        sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN \
+                INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content); \
+                INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content); \
+             END",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| CorlinmanError::Storage(format!("v5→v4 recreate chunks_au: {e}")))?;
+
+        // FTS5 mirror rows for the old table are still valid (rowid-linked
+        // to chunks.id which we preserved), but rebuilding is cheap and
+        // keeps the rollback self-contained.
+        sqlx::query("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| CorlinmanError::Storage(format!("v5→v4 rebuild chunks_fts: {e}")))?;
+
+        Ok(())
+    }
+}
+
+/// Probe helper: return `true` iff the `chunks` table currently has a
+/// `namespace` column. Used by [`V4ToV5ChunksNamespace::up`] +
+/// [`V4ToV5ChunksNamespace::down`] to stay idempotent regardless of whether
+/// the DB was opened via `SCHEMA_SQL` (fresh) or a pre-existing v4 file.
+async fn chunks_has_namespace_column(
+    tx: &mut SqliteTransaction<'_>,
+) -> Result<bool, CorlinmanError> {
+    let rows = sqlx::query("PRAGMA table_info(chunks)")
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| CorlinmanError::Storage(format!("pragma chunks: {e}")))?;
+    for r in rows {
+        let name: String = r.get("name");
+        if name == "namespace" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // ---------------------------------------------------------------------------
 // Compatibility adapter — keeps the pre-Sprint-3 API working.
 // ---------------------------------------------------------------------------
@@ -542,7 +718,7 @@ mod tests {
         // inserted before FTS5 triggers existed.
         let file_id = store.insert_file("d.md", "d", "h", 0, 0).await.unwrap();
         store
-            .insert_chunk(file_id, 0, "alpha bravo charlie", None)
+            .insert_chunk(file_id, 0, "alpha bravo charlie", None, "general")
             .await
             .unwrap();
         // The schema_version is missing → 0. Use ensure_schema's init
@@ -550,14 +726,14 @@ mod tests {
         store.kv_set("schema_version", "1").await.unwrap();
 
         let registry = MigrationRegistry::builtin();
-        assert_eq!(registry.target_version(), 4);
+        assert_eq!(registry.target_version(), 5);
         let report = registry.migrate_up(store.pool()).await.unwrap();
         assert_eq!(report.from, 1);
-        assert_eq!(report.to, 4);
-        assert_eq!(report.scripts_applied.len(), 3);
+        assert_eq!(report.to, 5);
+        assert_eq!(report.scripts_applied.len(), 4);
         assert_eq!(
             store.kv_get("schema_version").await.unwrap().as_deref(),
-            Some("4")
+            Some("5")
         );
         // Tables the registry should have left in place:
         for t in [
@@ -580,12 +756,12 @@ mod tests {
         store.kv_set("schema_version", "1").await.unwrap();
         let registry = MigrationRegistry::builtin();
         let first = registry.migrate_up(store.pool()).await.unwrap();
-        assert_eq!(first.to, 4);
+        assert_eq!(first.to, 5);
         assert!(!first.scripts_applied.is_empty());
 
         let second = registry.migrate_up(store.pool()).await.unwrap();
-        assert_eq!(second.from, 4);
-        assert_eq!(second.to, 4);
+        assert_eq!(second.from, 5);
+        assert_eq!(second.to, 5);
         assert!(second.scripts_applied.is_empty());
     }
 
@@ -656,14 +832,17 @@ mod tests {
 
     // -- 5. partial_failure_rolls_back -------------------------------------
 
+    /// Synthetic v5→v6 step used to verify that `migrate_up` stops at the
+    /// last successful step when a later script fails. Deliberately reaches
+    /// *past* the shipped target so we don't collide with any real migration.
     struct AlwaysFails;
     #[async_trait]
     impl MigrationScript for AlwaysFails {
         fn from(&self) -> u32 {
-            4
+            5
         }
         fn to(&self) -> u32 {
-            5
+            6
         }
         fn name(&self) -> &'static str {
             "always_fails"
@@ -683,46 +862,222 @@ mod tests {
 
         let mut registry = MigrationRegistry::builtin();
         registry.register(Arc::new(AlwaysFails));
-        assert_eq!(registry.target_version(), 5);
+        assert_eq!(registry.target_version(), 6);
 
         let err = registry.migrate_up(store.pool()).await.unwrap_err();
         assert!(err.to_string().contains("synthetic failure"));
 
-        // v1→v2, v2→v3, v3→v4 committed successfully; v4→v5 failed and
-        // its transaction was rolled back, so we're parked at v4.
+        // v1→v2, v2→v3, v3→v4, v4→v5 committed successfully; v5→v6 failed
+        // and its transaction was rolled back, so we're parked at v5.
         assert_eq!(
             store.kv_get("schema_version").await.unwrap().as_deref(),
-            Some("4"),
+            Some("5"),
             "should be parked at last successful step"
         );
         assert!(store.table_exists("pending_approvals").await.unwrap());
         assert!(store.table_exists("chunk_tags").await.unwrap());
     }
 
-    // -- 6. migrate_down_to_v2_then_up_to_4 --------------------------------
+    // -- 6. migrate_down_to_v2_then_up_to_5 --------------------------------
 
     #[tokio::test]
-    async fn migrate_down_to_v2_then_up_to_4() {
+    async fn migrate_down_to_v2_then_up_to_5() {
+        let (store, _tmp) = fresh_store().await;
+        store.kv_set("schema_version", "5").await.unwrap();
+
+        let registry = MigrationRegistry::builtin();
+        // v5 → v4 → v3 → v2 (v1→v2 is irreversible, so 2 is the floor we
+        // can reach with down()).
+        let down = registry.migrate_down_to(store.pool(), 2).await.unwrap();
+        assert_eq!(down.from, 5);
+        assert_eq!(down.to, 2);
+        assert_eq!(down.scripts_applied.len(), 3);
+        assert!(!store.table_exists("pending_approvals").await.unwrap());
+        assert!(!store.table_exists("chunk_tags").await.unwrap());
+
+        // Re-apply v2→v3→v4→v5 and verify both tables come back.
+        let up = registry.migrate_up(store.pool()).await.unwrap();
+        assert_eq!(up.from, 2);
+        assert_eq!(up.to, 5);
+        assert_eq!(up.scripts_applied.len(), 3);
+        assert!(store.table_exists("pending_approvals").await.unwrap());
+        assert!(store.table_exists("chunk_tags").await.unwrap());
+    }
+
+    // -- 7. v5_up_adds_namespace_and_default ------------------------------
+
+    /// Build a synthetic v4 SQLite file the hard way: rebuild the `chunks`
+    /// table WITHOUT a `namespace` column so the v4→v5 ALTER TABLE path
+    /// actually runs (SCHEMA_SQL on fresh DBs already ships the column).
+    async fn force_v4_chunks_shape(store: &SqliteStore) {
+        let pool = store.pool();
+        // Drop the FTS triggers first so we can rebuild without the v5 col.
+        for trig in ["chunks_ai", "chunks_ad", "chunks_au"] {
+            sqlx::query(&format!("DROP TRIGGER IF EXISTS {trig}"))
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DROP INDEX IF EXISTS idx_chunks_namespace")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE IF EXISTS chunks")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                vector BLOB,
+                FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id)")
+            .execute(pool)
+            .await
+            .unwrap();
+        // Re-hook FTS triggers so BM25 still works on this synthetic v4.
+        sqlx::query(
+            "CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN \
+                INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content); \
+             END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN \
+                INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content); \
+             END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN \
+                INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content); \
+                INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content); \
+             END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn v5_up_adds_namespace_and_default() {
+        let (store, _tmp) = fresh_store().await;
+        force_v4_chunks_shape(&store).await;
+        store.kv_set("schema_version", "4").await.unwrap();
+
+        // Seed a pre-namespace row so we can verify the column default
+        // flows to existing data after the ALTER.
+        let file_id = store
+            .insert_file("legacy.md", "d", "h", 0, 0)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chunks(file_id, chunk_index, content, vector) VALUES(?1,0,'legacy row',NULL)")
+            .bind(file_id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let registry = MigrationRegistry::builtin();
+        let report = registry.migrate_up(store.pool()).await.unwrap();
+        assert_eq!(report.from, 4);
+        assert_eq!(report.to, 5);
+        assert_eq!(report.scripts_applied.len(), 1);
+        assert_eq!(report.scripts_applied[0], "v4_to_v5_chunks_namespace");
+
+        // Existing row now carries the 'general' default.
+        let ns: String = sqlx::query_scalar("SELECT namespace FROM chunks LIMIT 1")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(ns, "general");
+
+        // New inserts honour the namespace arg.
+        store
+            .insert_chunk(file_id, 1, "diary body", None, "diary:a")
+            .await
+            .unwrap();
+        let nss = store.list_namespaces().await.unwrap();
+        // Sorted asc: "diary:a", "general".
+        assert_eq!(
+            nss,
+            vec![("diary:a".into(), 1u64), ("general".into(), 1u64)]
+        );
+    }
+
+    #[tokio::test]
+    async fn v5_up_is_idempotent_on_fresh_db() {
+        // Fresh DB already has the column via SCHEMA_SQL — running v4→v5
+        // must succeed without errors (the ALTER is skipped) and leave the
+        // schema at v5.
         let (store, _tmp) = fresh_store().await;
         store.kv_set("schema_version", "4").await.unwrap();
 
         let registry = MigrationRegistry::builtin();
-        // v4 → v3 → v2 (v1→v2 is irreversible, so 2 is the floor we
-        // can reach with down()).
-        let down = registry.migrate_down_to(store.pool(), 2).await.unwrap();
-        assert_eq!(down.from, 4);
-        assert_eq!(down.to, 2);
-        assert_eq!(down.scripts_applied.len(), 2);
-        assert!(!store.table_exists("pending_approvals").await.unwrap());
-        assert!(!store.table_exists("chunk_tags").await.unwrap());
+        let report = registry.migrate_up(store.pool()).await.unwrap();
+        assert_eq!(report.to, 5);
+        // The column is still there and usable.
+        let file_id = store.insert_file("x.md", "d", "h", 0, 0).await.unwrap();
+        let _ = store
+            .insert_chunk(file_id, 0, "hello", None, "papers")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.list_namespaces().await.unwrap(),
+            vec![("papers".into(), 1u64)]
+        );
+    }
 
-        // Re-apply v2→v3→v4 and verify both tables come back.
-        let up = registry.migrate_up(store.pool()).await.unwrap();
-        assert_eq!(up.from, 2);
-        assert_eq!(up.to, 4);
-        assert_eq!(up.scripts_applied.len(), 2);
-        assert!(store.table_exists("pending_approvals").await.unwrap());
-        assert!(store.table_exists("chunk_tags").await.unwrap());
+    #[tokio::test]
+    async fn v5_down_rebuilds_chunks_without_namespace() {
+        let (store, _tmp) = fresh_store().await;
+        store.kv_set("schema_version", "5").await.unwrap();
+        // Seed content so the down() path exercises the INSERT … SELECT copy.
+        let file_id = store.insert_file("k.md", "d", "h", 0, 0).await.unwrap();
+        let _ = store
+            .insert_chunk(file_id, 0, "keep me", None, "diary:a")
+            .await
+            .unwrap();
+        let _ = store
+            .insert_chunk(file_id, 1, "me too", None, "general")
+            .await
+            .unwrap();
+
+        let registry = MigrationRegistry::builtin();
+        let report = registry.migrate_down_to(store.pool(), 4).await.unwrap();
+        assert_eq!(report.from, 5);
+        assert_eq!(report.to, 4);
+        assert_eq!(report.scripts_applied[0], "v4_to_v5_chunks_namespace");
+
+        // namespace column is gone; rows survived.
+        let has_ns = sqlx::query("PRAGMA table_info(chunks)")
+            .fetch_all(store.pool())
+            .await
+            .unwrap()
+            .into_iter()
+            .any(|r| r.get::<String, _>("name") == "namespace");
+        assert!(!has_ns, "namespace column should be dropped on v5→v4");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chunks")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        // BM25 still works post-rollback (FTS triggers were re-installed).
+        let hits = store.search_bm25("keep", 5).await.unwrap();
+        assert_eq!(hits.len(), 1);
     }
 
     // -- ensure_schema adapter keeps behaving the same ---------------------
@@ -748,7 +1103,7 @@ mod tests {
         let (store, _tmp) = fresh_store().await;
         let file_id = store.insert_file("d.md", "d", "h", 0, 0).await.unwrap();
         store
-            .insert_chunk(file_id, 0, "legacy content needs rebuild", None)
+            .insert_chunk(file_id, 0, "legacy content needs rebuild", None, "general")
             .await
             .unwrap();
         sqlx::query("INSERT INTO chunks_fts(chunks_fts) VALUES('delete-all')")

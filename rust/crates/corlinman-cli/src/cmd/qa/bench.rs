@@ -128,7 +128,9 @@ async fn bench_rag(args: &BenchArgs) -> anyhow::Result<BenchRow> {
         })
         .collect();
     for (i, (text, v)) in corpus.iter().enumerate() {
-        let chunk_id = store.insert_chunk(file_id, i as i64, text, Some(v)).await?;
+        let chunk_id = store
+            .insert_chunk(file_id, i as i64, text, Some(v), "general")
+            .await?;
         idx.add(chunk_id as u64, v)?;
     }
 

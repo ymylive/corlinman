@@ -40,7 +40,7 @@ pub use header::{probe_and_convert_if_needed, probe_usearch_header, UsearchHeade
 pub use hybrid::{HitSource, HybridParams, HybridSearcher, RagHit, TagFilter};
 pub use migration::{
     MigrationRegistry, MigrationReport, MigrationScript, V1ToV2FtsBackfill, V2ToV3PendingApprovals,
-    V3ToV4ChunkTags,
+    V3ToV4ChunkTags, V4ToV5ChunksNamespace,
 };
 pub use query::VectorStore;
 pub use rerank::{GrpcReranker, NoopReranker, Reranker};
@@ -61,9 +61,15 @@ pub use usearch_index::UsearchIndex;
 ///   [`sqlite::SCHEMA_SQL`] so fresh DBs materialise the table during open;
 ///   legacy v3 DBs get the table via the [`migration::V3ToV4ChunkTags`]
 ///   script.
+/// - v5: add `chunks.namespace TEXT NOT NULL DEFAULT 'general'` +
+///   `idx_chunks_namespace(namespace, id)` for the Sprint 9 T1 memory
+///   substrate. Fresh DBs pick up the column via `SCHEMA_SQL`; legacy v4
+///   files get it via [`migration::V4ToV5ChunksNamespace`], which is
+///   idempotent (ALTER only runs when the column is absent) and reversible
+///   (rollback rebuilds `chunks` without the column and re-hooks FTS).
 ///
 /// Bumped on any breaking migration; see [`migration::ensure_schema`].
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Encode a `&[f32]` as a little-endian byte blob for the `chunks.vector`
 /// column.

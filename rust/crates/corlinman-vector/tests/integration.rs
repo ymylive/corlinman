@@ -149,7 +149,7 @@ async fn build_fixture(dir: &std::path::Path) -> (PathBuf, PathBuf, Vec<(String,
         let content = synth_content(&mut rng, i);
         let vec = synth_vector(&mut rng);
         let chunk_id = store
-            .insert_chunk(file_id, i as i64, &content, Some(&vec))
+            .insert_chunk(file_id, i as i64, &content, Some(&vec), "general")
             .await
             .unwrap();
         index.add(chunk_id as u64, &vec).unwrap();
