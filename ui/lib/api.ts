@@ -449,3 +449,30 @@ export function saveAgent(
     body: { content },
   });
 }
+
+// ---------------------------------------------------------------------------
+// UI redesign — health + dashboard metrics
+// ---------------------------------------------------------------------------
+
+export interface HealthCheck {
+  name: string;
+  ok: boolean;
+  detail?: string;
+  checked_at?: string;
+}
+
+export interface HealthStatus {
+  status: "ok" | "healthy" | "degraded" | "warn" | "unhealthy" | string;
+  checks?: HealthCheck[];
+  version?: string;
+}
+
+/**
+ * GET /health — returns aggregated gateway health. The gateway exposes a
+ * simple JSON shape; we accept the loosest superset so older 200/OK-string
+ * responses still parse.
+ */
+export async function fetchHealth(): Promise<HealthStatus> {
+  return apiFetch<HealthStatus>("/health");
+}
+

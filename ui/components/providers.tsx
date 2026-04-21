@@ -3,12 +3,14 @@
 import * as React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
+import { Toaster } from "sonner";
 import {
   DEFAULT_LOCALE,
   type Locale,
   type MessageKey,
   translate,
 } from "@/lib/i18n";
+import { CommandPaletteProvider } from "./cmdk-palette";
 
 // --- i18n context (subset of next-intl API, see lib/i18n/index.ts) ----------
 
@@ -60,7 +62,25 @@ export function Providers({ children }: ProvidersProps) {
       disableTransitionOnChange
     >
       <QueryClientProvider client={queryClient}>
-        <I18nContext.Provider value={i18nValue}>{children}</I18nContext.Provider>
+        <I18nContext.Provider value={i18nValue}>
+          <CommandPaletteProvider>
+            {children}
+            <Toaster
+              theme="dark"
+              position="top-right"
+              toastOptions={{
+                classNames: {
+                  toast:
+                    "!border !border-border !bg-popover !text-popover-foreground !font-sans",
+                  title: "!text-sm !font-medium",
+                  description: "!text-xs !text-muted-foreground",
+                },
+              }}
+              closeButton
+              duration={3000}
+            />
+          </CommandPaletteProvider>
+        </I18nContext.Provider>
       </QueryClientProvider>
     </ThemeProvider>
   );

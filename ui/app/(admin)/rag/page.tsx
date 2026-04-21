@@ -2,33 +2,26 @@
 
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { Database, FileText, Tag } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { cn } from "@/lib/utils";
 import {
   fetchRagStats,
   queryRag,
   rebuildRag,
+  type RagHit,
   type RagQueryResponse,
   type RagStats,
 } from "@/lib/api";
 
 /**
- * RAG admin page — S6 T1. Live against `GET /admin/rag/stats`,
- * `GET /admin/rag/query`, `POST /admin/rag/rebuild`.
- *
- * Query panel runs a BM25-only debug scan (dense vectors require the
- * embedding service; the Rust route is documented accordingly). Rebuild
- * is guarded by a `window.confirm` because it re-scans the entire
- * `chunks_fts` virtual table and should not be clicked by accident.
+ * RAG admin page. Live against /admin/rag/stats · /query · /rebuild.
+ * Query panel runs BM25 only (dense vectors need the embedding service).
+ * Rebuild is guarded by a `window.confirm` because it rescans all chunks.
  */
 export default function RagPage() {
   const qc = useQueryClient();
@@ -40,6 +33,8 @@ export default function RagPage() {
 
   const [q, setQ] = React.useState("");
   const [k, setK] = React.useState(10);
+  const [tagFilter, setTagFilter] = React.useState<string[]>([]);
+  const [tagDraft, setTagDraft] = React.useState("");
   const [results, setResults] = React.useState<RagQueryResponse | null>(null);
   const [queryError, setQueryError] = React.useState<string | null>(null);
 
@@ -58,7 +53,11 @@ export default function RagPage() {
   const rebuildMutation = useMutation({
     mutationFn: rebuildRag,
     onSuccess: () => {
+      toast.success("Rebuild complete");
       qc.invalidateQueries({ queryKey: ["admin", "rag", "stats"] });
+    },
+    onError: (err) => {
+      toast.error(`Rebuild failed: ${err instanceof Error ? err.message : String(err)}`);
     },
   });
 
@@ -69,65 +68,132 @@ export default function RagPage() {
   };
 
   const handleRebuild = () => {
-    if (!window.confirm("确定重建 chunks_fts 索引？此操作会重新扫描全部 chunks。")) {
+    if (
+      !window.confirm(
+        "Rebuild chunks_fts index? This rescans every chunk in the store.",
+      )
+    )
       return;
-    }
     rebuildMutation.mutate();
   };
+
+  const addTag = (raw: string) => {
+    const t = raw.trim();
+    if (!t) return;
+    if (tagFilter.includes(t)) return;
+    setTagFilter([...tagFilter, t]);
+    setTagDraft("");
+  };
+  const removeTag = (t: string) =>
+    setTagFilter(tagFilter.filter((x) => x !== t));
 
   return (
     <>
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">RAG 调参</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">RAG</h1>
         <p className="text-sm text-muted-foreground">
-          实时对接 `GET /admin/rag/stats` + `/query` + `/rebuild`；查询仅走 BM25 旁路。
+          `/admin/rag/stats` · `/query` · `/rebuild` — BM25 debug scan; dense
+          vectors via embedding service.
         </p>
       </header>
 
-      <section className="grid grid-cols-1 gap-4 md:grid-cols-4">
-        <StatsCard label="Files" value={stats.data?.files} loading={stats.isPending} />
-        <StatsCard label="Chunks" value={stats.data?.chunks} loading={stats.isPending} />
-        <StatsCard label="Tags" value={stats.data?.tags} loading={stats.isPending} />
-        <div className="flex flex-col justify-between rounded-lg border border-border p-4">
-          <div className="text-xs uppercase text-muted-foreground">Rebuild FTS</div>
-          <Button
-            onClick={handleRebuild}
-            disabled={rebuildMutation.isPending || !stats.data?.ready}
-            data-testid="rag-rebuild-btn"
-          >
-            {rebuildMutation.isPending ? "重建中…" : "一键重建"}
-          </Button>
-          {rebuildMutation.isError ? (
-            <p className="text-xs text-destructive">
-              失败: {(rebuildMutation.error as Error).message}
-            </p>
-          ) : rebuildMutation.isSuccess ? (
-            <p className="text-xs text-emerald-500">rebuild 成功</p>
-          ) : null}
-        </div>
+      <section className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <RagStat
+          label="Chunks"
+          value={stats.data?.chunks}
+          loading={stats.isPending}
+          icon={<Database className="h-4 w-4" />}
+        />
+        <RagStat
+          label="Files"
+          value={stats.data?.files}
+          loading={stats.isPending}
+          icon={<FileText className="h-4 w-4" />}
+        />
+        <RagStat
+          label="Tags"
+          value={stats.data?.tags}
+          loading={stats.isPending}
+          icon={<Tag className="h-4 w-4" />}
+        />
       </section>
 
-      <section className="space-y-3 rounded-lg border border-border p-4">
-        <form className="flex flex-wrap gap-2" onSubmit={handleQuery}>
-          <Input
-            placeholder="BM25 query..."
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            className="max-w-md"
-            data-testid="rag-query-input"
-          />
-          <Input
-            type="number"
-            min={1}
-            max={100}
-            value={k}
-            onChange={(e) => setK(Number(e.target.value) || 10)}
-            className="w-24"
-            aria-label="top-k"
-          />
-          <Button type="submit" disabled={queryMutation.isPending || !q.trim()}>
-            {queryMutation.isPending ? "查询中…" : "Search"}
-          </Button>
+      <section className="space-y-4 rounded-lg border border-border bg-panel p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold">Query debug (BM25)</h2>
+        </div>
+        <form
+          className="space-y-3"
+          onSubmit={handleQuery}
+          aria-label="rag query"
+        >
+          <div className="flex flex-wrap gap-2">
+            <Input
+              placeholder="Query..."
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              className="max-w-md"
+              data-testid="rag-query-input"
+            />
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                k
+              </label>
+              <input
+                type="range"
+                min={1}
+                max={50}
+                value={k}
+                onChange={(e) => setK(Number(e.target.value))}
+                className="h-8 w-28 accent-primary"
+                aria-label="top-k"
+              />
+              <span className="w-6 font-mono text-xs">{k}</span>
+            </div>
+            <Button
+              type="submit"
+              size="sm"
+              disabled={queryMutation.isPending || !q.trim()}
+            >
+              {queryMutation.isPending ? "Querying…" : "Search"}
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              Tags
+            </label>
+            {tagFilter.map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => removeTag(t)}
+                className="inline-flex items-center gap-1 rounded-md border border-border bg-accent/40 px-2 py-0.5 font-mono text-[10px] text-accent-foreground hover:bg-accent"
+                aria-label={`Remove tag ${t}`}
+              >
+                #{t}
+                <span aria-hidden>×</span>
+              </button>
+            ))}
+            <input
+              type="text"
+              value={tagDraft}
+              onChange={(e) => setTagDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addTag(tagDraft);
+                } else if (e.key === "Backspace" && !tagDraft && tagFilter.length > 0) {
+                  e.preventDefault();
+                  setTagFilter(tagFilter.slice(0, -1));
+                }
+              }}
+              placeholder="add tag..."
+              className="h-7 rounded-md border border-input bg-transparent px-2 font-mono text-[11px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            />
+            <p className="text-[10px] text-muted-foreground">
+              (tag filter sent to server once the endpoint supports it)
+            </p>
+          </div>
         </form>
 
         {queryError ? (
@@ -135,61 +201,92 @@ export default function RagPage() {
         ) : null}
 
         {results ? (
-          <div className="overflow-hidden rounded-md border border-border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-24">Chunk ID</TableHead>
-                  <TableHead className="w-24">Score</TableHead>
-                  <TableHead>Preview</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {results.hits.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={3} className="py-4 text-center text-sm text-muted-foreground">
-                      no hits
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  results.hits.map((h) => (
-                    <TableRow key={h.chunk_id}>
-                      <TableCell className="font-mono text-xs">{h.chunk_id}</TableCell>
-                      <TableCell className="font-mono text-xs">
-                        {h.score.toFixed(3)}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {h.content_preview}
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
+          <div className="space-y-2">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+              {results.hits.length} hits · backend={results.backend}
+            </div>
+            {results.hits.length === 0 ? (
+              <p className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+                no hits
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {results.hits.map((h) => (
+                  <HitCard key={h.chunk_id} hit={h} maxScore={results.hits[0]!.score} />
+                ))}
+              </ul>
+            )}
           </div>
         ) : null}
+      </section>
+
+      <section className="flex items-center justify-between rounded-lg border border-border bg-panel p-4">
+        <div className="space-y-0.5">
+          <div className="text-sm font-semibold">Rebuild FTS index</div>
+          <p className="text-xs text-muted-foreground">
+            Rescans `chunks_fts`. Safe but not instant on large corpora.
+          </p>
+        </div>
+        <Button
+          variant="destructive"
+          onClick={handleRebuild}
+          disabled={rebuildMutation.isPending || !stats.data?.ready}
+          data-testid="rag-rebuild-btn"
+        >
+          {rebuildMutation.isPending ? "Rebuilding…" : "Rebuild"}
+        </Button>
       </section>
     </>
   );
 }
 
-function StatsCard({
+function RagStat({
   label,
   value,
   loading,
+  icon,
 }: {
   label: string;
   value: number | undefined;
   loading: boolean;
+  icon: React.ReactNode;
 }) {
   return (
-    <div className="rounded-lg border border-border p-4">
-      <div className="text-xs uppercase text-muted-foreground">{label}</div>
+    <div className="rounded-lg border border-border bg-panel p-4">
+      <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
+        <span>{label}</span>
+        <span className="text-muted-foreground/70">{icon}</span>
+      </div>
       {loading ? (
-        <Skeleton className="mt-2 h-8 w-16" />
+        <Skeleton className="mt-2 h-7 w-16" />
       ) : (
-        <div className="mt-1 font-mono text-2xl">{value ?? 0}</div>
+        <div className="mt-1 font-mono text-2xl font-semibold tracking-tight">
+          {value ?? 0}
+        </div>
       )}
     </div>
+  );
+}
+
+function HitCard({ hit, maxScore }: { hit: RagHit; maxScore: number }) {
+  const pct = Math.max(4, Math.round((hit.score / Math.max(maxScore, 0.0001)) * 100));
+  return (
+    <li className="rounded-md border border-border bg-surface p-3">
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <div className="flex items-center gap-2">
+          <code className="font-mono text-muted-foreground">#{hit.chunk_id}</code>
+          <span className="font-mono text-muted-foreground">
+            {hit.score.toFixed(3)}
+          </span>
+        </div>
+        <div className="h-1 flex-1 max-w-[40%] overflow-hidden rounded-full bg-muted">
+          <div
+            className={cn("h-full bg-primary")}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">{hit.content_preview}</p>
+    </li>
   );
 }

@@ -1,21 +1,28 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { GeistSans } from "geist/font/sans";
+import { GeistMono } from "geist/font/mono";
 import { Providers } from "@/components/providers";
 
 export const metadata: Metadata = {
-  title: "corlinman 管理后台",
+  title: "corlinman admin",
   description:
-    "corlinman admin UI — Rust 网关 + Python AI 层 + Next.js 管理面板",
+    "corlinman admin UI — Rust gateway + Python AI layer + Next.js control plane.",
 };
 
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  // `suppressHydrationWarning` is required by next-themes when toggling
-  // between light/dark classes on <html>.
+  // `suppressHydrationWarning` is required by next-themes when it toggles the
+  // dark/light class on <html>. Geist sans + mono are exposed as CSS vars
+  // (`--font-geist-sans`, `--font-geist-mono`) consumed by tailwind.config.ts.
   return (
-    <html lang="zh-CN" suppressHydrationWarning className="dark">
-      <body className="min-h-dvh bg-background text-foreground antialiased">
+    <html
+      lang="zh-CN"
+      suppressHydrationWarning
+      className={`${GeistSans.variable} ${GeistMono.variable} dark`}
+    >
+      <body className="min-h-dvh bg-background font-sans text-foreground antialiased">
         <Providers>{children}</Providers>
       </body>
     </html>

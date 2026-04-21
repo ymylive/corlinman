@@ -1,69 +1,218 @@
 "use client";
 
+import * as React from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { motion } from "framer-motion";
 import {
   Activity,
   Bot,
   Boxes,
+  ChevronsLeft,
+  ChevronsRight,
   ClipboardCheck,
   Database,
   FileTerminal,
+  LogOut,
   MessageCircle,
   Route,
   Settings,
   Timer,
 } from "lucide-react";
+import { toast } from "sonner";
+
 import { cn } from "@/lib/utils";
+import { logout } from "@/lib/auth";
+import { BrandMark } from "./brand-mark";
 
 interface NavItem {
   href: string;
-  labelZh: string;
+  label: string;
   icon: React.ComponentType<{ className?: string }>;
 }
 
-// Keep this list aligned with plan §4 (the admin route list).
 const ITEMS: NavItem[] = [
-  { href: "/", labelZh: "概览", icon: Activity },
-  { href: "/plugins", labelZh: "插件", icon: Boxes },
-  { href: "/agents", labelZh: "Agent", icon: Bot },
-  { href: "/rag", labelZh: "RAG", icon: Database },
-  { href: "/channels/qq", labelZh: "QQ 通道", icon: MessageCircle },
-  { href: "/scheduler", labelZh: "定时任务", icon: Timer },
-  { href: "/approvals", labelZh: "工具审批", icon: ClipboardCheck },
-  { href: "/logs", labelZh: "日志", icon: FileTerminal },
-  { href: "/config", labelZh: "配置", icon: Settings },
-  { href: "/models", labelZh: "模型路由", icon: Route },
+  { href: "/", label: "Dashboard", icon: Activity },
+  { href: "/plugins", label: "Plugins", icon: Boxes },
+  { href: "/agents", label: "Agents", icon: Bot },
+  { href: "/rag", label: "RAG", icon: Database },
+  { href: "/channels/qq", label: "Channels", icon: MessageCircle },
+  { href: "/scheduler", label: "Scheduler", icon: Timer },
+  { href: "/approvals", label: "Approvals", icon: ClipboardCheck },
+  { href: "/models", label: "Models", icon: Route },
+  { href: "/config", label: "Config", icon: Settings },
+  { href: "/logs", label: "Logs", icon: FileTerminal },
 ];
 
-export function Sidebar() {
-  const pathname = usePathname();
+const COLLAPSE_KEY = "corlinman.sidebar.collapsed.v1";
+
+function readCollapsed(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(COLLAPSE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function writeCollapsed(v: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(COLLAPSE_KEY, v ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
+
+interface SidebarProps {
+  user?: string;
+}
+
+export function Sidebar({ user }: SidebarProps) {
+  const pathname = usePathname() ?? "/";
+  const router = useRouter();
+  const [collapsed, setCollapsed] = React.useState(false);
+  const [hydrated, setHydrated] = React.useState(false);
+  const [loggingOut, setLoggingOut] = React.useState(false);
+
+  React.useEffect(() => {
+    setCollapsed(readCollapsed());
+    setHydrated(true);
+  }, []);
+
+  const toggle = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      writeCollapsed(next);
+      return next;
+    });
+  };
+
+  async function onLogout() {
+    setLoggingOut(true);
+    try {
+      await logout();
+      toast.success("已退出登录");
+    } catch {
+      /* idempotent */
+    } finally {
+      router.push("/login");
+    }
+  }
+
+  const width = collapsed && hydrated ? "w-[56px]" : "w-[240px]";
+
   return (
-    <aside className="flex w-56 shrink-0 flex-col border-r border-border bg-muted/20 px-3 py-4">
-      <nav className="flex flex-col gap-1" aria-label="admin">
+    <aside
+      className={cn(
+        "flex shrink-0 flex-col border-r border-border bg-surface/60 transition-[width] duration-200 ease-out",
+        width,
+      )}
+      aria-label="admin navigation"
+    >
+      {/* brand + collapse */}
+      <div className="flex h-14 items-center justify-between border-b border-border px-3">
+        <Link href="/" className="flex items-center gap-2 overflow-hidden">
+          <BrandMark compact={collapsed && hydrated} />
+        </Link>
+        <button
+          type="button"
+          onClick={toggle}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          {collapsed ? (
+            <ChevronsRight className="h-4 w-4" />
+          ) : (
+            <ChevronsLeft className="h-4 w-4" />
+          )}
+        </button>
+      </div>
+
+      <nav className="flex flex-1 flex-col gap-0.5 p-2">
         {ITEMS.map((item) => {
           const active =
             item.href === "/"
               ? pathname === "/"
-              : pathname === item.href || pathname.startsWith(`${item.href}/`);
+              : pathname === item.href ||
+                pathname.startsWith(`${item.href}/`);
           const Icon = item.icon;
           return (
             <Link
               key={item.href}
               href={item.href as never}
               className={cn(
-                "flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors",
+                "relative flex items-center gap-3 rounded-md px-2.5 py-2 text-sm transition-colors",
                 active
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                  ? "bg-accent/70 text-accent-foreground"
+                  : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
+                collapsed && hydrated && "justify-center px-0",
               )}
+              aria-current={active ? "page" : undefined}
+              title={collapsed ? item.label : undefined}
             >
-              <Icon className="h-4 w-4" />
-              <span>{item.labelZh}</span>
+              {active ? (
+                <motion.span
+                  layoutId="sidebar-indicator"
+                  className="absolute left-0 top-1 bottom-1 w-[2px] rounded-full bg-primary"
+                  transition={{
+                    type: "spring",
+                    stiffness: 500,
+                    damping: 40,
+                    mass: 0.6,
+                  }}
+                />
+              ) : null}
+              <Icon className="h-4 w-4 shrink-0" />
+              {collapsed && hydrated ? null : (
+                <span className="truncate">{item.label}</span>
+              )}
             </Link>
           );
         })}
       </nav>
+
+      {/* user chip + footer */}
+      <div className="border-t border-border p-3">
+        {collapsed && hydrated ? (
+          <button
+            type="button"
+            onClick={onLogout}
+            aria-label="Log out"
+            disabled={loggingOut}
+            className="flex h-8 w-full items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            data-testid="logout-button"
+          >
+            <LogOut className="h-4 w-4" />
+          </button>
+        ) : (
+          <div className="flex items-center gap-2">
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[11px] font-semibold text-primary">
+              {(user ?? "a").slice(0, 1).toUpperCase()}
+            </div>
+            <div className="min-w-0 flex-1 leading-tight">
+              <div
+                className="truncate text-xs font-medium text-foreground"
+                data-testid="nav-user"
+              >
+                {user ?? "admin"}
+              </div>
+              <div className="truncate font-mono text-[10px] text-muted-foreground">
+                v0.1.1
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onLogout}
+              disabled={loggingOut}
+              aria-label="Log out"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+              data-testid="logout-button"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
     </aside>
   );
 }

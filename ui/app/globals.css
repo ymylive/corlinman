@@ -2,60 +2,147 @@
 @tailwind components;
 @tailwind utilities;
 
-/* shadcn/ui zinc palette — dark default. Variables mirror the official
- * `default` + `zinc` preset (see components.json). */
+/* Linear-style redesign. Neutral base + indigo accent. Dark-first. */
 @layer base {
   :root {
+    /* light */
     --background: 0 0% 100%;
     --foreground: 240 10% 3.9%;
     --card: 0 0% 100%;
     --card-foreground: 240 10% 3.9%;
     --popover: 0 0% 100%;
     --popover-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
+    --primary: 244 75% 57%;
     --primary-foreground: 0 0% 98%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
+    --secondary: 240 5% 96%;
+    --secondary-foreground: 240 10% 3.9%;
+    --muted: 240 5% 96%;
+    --muted-foreground: 240 4% 46%;
+    --accent: 244 75% 96%;
+    --accent-foreground: 244 75% 25%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 240 10% 3.9%;
+    --border: 240 6% 90%;
+    --input: 240 6% 90%;
+    --ring: 244 75% 57%;
     --radius: 0.5rem;
+
+    /* surfaces */
+    --panel: 0 0% 100%;
+    --surface: 240 5% 98%;
+
+    /* status */
+    --ok: 142 71% 45%;
+    --warn: 38 92% 50%;
+    --err: 0 72% 51%;
   }
 
   .dark {
-    --background: 240 10% 3.9%;
+    /* dark — neutral-950-ish background, panel ~neutral-900, border neutral-800 */
+    --background: 240 10% 4%;
     --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
+    --card: 240 10% 6%;
     --card-foreground: 0 0% 98%;
-    --popover: 240 10% 3.9%;
+    --popover: 240 10% 6%;
     --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 240 5.9% 10%;
-    --secondary: 240 3.7% 15.9%;
+    --primary: 244 75% 67%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 5% 12%;
     --secondary-foreground: 0 0% 98%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
+    --muted: 240 4% 10%;
+    --muted-foreground: 240 5% 65%;
+    --accent: 244 44% 18%;
+    --accent-foreground: 244 90% 85%;
+    --destructive: 0 62% 45%;
     --destructive-foreground: 0 0% 98%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
-    --ring: 240 4.9% 83.9%;
+    --border: 240 4% 14%;
+    --input: 240 4% 14%;
+    --ring: 244 75% 67%;
+
+    --panel: 240 10% 6%;
+    --surface: 240 6% 8%;
+
+    --ok: 142 71% 45%;
+    --warn: 38 92% 50%;
+    --err: 0 72% 55%;
   }
 
   * {
     @apply border-border;
   }
 
+  html,
   body {
     @apply bg-background text-foreground;
-    font-feature-settings: "rlig" 1, "calt" 1;
+    font-feature-settings: "rlig" 1, "calt" 1, "ss01" 1, "cv11" 1;
+  }
+
+  /* A11y: keep focus rings visible. */
+  :focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--ring));
+    border-radius: calc(var(--radius) - 2px);
+  }
+}
+
+@layer utilities {
+  /* Subtle shimmer used by skeletons. 1.5s loop, respects reduced-motion. */
+  @keyframes shimmer {
+    0% {
+      background-position: -200% 0;
+    }
+    100% {
+      background-position: 200% 0;
+    }
+  }
+  .shimmer {
+    background-image: linear-gradient(
+      90deg,
+      hsl(var(--muted)) 0%,
+      hsl(var(--secondary)) 50%,
+      hsl(var(--muted)) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.6s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .shimmer {
+      animation: none;
+    }
+  }
+
+  /* Dashboard hero backdrop — a single subtle radial. */
+  .dashboard-hero-glow {
+    background:
+      radial-gradient(
+        1200px 400px at 10% -10%,
+        hsl(var(--primary) / 0.12),
+        transparent 60%
+      );
+  }
+
+  /* Constellation/dot-grid for login. */
+  .dot-grid {
+    background-image: radial-gradient(
+      hsl(var(--muted-foreground) / 0.15) 1px,
+      transparent 1px
+    );
+    background-size: 18px 18px;
+  }
+
+  /* Login error shake. Keyed via `key` remount in login/page.tsx. */
+  @keyframes login-shake {
+    0%,
+    100% {
+      transform: translateX(0);
+    }
+    20%,
+    60% {
+      transform: translateX(-4px);
+    }
+    40%,
+    80% {
+      transform: translateX(4px);
+    }
   }
 }

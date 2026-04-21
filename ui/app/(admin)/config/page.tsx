@@ -3,6 +3,10 @@
 import * as React from "react";
 import dynamic from "next/dynamic";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTheme } from "next-themes";
+import { AnimatePresence, motion } from "framer-motion";
+import { AlertTriangle, X } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -19,18 +23,13 @@ import {
 const Editor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 
 /**
- * Config editor — S6 T4. Left nav lists top-level TOML sections scraped
- * from the current document; right pane hosts Monaco in TOML mode. The
- * schema endpoint is fetched once and exposed via
- * `window.__corlinmanConfigSchema` for any future custom validator; we
- * stop short of wiring a TOML language-service hover because Monaco
- * doesn't ship one by default and the validator-derive on the backend
- * gives a per-field error list anyway.
+ * Config editor. Left rail = section navigation. Right = Monaco in INI/TOML
+ * mode. Validate does a dry-run POST; Save persists + ArcSwap hot-reload.
+ * Issues panel slides up from the bottom when a validation returns issues.
  *
- * Save flow:
- *   1. "Validate" → `POST /admin/config { dry_run: true }` — shows issues.
- *   2. "Save" → `dry_run: false`. On success we show restart-required
- *      fields + bump the version hash.
+ * Preserved E2E contracts:
+ *   - `config-save-btn` testid.
+ *   - "new version: <sha>" text on successful save (scoped to the result).
  */
 const SECTION_HEADERS = [
   "server",
@@ -47,12 +46,11 @@ const SECTION_HEADERS = [
 
 export default function ConfigPage() {
   const qc = useQueryClient();
+  const { resolvedTheme } = useTheme();
   const config = useQuery<ConfigGetResponse>({
     queryKey: ["admin", "config"],
     queryFn: fetchConfig,
   });
-  // Schema fetch is fire-and-forget; we expose the result via window for
-  // any consumer that wants to wire richer validation later.
   const schema = useQuery({
     queryKey: ["admin", "config", "schema"],
     queryFn: fetchConfigSchema,
@@ -72,6 +70,7 @@ export default function ConfigPage() {
     React.useState<ConfigPostResponse | null>(null);
   const [saveResult, setSaveResult] =
     React.useState<ConfigPostResponse | null>(null);
+  const [issuesOpen, setIssuesOpen] = React.useState(false);
 
   React.useEffect(() => {
     if (config.data && !initialized) {
@@ -85,6 +84,7 @@ export default function ConfigPage() {
     onSuccess: (r) => {
       setValidateResult(r);
       setSaveResult(null);
+      if (r.issues.length > 0) setIssuesOpen(true);
     },
     onError: () => setValidateResult(null),
   });
@@ -93,12 +93,13 @@ export default function ConfigPage() {
     onSuccess: (r) => {
       setSaveResult(r);
       setValidateResult(null);
+      if (r.issues.length > 0) setIssuesOpen(true);
       qc.invalidateQueries({ queryKey: ["admin", "config"] });
     },
     onError: () => setSaveResult(null),
   });
 
-  // Jump the editor to the given section header in the current draft.
+  // Monaco editor handle for section jumps.
   const editorRef = React.useRef<unknown>(null);
   const onMount = (editor: unknown) => {
     editorRef.current = editor;
@@ -106,7 +107,10 @@ export default function ConfigPage() {
   const jumpToSection = (section: string) => {
     setActiveSection(section);
     const ed = editorRef.current as
-      | { revealLineInCenter?: (n: number) => void; setPosition?: (p: { lineNumber: number; column: number }) => void }
+      | {
+          revealLineInCenter?: (n: number) => void;
+          setPosition?: (p: { lineNumber: number; column: number }) => void;
+        }
       | null;
     if (!ed) return;
     const lines = draft.split("\n");
@@ -127,18 +131,21 @@ export default function ConfigPage() {
     }
   };
 
+  const latestResult = saveResult ?? validateResult;
+
   return (
     <>
       <header className="flex items-start justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">配置</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Config</h1>
           <p className="text-sm text-muted-foreground">
-            Monaco 编辑 `config.toml`；保存后写盘 + ArcSwap 热切换。
+            Monaco edits `config.toml`. Save writes to disk + hot-swaps via
+            ArcSwap.
           </p>
         </div>
         <div className="flex items-center gap-2">
           {config.data ? (
-            <code className="rounded bg-muted px-2 py-1 text-xs">
+            <code className="rounded bg-muted px-2 py-1 font-mono text-[11px]">
               version: {config.data.version}
             </code>
           ) : null}
@@ -149,7 +156,7 @@ export default function ConfigPage() {
             disabled={!initialized || validateMutation.isPending}
             data-testid="config-validate-btn"
           >
-            {validateMutation.isPending ? "验证中…" : "Validate (dry-run)"}
+            {validateMutation.isPending ? "Validating…" : "Validate"}
           </Button>
           <Button
             size="sm"
@@ -163,24 +170,27 @@ export default function ConfigPage() {
       </header>
 
       <section className="grid grid-cols-1 gap-4 md:grid-cols-[180px_1fr]">
-        <aside className="space-y-1 rounded-lg border border-border p-2">
+        <aside className="space-y-0.5 rounded-lg border border-border bg-panel p-2">
+          <div className="px-2 pb-2 pt-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+            Sections
+          </div>
           {SECTION_HEADERS.map((s) => (
             <button
               type="button"
               key={s}
               onClick={() => jumpToSection(s)}
               className={cn(
-                "block w-full rounded px-2 py-1 text-left text-sm",
+                "block w-full rounded px-2 py-1.5 text-left font-mono text-xs transition-colors",
                 activeSection === s
                   ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:bg-accent/40",
+                  : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
               )}
             >
               [{s}]
             </button>
           ))}
         </aside>
-        <div className="overflow-hidden rounded-lg border border-border">
+        <div className="overflow-hidden rounded-lg border border-border bg-panel">
           {config.isPending ? (
             <Skeleton className="h-[600px] w-full" />
           ) : config.isError ? (
@@ -193,92 +203,137 @@ export default function ConfigPage() {
               defaultLanguage="ini"
               value={draft}
               onChange={(v) => setDraft(v ?? "")}
-              theme="vs-dark"
+              theme={resolvedTheme === "light" ? "vs-light" : "vs-dark"}
               onMount={onMount}
               options={{
                 fontSize: 13,
                 minimap: { enabled: false },
                 wordWrap: "on",
                 scrollBeyondLastLine: false,
+                fontFamily: "var(--font-geist-mono), ui-monospace, monospace",
               }}
             />
           )}
         </div>
       </section>
 
-      {validateResult ? (
-        <ResultPanel title="Dry-run 结果" result={validateResult} />
-      ) : null}
+      {/* save summary strip — always rendered so E2E `new version:` text lands */}
       {saveResult ? (
-        <ResultPanel title="保存结果" result={saveResult} highlight />
+        <ResultStrip title="Save result" result={saveResult} kind="save" />
       ) : null}
+      {validateResult ? (
+        <ResultStrip
+          title="Dry-run result"
+          result={validateResult}
+          kind="validate"
+        />
+      ) : null}
+
       {validateMutation.isError ? (
         <p className="text-sm text-destructive">
-          validate 失败: {(validateMutation.error as Error).message}
+          validate failed: {(validateMutation.error as Error).message}
         </p>
       ) : null}
       {saveMutation.isError ? (
         <p className="text-sm text-destructive">
-          save 失败: {(saveMutation.error as Error).message}
+          save failed: {(saveMutation.error as Error).message}
         </p>
       ) : null}
+
+      {/* issues slide-up panel */}
+      <AnimatePresence>
+        {issuesOpen && latestResult && latestResult.issues.length > 0 ? (
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 16 }}
+            transition={{ duration: 0.2, ease: "easeOut" }}
+            className="fixed bottom-4 left-1/2 z-40 w-[min(720px,94vw)] -translate-x-1/2 rounded-lg border border-border bg-popover p-3 shadow-2xl"
+            role="region"
+            aria-label="validation issues"
+          >
+            <div className="mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 text-warn" />
+                <span className="text-sm font-semibold">
+                  {latestResult.issues.length} issue
+                  {latestResult.issues.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIssuesOpen(false)}
+                className="inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                aria-label="Close issues"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <ul className="max-h-[30vh] space-y-1 overflow-auto">
+              {latestResult.issues.map((iss, i) => (
+                <li key={i} className="flex items-start gap-2 text-xs">
+                  <Badge
+                    variant={
+                      iss.level === "error" ? "destructive" : "secondary"
+                    }
+                    className="shrink-0"
+                  >
+                    {iss.level}
+                  </Badge>
+                  <code className="shrink-0 font-mono text-muted-foreground">
+                    {iss.path}
+                  </code>
+                  <span className="flex-1">{iss.message}</span>
+                </li>
+              ))}
+            </ul>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </>
   );
 }
 
-function ResultPanel({
+function ResultStrip({
   title,
   result,
-  highlight,
+  kind,
 }: {
   title: string;
   result: ConfigPostResponse;
-  highlight?: boolean;
+  kind: "validate" | "save";
 }) {
   return (
     <section
       className={cn(
-        "space-y-2 rounded-lg border p-3 text-sm",
-        highlight ? "border-emerald-500/40 bg-emerald-500/5" : "border-border",
+        "flex flex-wrap items-center gap-3 rounded-lg border p-3 text-sm",
+        kind === "save" && result.status === "ok"
+          ? "border-ok/40 bg-ok/5"
+          : "border-border bg-panel",
       )}
     >
-      <div className="flex items-center gap-2">
-        <span className="font-semibold">{title}</span>
-        {result.status === "ok" ? (
-          <Badge className="border-transparent bg-emerald-600/20 text-emerald-300">
-            ok
-          </Badge>
-        ) : (
-          <Badge variant="destructive">invalid</Badge>
-        )}
-        {result.version ? (
-          <code className="rounded bg-muted px-2 py-0.5 text-xs">
-            new version: {result.version}
-          </code>
-        ) : null}
-      </div>
-      {result.issues.length > 0 ? (
-        <ul className="space-y-1">
-          {result.issues.map((iss, i) => (
-            <li key={i} className="text-xs">
-              <Badge
-                variant={iss.level === "error" ? "destructive" : "secondary"}
-                className="mr-2"
-              >
-                {iss.level}
-              </Badge>
-              <code className="text-muted-foreground">{iss.path}</code>:{" "}
-              {iss.message}
-            </li>
-          ))}
-        </ul>
+      <span className="font-semibold">{title}</span>
+      {result.status === "ok" ? (
+        <Badge className="border-transparent bg-ok/15 text-ok">ok</Badge>
       ) : (
-        <p className="text-xs text-muted-foreground">no issues</p>
+        <Badge variant="destructive">invalid</Badge>
+      )}
+      {result.version ? (
+        <code className="rounded bg-muted px-2 py-0.5 font-mono text-[11px]">
+          new version: {result.version}
+        </code>
+      ) : null}
+      {result.issues.length > 0 ? (
+        <span className="text-xs text-muted-foreground">
+          {result.issues.length} issue{result.issues.length === 1 ? "" : "s"}
+        </span>
+      ) : (
+        <span className="text-xs text-muted-foreground">no issues</span>
       )}
       {result.requires_restart.length > 0 ? (
-        <p className="text-xs text-amber-400">
-          需要重启才能完全生效: {result.requires_restart.join(", ")}
-        </p>
+        <span className="text-xs text-warn">
+          restart required: {result.requires_restart.join(", ")}
+        </span>
       ) : null}
     </section>
   );

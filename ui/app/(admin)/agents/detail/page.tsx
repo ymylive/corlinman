@@ -5,21 +5,28 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTheme } from "next-themes";
+import { ArrowLeft, Circle } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 import { fetchAgent, saveAgent, type AgentContent } from "@/lib/api";
 
 const Editor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 
 /**
- * Agent detail page — S6 T6. Monaco edits the full file body. Agent name
- * is passed as `?name=<encoded>` (not a dynamic segment — keeps the Next
- * static export happy without a `generateStaticParams()` handshake).
+ * Agent detail page. Monaco edits the full file body. Name is passed as
+ * `?name=…` (not a dynamic segment — keeps Next static export happy).
+ *
+ * Dirty indicator: the small filled dot next to the filename flips on when
+ * the draft diverges from the last loaded content.
  */
 export default function AgentDetailPage() {
   const search = useSearchParams();
   const name = search?.get("name") ?? "";
   const qc = useQueryClient();
+  const { resolvedTheme } = useTheme();
 
   const agent = useQuery<AgentContent>({
     queryKey: ["admin", "agents", name],
@@ -28,17 +35,22 @@ export default function AgentDetailPage() {
   });
 
   const [draft, setDraft] = React.useState("");
+  const [baseline, setBaseline] = React.useState("");
   const [initialized, setInitialized] = React.useState(false);
   React.useEffect(() => {
     if (agent.data && !initialized) {
       setDraft(agent.data.content);
+      setBaseline(agent.data.content);
       setInitialized(true);
     }
   }, [agent.data, initialized]);
 
+  const dirty = initialized && draft !== baseline;
+
   const save = useMutation({
     mutationFn: () => saveAgent(name, draft),
     onSuccess: () => {
+      setBaseline(draft);
       qc.invalidateQueries({ queryKey: ["admin", "agents", name] });
       qc.invalidateQueries({ queryKey: ["admin", "agents"] });
     },
@@ -47,19 +59,34 @@ export default function AgentDetailPage() {
   if (!name) {
     return (
       <p className="text-sm text-muted-foreground">
-        missing `?name=…` in URL — go via <Link href="/agents" className="underline">agent list</Link>
+        missing `?name=…` in URL — go via{" "}
+        <Link href="/agents" className="underline">
+          agent list
+        </Link>
       </p>
     );
   }
 
   return (
-    <>
+    <div className="flex flex-1 flex-col space-y-4">
       <header className="flex items-start justify-between gap-4">
         <div className="space-y-1">
-          <Link href="/agents" className="text-xs text-muted-foreground hover:text-foreground">
-            ← 返回 Agent 列表
+          <Link
+            href="/agents"
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="h-3 w-3" />
+            Back to agents
           </Link>
-          <h1 className="text-2xl font-semibold tracking-tight">{name}</h1>
+          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
+            {name}
+            {dirty ? (
+              <Circle
+                className="h-2 w-2 fill-warn text-warn"
+                aria-label="unsaved changes"
+              />
+            ) : null}
+          </h1>
           {agent.data ? (
             <p className="font-mono text-xs text-muted-foreground">
               {agent.data.file_path} · {agent.data.bytes} bytes
@@ -84,18 +111,19 @@ export default function AgentDetailPage() {
           load failed: {(agent.error as Error).message}
         </p>
       ) : (
-        <section className="overflow-hidden rounded-lg border border-border">
+        <section className="flex-1 overflow-hidden rounded-lg border border-border bg-panel">
           <Editor
             height="600px"
             defaultLanguage="markdown"
             value={draft}
             onChange={(v) => setDraft(v ?? "")}
-            theme="vs-dark"
+            theme={resolvedTheme === "light" ? "vs-light" : "vs-dark"}
             options={{
               fontSize: 13,
               minimap: { enabled: false },
               wordWrap: "on",
               scrollBeyondLastLine: false,
+              fontFamily: "var(--font-geist-mono), ui-monospace, monospace",
             }}
           />
         </section>
@@ -106,8 +134,16 @@ export default function AgentDetailPage() {
           save failed: {(save.error as Error).message}
         </p>
       ) : save.isSuccess ? (
-        <p className="text-sm text-emerald-500">保存成功</p>
+        <p
+          className={cn(
+            "text-sm text-ok",
+            // Pulse the success text briefly
+            "animate-in fade-in-0",
+          )}
+        >
+          保存成功
+        </p>
       ) : null}
-    </>
+    </div>
   );
 }

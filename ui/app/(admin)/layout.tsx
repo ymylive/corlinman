@@ -6,16 +6,22 @@ import { usePathname, useRouter } from "next/navigation";
 import { getSession, type AdminSession } from "@/lib/auth";
 import { TopNav } from "@/components/layout/nav";
 import { Sidebar } from "@/components/layout/sidebar";
+import { PageTransition } from "@/components/layout/page-transition";
 
 /**
- * Admin route group layout — shared TopNav + Sidebar across every
- * /plugins, /agents, /rag, /channels/qq, /scheduler, /approvals, /logs,
- * /config, /models page (plan §4).
+ * Admin route group layout — Linear-style two-column shell.
  *
- * S5 T1: adds a client-side auth guard. On mount we hit `GET /admin/me`;
- * if it returns 401 we `router.replace('/login?redirect=<pathname>')`.
- * While the check is in flight we render nothing so a flash of the
- * authenticated layout never leaks for unauthenticated users.
+ * Structure:
+ *   ┌──────────────┬───────────────────────────────────────────────┐
+ *   │  Sidebar     │  TopNav                                       │
+ *   │  (240/56)    ├───────────────────────────────────────────────┤
+ *   │              │  <PageTransition>{children}</PageTransition>  │
+ *   └──────────────┴───────────────────────────────────────────────┘
+ *
+ * Auth guard: on mount we `GET /admin/me`; if 401 we replace to
+ * `/login?redirect=<pathname>`. Any other failure is treated as
+ * "best-effort authenticated" so a transient gateway blip doesn't bounce
+ * the user back to login.
  */
 export default function AdminLayout({
   children,
@@ -42,9 +48,6 @@ export default function AdminLayout({
         }
         setState({ kind: "authenticated", session });
       } catch {
-        // Any non-401 failure (e.g. network down) — stay on the page and
-        // let the child route render its own error. Treat as "best effort
-        // assume authenticated" to avoid bouncing to /login on a blip.
         if (cancelled) return;
         setState({
           kind: "authenticated",
@@ -66,11 +69,15 @@ export default function AdminLayout({
   }
 
   return (
-    <div className="flex min-h-dvh flex-col">
-      <TopNav user={state.session.user} />
-      <div className="flex flex-1">
-        <Sidebar />
-        <main className="flex-1 space-y-6 p-6">{children}</main>
+    <div className="flex min-h-dvh">
+      <Sidebar user={state.session.user} />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <TopNav />
+        <main className="relative flex flex-1 flex-col">
+          <div className="mx-auto w-full max-w-[1440px] flex-1 space-y-6 px-6 py-6">
+            <PageTransition>{children}</PageTransition>
+          </div>
+        </main>
       </div>
     </div>
   );

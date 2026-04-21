@@ -403,10 +403,10 @@ export default function ApprovalsPage() {
   return (
     <>
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">工具审批</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Approvals</h1>
         <p className="text-sm text-muted-foreground">
-          `[[approvals.rules]]` 匹配到 prompt 模式的待审批工具调用队列。
-          对应 corlinman-gateway::middleware::approval（Sprint 2 T3 + S5 T4 精修）。
+          Pending tool calls gated by `[[approvals.rules]]`. Backed by
+          corlinman-gateway::middleware::approval.
         </p>
       </header>
 
@@ -443,27 +443,45 @@ export default function ApprovalsPage() {
         </div>
       ) : null}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          size="sm"
-          variant={tab === "pending" ? "default" : "outline"}
+      <div
+        role="tablist"
+        aria-label="approvals tabs"
+        className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface p-0.5"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "pending"}
           onClick={() => {
             setTab("pending");
             setSelected(new Set());
           }}
+          className={cn(
+            "inline-flex h-7 items-center rounded px-3 text-xs font-medium transition-colors",
+            tab === "pending"
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
         >
-          待审批
-        </Button>
-        <Button
-          size="sm"
-          variant={tab === "history" ? "default" : "outline"}
+          Pending
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "history"}
           onClick={() => {
             setTab("history");
             setSelected(new Set());
           }}
+          className={cn(
+            "inline-flex h-7 items-center rounded px-3 text-xs font-medium transition-colors",
+            tab === "history"
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
         >
-          历史
-        </Button>
+          History
+        </button>
       </div>
 
       <FilterBar
@@ -484,7 +502,7 @@ export default function ApprovalsPage() {
         />
       ) : null}
 
-      <section className="rounded-lg border border-border">
+      <section className="overflow-hidden rounded-lg border border-border bg-panel">
         <Table>
           <TableHeader>
             <TableRow>

@@ -1,6 +1,7 @@
 import type { Config } from "tailwindcss";
 
-// shadcn/ui default preset with zinc base color + dark mode via `class`.
+// Linear-style redesign. Neutral base + indigo accent. Geist sans/mono fonts
+// are injected via `app/layout.tsx` as CSS variables consumed here.
 const config: Config = {
   darkMode: ["class"],
   content: [
@@ -49,11 +50,25 @@ const config: Config = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        panel: "hsl(var(--panel))",
+        surface: "hsl(var(--surface))",
+        ok: "hsl(var(--ok))",
+        warn: "hsl(var(--warn))",
+        err: "hsl(var(--err))",
       },
       borderRadius: {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
+      },
+      fontFamily: {
+        sans: ["var(--font-geist-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
+        mono: [
+          "var(--font-geist-mono)",
+          "ui-monospace",
+          "SFMono-Regular",
+          "monospace",
+        ],
       },
       keyframes: {
         "accordion-down": {
@@ -64,10 +79,15 @@ const config: Config = {
           from: { height: "var(--radix-accordion-content-height)" },
           to: { height: "0" },
         },
+        "fade-in": {
+          from: { opacity: "0", transform: "translateY(4px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
+        "fade-in": "fade-in 200ms ease-out",
       },
     },
   },
