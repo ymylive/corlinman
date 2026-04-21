@@ -1,13 +1,9 @@
 "use client";
 
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 
-/** Batch-action toolbar that lights up when the operator has selection.
- *
- * Confirm flow intentionally uses the browser-native `confirm()` (invoked
- * by the parent, not here) instead of a shadcn AlertDialog — approved in
- * scope review: it's one line, accessible, and skips another Radix dep.
- */
+/** Batch-action toolbar that lights up when the operator has selection. */
 export interface BatchToolbarProps {
   selectedCount: number;
   onApproveAll: () => void;
@@ -23,21 +19,20 @@ export function BatchToolbar({
   onClear,
   disabled = false,
 }: BatchToolbarProps) {
+  const { t } = useTranslation();
   if (selectedCount === 0) return null;
   return (
     <div
       role="region"
-      aria-label="批量操作"
+      aria-label={t("approvals.batchActionsAria")}
       className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm"
     >
-      <span className="font-medium">已选 {selectedCount} 条</span>
+      <span className="font-medium">
+        {t("approvals.selectedCount", { n: selectedCount })}
+      </span>
       <div className="flex-1" />
-      <Button
-        size="sm"
-        onClick={onApproveAll}
-        disabled={disabled}
-      >
-        批量 Approve
+      <Button size="sm" onClick={onApproveAll} disabled={disabled}>
+        {t("approvals.batchApprove")}
       </Button>
       <Button
         size="sm"
@@ -45,10 +40,10 @@ export function BatchToolbar({
         onClick={onDenyAll}
         disabled={disabled}
       >
-        批量 Deny
+        {t("approvals.batchDeny")}
       </Button>
       <Button size="sm" variant="ghost" onClick={onClear} disabled={disabled}>
-        清除
+        {t("approvals.clear")}
       </Button>
     </div>
   );

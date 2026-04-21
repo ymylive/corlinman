@@ -1,19 +1,12 @@
 "use client";
 
 import * as React from "react";
+import { useTranslation } from "react-i18next";
 import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
-/** Filter controls for the approvals table.
- *
- * - Search: fuzzy match against `plugin.tool` — plain `includes()` on
- *   lowercase, case-insensitive. Good enough for < ~500 rows; if we ever
- *   hit virtual-scroll territory this would want to move into useMemo +
- *   a smarter ranker.
- * - Plugin dropdown: native `<select>` (per approved scope — no Radix
- *   Select this round). Options derived from currently-loaded rows.
- */
+/** Filter controls for the approvals table. */
 export interface FilterBarProps {
   search: string;
   onSearchChange: (next: string) => void;
@@ -29,6 +22,7 @@ export function FilterBar({
   onPluginFilterChange,
   pluginOptions,
 }: FilterBarProps) {
+  const { t } = useTranslation();
   return (
     <div className="flex flex-wrap items-center gap-2">
       <div className="relative flex-1 min-w-[12rem]">
@@ -40,21 +34,21 @@ export function FilterBar({
           type="search"
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
-          placeholder="搜 plugin.tool…"
+          placeholder={t("approvals.filterSearchPlaceholder")}
           className="pl-7"
-          aria-label="搜索 plugin.tool"
+          aria-label={t("approvals.filterSearchAria")}
         />
       </div>
       <select
         value={pluginFilter}
         onChange={(e) => onPluginFilterChange(e.target.value)}
-        aria-label="按 plugin 过滤"
+        aria-label={t("approvals.filterPluginAria")}
         className={cn(
           "h-9 rounded-md border border-input bg-transparent px-2 text-sm shadow-sm",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         )}
       >
-        <option value="">全部 plugin</option>
+        <option value="">{t("approvals.filterAllPlugins")}</option>
         {pluginOptions.map((p) => (
           <option key={p} value={p}>
             {p}

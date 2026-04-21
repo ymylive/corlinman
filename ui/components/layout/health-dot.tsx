@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import { fetchHealth, type HealthStatus } from "@/lib/api";
 
@@ -15,6 +16,7 @@ import { fetchHealth, type HealthStatus } from "@/lib/api";
  * Refreshed every 30s per the brief.
  */
 export function HealthDot({ className }: { className?: string }) {
+  const { t } = useTranslation();
   const q = useQuery<HealthStatus>({
     queryKey: ["admin", "health"],
     queryFn: fetchHealth,
@@ -23,28 +25,31 @@ export function HealthDot({ className }: { className?: string }) {
   });
 
   let tone: "ok" | "warn" | "err" = "warn";
-  let title = "Checking…";
+  let title = t("health.checking");
   if (q.isError) {
     tone = "err";
-    title = "Gateway unreachable";
+    title = t("health.gatewayUnreachable");
   } else if (q.data) {
     const status = q.data.status ?? "unknown";
     if (status === "ok" || status === "healthy") {
       tone = "ok";
-      title = `Healthy${q.data.checks ? ` · ${q.data.checks.length} checks` : ""}`;
+      const suffix = q.data.checks
+        ? t("health.ariaCheckCount", { n: q.data.checks.length })
+        : "";
+      title = `${t("health.healthy")}${suffix}`;
     } else if (status === "degraded" || status === "warn") {
       tone = "warn";
-      title = "Degraded";
+      title = t("health.degraded");
     } else {
       tone = "err";
-      title = `Unhealthy (${status})`;
+      title = `${t("health.offline")} (${status})`;
     }
   }
 
   return (
     <span
       title={title}
-      aria-label={`gateway health: ${title}`}
+      aria-label={t("health.gatewayHealth", { label: title })}
       className={cn("inline-flex items-center gap-1.5 text-xs", className)}
     >
       <span
@@ -56,7 +61,11 @@ export function HealthDot({ className }: { className?: string }) {
         )}
       />
       <span className="text-muted-foreground">
-        {tone === "ok" ? "healthy" : tone === "warn" ? "degraded" : "offline"}
+        {tone === "ok"
+          ? t("health.okShort")
+          : tone === "warn"
+            ? t("health.warnShort")
+            : t("health.errShort")}
       </span>
     </span>
   );

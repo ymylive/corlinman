@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useTranslation } from "react-i18next";
 import { Pause, Play, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -42,6 +43,7 @@ function levelTone(level: LogEvent["level"]) {
 }
 
 export default function LogsPage() {
+  const { t } = useTranslation();
   const [events, setEvents] = React.useState<LogEvent[]>([]);
   const [levelFilter, setLevelFilter] = React.useState<string>("all");
   const [subsystemFilter, setSubsystemFilter] = React.useState<string>("");
@@ -121,10 +123,11 @@ export default function LogsPage() {
   return (
     <div className="flex flex-1 flex-col space-y-4">
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Logs</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {t("logs.title")}
+        </h1>
         <p className="text-sm text-muted-foreground">
-          SSE structured log stream · ring buffer {RING_MAX} · filter by
-          level, subsystem, substring.
+          {t("logs.subtitle", { max: RING_MAX })}
         </p>
       </header>
 
@@ -133,9 +136,9 @@ export default function LogsPage() {
           className="h-8 rounded-md border border-input bg-background px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
           value={levelFilter}
           onChange={(e) => setLevelFilter(e.target.value)}
-          aria-label="Level filter"
+          aria-label={t("logs.levelAria")}
         >
-          <option value="all">level: all</option>
+          <option value="all">{t("logs.levelAll")}</option>
           <option value="debug">debug</option>
           <option value="info">info</option>
           <option value="warn">warn</option>
@@ -145,9 +148,9 @@ export default function LogsPage() {
           className="h-8 rounded-md border border-input bg-background px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
           value={subsystemFilter}
           onChange={(e) => setSubsystemFilter(e.target.value)}
-          aria-label="Subsystem filter"
+          aria-label={t("logs.subsystemAria")}
         >
-          <option value="">subsystem: all</option>
+          <option value="">{t("logs.subsystemAll")}</option>
           {subsystems.map((s) => (
             <option key={s} value={s}>
               {s}
@@ -155,7 +158,7 @@ export default function LogsPage() {
           ))}
         </select>
         <Input
-          placeholder="search message..."
+          placeholder={t("logs.searchPlaceholder")}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="h-8 max-w-[320px] font-mono text-xs"
@@ -171,7 +174,7 @@ export default function LogsPage() {
             ) : (
               <Pause className="h-3 w-3" />
             )}
-            {paused ? "Resume" : "Pause"}
+            {paused ? t("logs.resume") : t("logs.pause")}
           </Button>
           <Button
             variant="ghost"
@@ -180,7 +183,7 @@ export default function LogsPage() {
             disabled={events.length === 0}
           >
             <Trash2 className="h-3 w-3" />
-            Clear
+            {t("logs.clear")}
           </Button>
           <span className="font-mono text-[11px] text-muted-foreground">
             {visible.length} / {events.length}
@@ -192,7 +195,7 @@ export default function LogsPage() {
         <ul className="max-h-[70vh] divide-y divide-border overflow-auto font-mono text-xs">
           {visible.length === 0 ? (
             <li className="p-6 text-center text-sm text-muted-foreground">
-              {paused ? "Stream paused." : "Waiting for events…"}
+              {paused ? t("logs.paused") : t("logs.waitingForEvents")}
             </li>
           ) : (
             visible.map((e, i) => {
@@ -242,9 +245,11 @@ export default function LogsPage() {
                         copyTrace(e.trace_id);
                       }}
                       className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                      title="Copy trace id"
+                      title={t("logs.copyTrace")}
                     >
-                      {copiedId === e.trace_id ? "copied" : e.trace_id.slice(0, 8)}
+                      {copiedId === e.trace_id
+                        ? t("logs.copied")
+                        : e.trace_id.slice(0, 8)}
                     </button>
                     <span className="flex-1 whitespace-pre-wrap break-all text-foreground">
                       {e.message}

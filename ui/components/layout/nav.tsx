@@ -2,12 +2,13 @@
 
 import { Breadcrumbs } from "./breadcrumbs";
 import { HealthDot } from "./health-dot";
+import { LanguageToggle } from "./language-toggle";
 import { SearchTrigger } from "./search-trigger";
 import { ThemeToggle } from "./theme-toggle";
 
 /**
- * 56px topbar. Left: breadcrumbs. Right: search (⌘K), health dot, theme.
- * Logout + user info live in the sidebar.
+ * 56px topbar. Left: breadcrumbs. Right: search (⌘K), health dot,
+ * language, theme. Logout + user info live in the sidebar.
  */
 export function TopNav() {
   return (
@@ -19,6 +20,7 @@ export function TopNav() {
         <SearchTrigger />
         <div className="hidden h-5 w-px bg-border md:block" />
         <HealthDot className="hidden md:inline-flex" />
+        <LanguageToggle />
         <ThemeToggle />
       </div>
     </header>

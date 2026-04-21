@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Wifi, WifiOff } from "lucide-react";
 
@@ -24,6 +25,7 @@ import {
  * Bottom: recent messages transcript.
  */
 export default function QqChannelPage() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const status = useQuery<QqStatus>({
     queryKey: ["admin", "channels", "qq"],
@@ -43,22 +45,26 @@ export default function QqChannelPage() {
   const saveMutation = useMutation({
     mutationFn: (next: Record<string, string[]>) => updateQqKeywords(next),
     onSuccess: () => {
-      toast.success("Keywords saved");
+      toast.success(t("channels.saveSuccess"));
       qc.invalidateQueries({ queryKey: ["admin", "channels", "qq"] });
     },
     onError: (err) =>
-      toast.error(`Save failed: ${err instanceof Error ? err.message : String(err)}`),
+      toast.error(
+        t("channels.saveFailed", {
+          msg: err instanceof Error ? err.message : String(err),
+        }),
+      ),
   });
 
   const reconnectMutation = useMutation({
     mutationFn: reconnectQq,
-    onSuccess: () => toast.success("Reconnect requested"),
+    onSuccess: () => toast.success(t("channels.reconnectRequested")),
     onError: (err) =>
       toast.warning(err instanceof Error ? err.message : String(err)),
   });
 
   const addGroup = () => {
-    const id = window.prompt("Enter QQ group id:");
+    const id = window.prompt(t("channels.addGroupPrompt"));
     if (!id) return;
     if (draft[id]) return;
     setDraft({ ...draft, [id]: [] });
@@ -72,10 +78,11 @@ export default function QqChannelPage() {
   return (
     <>
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">QQ Channel</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {t("channels.title")}
+        </h1>
         <p className="text-sm text-muted-foreground">
-          `/admin/channels/qq/status` · `/keywords` · `/reconnect`. Runtime
-          state depends on corlinman-channels exposure.
+          {t("channels.subtitle")}
         </p>
       </header>
 
@@ -83,7 +90,7 @@ export default function QqChannelPage() {
         <Skeleton className="h-28 w-full" />
       ) : status.isError ? (
         <p className="text-sm text-destructive">
-          load failed: {(status.error as Error).message}
+          {t("common.loadFailed")}: {(status.error as Error).message}
         </p>
       ) : status.data ? (
         <ConnectionCard
@@ -97,14 +104,16 @@ export default function QqChannelPage() {
       <section className="space-y-3 rounded-lg border border-border bg-panel p-4">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-sm font-semibold">Group keywords</h2>
+            <h2 className="text-sm font-semibold">
+              {t("channels.groupKeywords")}
+            </h2>
             <p className="text-xs text-muted-foreground">
-              Press Enter to add a keyword chip; × to remove.
+              {t("channels.groupKeywordsHint")}
             </p>
           </div>
           <div className="flex gap-2">
             <Button size="sm" variant="outline" onClick={addGroup}>
-              + Group
+              {t("channels.addGroup")}
             </Button>
             <Button
               size="sm"
@@ -112,14 +121,15 @@ export default function QqChannelPage() {
               disabled={saveMutation.isPending}
               data-testid="qq-save-keywords-btn"
             >
-              {saveMutation.isPending ? "Saving..." : "Save"}
+              {saveMutation.isPending
+                ? t("channels.saving")
+                : t("channels.save")}
             </Button>
           </div>
         </div>
         {Object.keys(draft).length === 0 ? (
           <p className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-            No per-group overrides. Add one to bind the bot to a set of
-            keywords per group.
+            {t("channels.noOverrides")}
           </p>
         ) : (
           <ul className="space-y-2">
@@ -141,12 +151,12 @@ export default function QqChannelPage() {
       {/* recent messages */}
       <section className="rounded-lg border border-border bg-panel">
         <div className="border-b border-border px-4 py-3 text-sm font-semibold">
-          Recent messages
+          {t("channels.recentMessages")}
         </div>
         <div className="max-h-[360px] overflow-auto p-4">
           {!status.data || status.data.recent_messages.length === 0 ? (
             <p className="text-center text-sm text-muted-foreground">
-              No messages yet.
+              {t("channels.noMessages")}
             </p>
           ) : (
             <ul className="space-y-2">
@@ -172,6 +182,7 @@ function ConnectionCard({
   onReconnect: () => void;
   reconnecting: boolean;
 }) {
+  const { t } = useTranslation();
   const tone = !status.configured
     ? "muted"
     : !status.enabled
@@ -182,14 +193,14 @@ function ConnectionCard({
           ? "err"
           : "warn";
   const label = !status.configured
-    ? "Not configured"
+    ? t("channels.connectionNotConfigured")
     : !status.enabled
-      ? "Disabled"
+      ? t("channels.connectionDisabled")
       : status.runtime === "connected"
-        ? "Connected"
+        ? t("channels.connectionConnected")
         : status.runtime === "disconnected"
-          ? "Disconnected"
-          : "Unknown";
+          ? t("channels.connectionDisconnected")
+          : t("channels.connectionUnknown");
   return (
     <section className="grid grid-cols-1 gap-4 rounded-lg border border-border bg-panel p-4 md:grid-cols-[auto_1fr_auto]">
       <div className="flex items-center gap-3">
@@ -241,7 +252,7 @@ function ConnectionCard({
         disabled={!status.configured || reconnecting}
         data-testid="qq-reconnect-btn"
       >
-        {reconnecting ? "Reconnecting..." : "Reconnect"}
+        {reconnecting ? t("channels.reconnecting") : t("channels.reconnect")}
       </Button>
     </section>
   );
@@ -258,15 +269,16 @@ function GroupRow({
   onChange: (next: string[]) => void;
   onRemove: () => void;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = React.useState("");
   const add = (raw: string) => {
-    const t = raw.trim();
-    if (!t) return;
-    if (keywords.includes(t)) return;
-    onChange([...keywords, t]);
+    const kw = raw.trim();
+    if (!kw) return;
+    if (keywords.includes(kw)) return;
+    onChange([...keywords, kw]);
     setDraft("");
   };
-  const remove = (t: string) => onChange(keywords.filter((x) => x !== t));
+  const remove = (kw: string) => onChange(keywords.filter((x) => x !== kw));
   return (
     <li className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface p-2">
       <code className="rounded bg-muted px-2 py-1 font-mono text-xs">{gid}</code>
@@ -277,7 +289,7 @@ function GroupRow({
             type="button"
             onClick={() => remove(kw)}
             className="inline-flex items-center gap-1 rounded-md border border-border bg-accent/40 px-2 py-0.5 font-mono text-[10px] text-accent-foreground hover:bg-accent"
-            aria-label={`Remove ${kw}`}
+            aria-label={t("channels.removeKeywordAria", { kw })}
           >
             {kw} <span aria-hidden>×</span>
           </button>
@@ -294,12 +306,12 @@ function GroupRow({
               remove(keywords[keywords.length - 1]!);
             }
           }}
-          placeholder="add keyword..."
+          placeholder={t("channels.addKeywordPlaceholder")}
           className="h-7 max-w-[180px] border-0 bg-transparent px-1 text-xs shadow-none focus-visible:ring-0"
         />
       </div>
       <Button size="sm" variant="ghost" onClick={onRemove}>
-        Remove
+        {t("channels.remove")}
       </Button>
     </li>
   );

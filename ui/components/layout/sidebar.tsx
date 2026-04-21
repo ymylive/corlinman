@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 import {
   Activity,
   Bot,
@@ -27,21 +28,21 @@ import { BrandMark } from "./brand-mark";
 
 interface NavItem {
   href: string;
-  label: string;
+  labelKey: string;
   icon: React.ComponentType<{ className?: string }>;
 }
 
 const ITEMS: NavItem[] = [
-  { href: "/", label: "Dashboard", icon: Activity },
-  { href: "/plugins", label: "Plugins", icon: Boxes },
-  { href: "/agents", label: "Agents", icon: Bot },
-  { href: "/rag", label: "RAG", icon: Database },
-  { href: "/channels/qq", label: "Channels", icon: MessageCircle },
-  { href: "/scheduler", label: "Scheduler", icon: Timer },
-  { href: "/approvals", label: "Approvals", icon: ClipboardCheck },
-  { href: "/models", label: "Models", icon: Route },
-  { href: "/config", label: "Config", icon: Settings },
-  { href: "/logs", label: "Logs", icon: FileTerminal },
+  { href: "/", labelKey: "nav.dashboard", icon: Activity },
+  { href: "/plugins", labelKey: "nav.plugins", icon: Boxes },
+  { href: "/agents", labelKey: "nav.agents", icon: Bot },
+  { href: "/rag", labelKey: "nav.rag", icon: Database },
+  { href: "/channels/qq", labelKey: "nav.channels", icon: MessageCircle },
+  { href: "/scheduler", labelKey: "nav.scheduler", icon: Timer },
+  { href: "/approvals", labelKey: "nav.approvals", icon: ClipboardCheck },
+  { href: "/models", labelKey: "nav.models", icon: Route },
+  { href: "/config", labelKey: "nav.config", icon: Settings },
+  { href: "/logs", labelKey: "nav.logs", icon: FileTerminal },
 ];
 
 const COLLAPSE_KEY = "corlinman.sidebar.collapsed.v1";
@@ -70,6 +71,7 @@ interface SidebarProps {
 export function Sidebar({ user }: SidebarProps) {
   const pathname = usePathname() ?? "/";
   const router = useRouter();
+  const { t } = useTranslation();
   const [collapsed, setCollapsed] = React.useState(false);
   const [hydrated, setHydrated] = React.useState(false);
   const [loggingOut, setLoggingOut] = React.useState(false);
@@ -91,7 +93,7 @@ export function Sidebar({ user }: SidebarProps) {
     setLoggingOut(true);
     try {
       await logout();
-      toast.success("已退出登录");
+      toast.success(t("auth.logoutSuccess"));
     } catch {
       /* idempotent */
     } finally {
@@ -107,7 +109,7 @@ export function Sidebar({ user }: SidebarProps) {
         "flex shrink-0 flex-col border-r border-border bg-surface/60 transition-[width] duration-200 ease-out",
         width,
       )}
-      aria-label="admin navigation"
+      aria-label={t("nav.dashboard")}
     >
       {/* brand + collapse */}
       <div className="flex h-14 items-center justify-between border-b border-border px-3">
@@ -117,7 +119,9 @@ export function Sidebar({ user }: SidebarProps) {
         <button
           type="button"
           onClick={toggle}
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label={
+            collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")
+          }
           className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
           {collapsed ? (
@@ -136,6 +140,7 @@ export function Sidebar({ user }: SidebarProps) {
               : pathname === item.href ||
                 pathname.startsWith(`${item.href}/`);
           const Icon = item.icon;
+          const label = t(item.labelKey);
           return (
             <Link
               key={item.href}
@@ -148,7 +153,7 @@ export function Sidebar({ user }: SidebarProps) {
                 collapsed && hydrated && "justify-center px-0",
               )}
               aria-current={active ? "page" : undefined}
-              title={collapsed ? item.label : undefined}
+              title={collapsed ? label : undefined}
             >
               {active ? (
                 <motion.span
@@ -164,7 +169,7 @@ export function Sidebar({ user }: SidebarProps) {
               ) : null}
               <Icon className="h-4 w-4 shrink-0" />
               {collapsed && hydrated ? null : (
-                <span className="truncate">{item.label}</span>
+                <span className="truncate">{label}</span>
               )}
             </Link>
           );
@@ -177,7 +182,7 @@ export function Sidebar({ user }: SidebarProps) {
           <button
             type="button"
             onClick={onLogout}
-            aria-label="Log out"
+            aria-label={t("auth.logoutLabel")}
             disabled={loggingOut}
             className="flex h-8 w-full items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
             data-testid="logout-button"
@@ -204,7 +209,7 @@ export function Sidebar({ user }: SidebarProps) {
               type="button"
               onClick={onLogout}
               disabled={loggingOut}
-              aria-label="Log out"
+              aria-label={t("auth.logoutLabel")}
               className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
               data-testid="logout-button"
             >

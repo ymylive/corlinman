@@ -16,7 +16,7 @@ where calls land:
 
 | env var | effect |
 | --- | --- |
-| `NEXT_PUBLIC_GATEWAY_URL` | Real gateway base URL. Default: `http://localhost:6005`. |
+| `NEXT_PUBLIC_GATEWAY_URL` | Real gateway base URL. Default: empty string (use current origin so nginx proxies `/admin/*` through). Set to `http://localhost:6005` for local dev without a proxy. |
 | `NEXT_PUBLIC_MOCK_API_URL` | If set, *all* calls go here instead of the gateway (the standalone mock server in `ui/mock/server.ts`). |
 | `NEXT_PUBLIC_MOCK_MODE` | `"1"` enables per-call inline mock payloads (offline dev with no mock server and no gateway). Anything else disables them. |
 

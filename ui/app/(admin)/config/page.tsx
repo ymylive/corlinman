@@ -4,6 +4,7 @@ import * as React from "react";
 import dynamic from "next/dynamic";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
+import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, X } from "lucide-react";
 
@@ -45,6 +46,7 @@ const SECTION_HEADERS = [
 ];
 
 export default function ConfigPage() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const { resolvedTheme } = useTheme();
   const config = useQuery<ConfigGetResponse>({
@@ -137,16 +139,17 @@ export default function ConfigPage() {
     <>
       <header className="flex items-start justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">Config</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {t("config.title")}
+          </h1>
           <p className="text-sm text-muted-foreground">
-            Monaco edits `config.toml`. Save writes to disk + hot-swaps via
-            ArcSwap.
+            {t("config.subtitle")}
           </p>
         </div>
         <div className="flex items-center gap-2">
           {config.data ? (
             <code className="rounded bg-muted px-2 py-1 font-mono text-[11px]">
-              version: {config.data.version}
+              {t("config.version", { v: config.data.version })}
             </code>
           ) : null}
           <Button
@@ -156,7 +159,9 @@ export default function ConfigPage() {
             disabled={!initialized || validateMutation.isPending}
             data-testid="config-validate-btn"
           >
-            {validateMutation.isPending ? "Validating…" : "Validate"}
+            {validateMutation.isPending
+              ? t("config.validating")
+              : t("config.validate")}
           </Button>
           <Button
             size="sm"
@@ -164,7 +169,7 @@ export default function ConfigPage() {
             disabled={!initialized || saveMutation.isPending}
             data-testid="config-save-btn"
           >
-            {saveMutation.isPending ? "Saving…" : "Save"}
+            {saveMutation.isPending ? t("config.saving") : t("config.save")}
           </Button>
         </div>
       </header>
@@ -172,7 +177,7 @@ export default function ConfigPage() {
       <section className="grid grid-cols-1 gap-4 md:grid-cols-[180px_1fr]">
         <aside className="space-y-0.5 rounded-lg border border-border bg-panel p-2">
           <div className="px-2 pb-2 pt-1 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Sections
+            {t("config.sections")}
           </div>
           {SECTION_HEADERS.map((s) => (
             <button
@@ -195,7 +200,7 @@ export default function ConfigPage() {
             <Skeleton className="h-[600px] w-full" />
           ) : config.isError ? (
             <div className="p-4 text-sm text-destructive">
-              load failed: {(config.error as Error).message}
+              {t("config.loadFailed")}: {(config.error as Error).message}
             </div>
           ) : (
             <Editor
@@ -219,11 +224,15 @@ export default function ConfigPage() {
 
       {/* save summary strip — always rendered so E2E `new version:` text lands */}
       {saveResult ? (
-        <ResultStrip title="Save result" result={saveResult} kind="save" />
+        <ResultStrip
+          title={t("config.saveResult")}
+          result={saveResult}
+          kind="save"
+        />
       ) : null}
       {validateResult ? (
         <ResultStrip
-          title="Dry-run result"
+          title={t("config.validateResult")}
           result={validateResult}
           kind="validate"
         />
@@ -231,12 +240,12 @@ export default function ConfigPage() {
 
       {validateMutation.isError ? (
         <p className="text-sm text-destructive">
-          validate failed: {(validateMutation.error as Error).message}
+          {t("config.validateFailed")}: {(validateMutation.error as Error).message}
         </p>
       ) : null}
       {saveMutation.isError ? (
         <p className="text-sm text-destructive">
-          save failed: {(saveMutation.error as Error).message}
+          {t("common.saveFailed")}: {(saveMutation.error as Error).message}
         </p>
       ) : null}
 
@@ -250,21 +259,22 @@ export default function ConfigPage() {
             transition={{ duration: 0.2, ease: "easeOut" }}
             className="fixed bottom-4 left-1/2 z-40 w-[min(720px,94vw)] -translate-x-1/2 rounded-lg border border-border bg-popover p-3 shadow-2xl"
             role="region"
-            aria-label="validation issues"
+            aria-label={t("config.validationIssuesRegion")}
           >
             <div className="mb-2 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <AlertTriangle className="h-4 w-4 text-warn" />
                 <span className="text-sm font-semibold">
-                  {latestResult.issues.length} issue
-                  {latestResult.issues.length === 1 ? "" : "s"}
+                  {latestResult.issues.length === 1
+                    ? t("config.issueTitleSingular")
+                    : t("config.issueTitle", { n: latestResult.issues.length })}
                 </span>
               </div>
               <button
                 type="button"
                 onClick={() => setIssuesOpen(false)}
                 className="inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                aria-label="Close issues"
+                aria-label={t("config.closeIssues")}
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -303,6 +313,7 @@ function ResultStrip({
   result: ConfigPostResponse;
   kind: "validate" | "save";
 }) {
+  const { t } = useTranslation();
   return (
     <section
       className={cn(
@@ -314,25 +325,33 @@ function ResultStrip({
     >
       <span className="font-semibold">{title}</span>
       {result.status === "ok" ? (
-        <Badge className="border-transparent bg-ok/15 text-ok">ok</Badge>
+        <Badge className="border-transparent bg-ok/15 text-ok">
+          {t("config.statusOk")}
+        </Badge>
       ) : (
-        <Badge variant="destructive">invalid</Badge>
+        <Badge variant="destructive">{t("config.statusInvalid")}</Badge>
       )}
       {result.version ? (
         <code className="rounded bg-muted px-2 py-0.5 font-mono text-[11px]">
-          new version: {result.version}
+          {t("config.newVersion", { v: result.version })}
         </code>
       ) : null}
       {result.issues.length > 0 ? (
         <span className="text-xs text-muted-foreground">
-          {result.issues.length} issue{result.issues.length === 1 ? "" : "s"}
+          {result.issues.length === 1
+            ? t("config.issueTitleSingular")
+            : t("config.issueCount", { n: result.issues.length })}
         </span>
       ) : (
-        <span className="text-xs text-muted-foreground">no issues</span>
+        <span className="text-xs text-muted-foreground">
+          {t("config.noIssues")}
+        </span>
       )}
       {result.requires_restart.length > 0 ? (
         <span className="text-xs text-warn">
-          restart required: {result.requires_restart.join(", ")}
+          {t("config.restartRequired", {
+            list: result.requires_restart.join(", "),
+          })}
         </span>
       ) : null}
     </section>

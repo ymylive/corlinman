@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { ArrowLeft } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -39,6 +40,7 @@ interface ToolManifest {
 }
 
 export default function PluginDetailPage() {
+  const { t } = useTranslation();
   const search = useSearchParams();
   const name = search?.get("name") ?? "";
 
@@ -59,9 +61,9 @@ export default function PluginDetailPage() {
   if (!name) {
     return (
       <p className="text-sm text-muted-foreground">
-        missing `?name=…` in URL — go via{" "}
+        {t("plugins.missingName")}{" "}
         <Link href="/plugins" className="underline">
-          plugins list
+          {t("plugins.pluginListLink")}
         </Link>
       </p>
     );
@@ -75,7 +77,7 @@ export default function PluginDetailPage() {
           className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
-          Back to plugins
+          {t("plugins.backToList")}
         </Link>
         <h1 className="text-2xl font-semibold tracking-tight">{name}</h1>
       </header>
@@ -84,14 +86,14 @@ export default function PluginDetailPage() {
         <Skeleton className="h-40 w-full" />
       ) : detail.isError ? (
         <p className="text-sm text-destructive">
-          load failed: {(detail.error as Error).message}
+          {t("plugins.loadFailed")}: {(detail.error as Error).message}
         </p>
       ) : detail.data ? (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[320px_1fr]">
           <Summary detail={detail.data} />
           <section className="space-y-3 rounded-lg border border-border bg-panel p-4">
             <div className="flex items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold">Test invoke</h2>
+              <h2 className="text-sm font-semibold">{t("plugins.testInvoke")}</h2>
               {tools.length > 1 ? (
                 <select
                   value={selectedTool}
@@ -112,7 +114,7 @@ export default function PluginDetailPage() {
             </div>
             {tools.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                plugin declares no tools — nothing to invoke
+                {t("plugins.noTools")}
               </p>
             ) : (
               <InvokeForm
@@ -128,17 +130,18 @@ export default function PluginDetailPage() {
 }
 
 function Summary({ detail }: { detail: PluginDetail }) {
+  const { t } = useTranslation();
   return (
     <section className="space-y-3 rounded-lg border border-border bg-panel p-4 text-sm">
       <div className="space-y-2">
-        <Field label="Version" value={detail.summary.version} mono />
-        <Field label="Type" value={detail.summary.plugin_type} />
-        <Field label="Origin" value={detail.summary.origin} />
+        <Field label={t("plugins.summaryVersion")} value={detail.summary.version} mono />
+        <Field label={t("plugins.summaryType")} value={detail.summary.plugin_type} />
+        <Field label={t("plugins.summaryOrigin")} value={detail.summary.origin} />
         <Field
-          label="Tools"
+          label={t("plugins.summaryTools")}
           value={String(detail.summary.capabilities.length)}
         />
-        <Field label="Manifest" value={detail.summary.manifest_path} mono />
+        <Field label={t("plugins.summaryManifest")} value={detail.summary.manifest_path} mono />
       </div>
       {detail.summary.description ? (
         <p className="text-xs text-muted-foreground">
@@ -199,6 +202,7 @@ function InvokeForm({
   pluginName: string;
   tool: ToolManifest;
 }) {
+  const { t } = useTranslation();
   const schema = tool.input_schema ?? {};
   const props = schema.properties ?? {};
   const simpleFields = Object.entries(props).filter(([, v]) =>
@@ -239,7 +243,7 @@ function InvokeForm({
       } catch {
         invoke.reset();
         setLastResponse(null);
-        alert("invalid JSON");
+        alert(t("common.invalidJson"));
         return;
       }
     } else {
@@ -284,7 +288,7 @@ function InvokeForm({
       ) : (
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-            Arguments (JSON)
+            {t("plugins.argumentsJson")}
           </span>
           <textarea
             value={rawJson}
@@ -302,7 +306,7 @@ function InvokeForm({
             checked={useRaw}
             onChange={(e) => setUseRaw(e.target.checked)}
           />
-          Edit raw JSON
+          {t("plugins.editRawJson")}
         </label>
       ) : null}
 
@@ -312,7 +316,7 @@ function InvokeForm({
         disabled={invoke.isPending}
         data-testid="plugin-invoke-submit"
       >
-        {invoke.isPending ? "Invoking..." : "Invoke"}
+        {invoke.isPending ? t("plugins.invoking") : t("plugins.invoke")}
       </Button>
 
       {invoke.isError ? (

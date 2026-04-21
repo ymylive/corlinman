@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { FileText } from "lucide-react";
 
 import { Skeleton } from "@/components/ui/skeleton";
@@ -32,6 +33,7 @@ function formatTime(iso: string): string {
 }
 
 export default function AgentsPage() {
+  const { t } = useTranslation();
   const query = useQuery<AgentSummary[]>({
     queryKey: ["admin", "agents"],
     queryFn: () => apiFetch<AgentSummary[]>("/admin/agents"),
@@ -40,21 +42,22 @@ export default function AgentsPage() {
   return (
     <>
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Agents</h1>
-        <p className="text-sm text-muted-foreground">
-          Edit `Agent/*.md` — click a row to open the Monaco editor
-          (frontmatter + body).
-        </p>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {t("agents.title")}
+        </h1>
+        <p className="text-sm text-muted-foreground">{t("agents.subtitle")}</p>
       </header>
 
       <section className="overflow-hidden rounded-lg border border-border bg-panel">
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border hover:bg-transparent">
-              <TableHead className="pl-4">Name</TableHead>
-              <TableHead>Path</TableHead>
-              <TableHead className="w-32">Bytes</TableHead>
-              <TableHead className="w-56">Last modified</TableHead>
+              <TableHead className="pl-4">{t("agents.colName")}</TableHead>
+              <TableHead>{t("agents.colPath")}</TableHead>
+              <TableHead className="w-32">{t("agents.colBytes")}</TableHead>
+              <TableHead className="w-56">
+                {t("agents.colLastModified")}
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -74,7 +77,7 @@ export default function AgentsPage() {
                   colSpan={4}
                   className="py-10 text-center text-sm text-destructive"
                 >
-                  load failed: {(query.error as Error).message}
+                  {t("agents.loadFailed")}: {(query.error as Error).message}
                 </TableCell>
               </TableRow>
             ) : !query.data || query.data.length === 0 ? (
@@ -83,7 +86,7 @@ export default function AgentsPage() {
                   colSpan={4}
                   className="py-10 text-center text-sm text-muted-foreground"
                 >
-                  No agents defined.
+                  {t("agents.empty")}
                 </TableCell>
               </TableRow>
             ) : (

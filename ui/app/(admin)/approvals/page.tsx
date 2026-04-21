@@ -3,6 +3,7 @@
 import * as React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -82,15 +83,19 @@ function formatTime(iso: string): string {
 }
 
 function DecisionBadge({ decision }: { decision: string | null }) {
-  if (!decision) return <Badge variant="secondary">pending</Badge>;
+  const { t } = useTranslation();
+  if (!decision)
+    return <Badge variant="secondary">{t("approvals.statusPending")}</Badge>;
   if (decision === "approved")
     return (
       <Badge className="border-transparent bg-emerald-600/20 text-emerald-300">
-        approved
+        {t("approvals.statusApproved")}
       </Badge>
     );
   if (decision === "denied")
-    return <Badge variant="destructive">denied</Badge>;
+    return (
+      <Badge variant="destructive">{t("approvals.statusDenied")}</Badge>
+    );
   return <Badge variant="outline">{decision}</Badge>;
 }
 
@@ -107,6 +112,7 @@ const FADE_MS = 400;
 // --- page -------------------------------------------------------------------
 
 export default function ApprovalsPage() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>("pending");
   const [search, setSearch] = useState("");
   const [pluginFilter, setPluginFilter] = useState("");
@@ -186,7 +192,10 @@ export default function ApprovalsPage() {
     onError: (err, vars) => {
       restoreFailed([vars.id]);
       setErrorBanner(
-        `Decide 失败 (${vars.id}): ${err instanceof Error ? err.message : String(err)}`,
+        t("approvals.decideFailed", {
+          id: vars.id,
+          msg: err instanceof Error ? err.message : String(err),
+        }),
       );
     },
     onSettled: () => {
@@ -214,9 +223,12 @@ export default function ApprovalsPage() {
       if (failed.length > 0) {
         restoreFailed(failed.map((o) => o.id));
         setErrorBanner(
-          `批量决策中有 ${failed.length} 条失败: ${failed
-            .map((f) => `${f.id}${f.error ? ` (${f.error})` : ""}`)
-            .join("; ")}`,
+          t("approvals.batchSomeFailed", {
+            n: failed.length,
+            details: failed
+              .map((f) => `${f.id}${f.error ? ` (${f.error})` : ""}`)
+              .join("; "),
+          }),
         );
       } else {
         setErrorBanner(null);
@@ -226,7 +238,9 @@ export default function ApprovalsPage() {
     onError: (err, vars) => {
       restoreFailed(vars.ids);
       setErrorBanner(
-        `批量请求失败: ${err instanceof Error ? err.message : String(err)}`,
+        t("approvals.batchFailed", {
+          msg: err instanceof Error ? err.message : String(err),
+        }),
       );
     },
     onSettled: () => {
@@ -252,8 +266,8 @@ export default function ApprovalsPage() {
                 ? (data as { message: string }).message
                 : typeof data === "string"
                   ? (data as string)
-                  : "事件跳过";
-            setLagBanner(`SSE 漏帧: ${message}. 正在重新同步…`);
+                  : t("approvals.lagEventSkipped");
+            setLagBanner(t("approvals.lagBanner", { msg: message }));
             // Force a refetch so ground truth resyncs.
             qc.invalidateQueries({ queryKey: ["admin", "approvals"] });
             return;
@@ -312,7 +326,7 @@ export default function ApprovalsPage() {
       },
     );
     return close;
-  }, [qc]);
+  }, [qc, t]);
 
   // -- derived --------------------------------------------------------------
 
@@ -368,9 +382,7 @@ export default function ApprovalsPage() {
     const ids = Array.from(selected);
     if (ids.length === 0) return;
     if (
-      !window.confirm(
-        `确定要 approve ${ids.length} 条待审批工具调用吗？此操作不可撤销。`,
-      )
+      !window.confirm(t("approvals.batchApproveConfirm", { n: ids.length }))
     )
       return;
     batchMutation.mutate({ ids, approve: true });
@@ -403,10 +415,11 @@ export default function ApprovalsPage() {
   return (
     <>
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Approvals</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {t("approvals.title")}
+        </h1>
         <p className="text-sm text-muted-foreground">
-          Pending tool calls gated by `[[approvals.rules]]`. Backed by
-          corlinman-gateway::middleware::approval.
+          {t("approvals.subtitle")}
         </p>
       </header>
 
@@ -420,9 +433,9 @@ export default function ApprovalsPage() {
             size="sm"
             variant="ghost"
             onClick={() => setLagBanner(null)}
-            aria-label="关闭 lag 提示"
+            aria-label={t("approvals.closeLagAria")}
           >
-            关闭
+            {t("common.close")}
           </Button>
         </div>
       ) : null}
@@ -436,16 +449,16 @@ export default function ApprovalsPage() {
             size="sm"
             variant="ghost"
             onClick={() => setErrorBanner(null)}
-            aria-label="关闭错误提示"
+            aria-label={t("approvals.closeErrorAria")}
           >
-            关闭
+            {t("common.close")}
           </Button>
         </div>
       ) : null}
 
       <div
         role="tablist"
-        aria-label="approvals tabs"
+        aria-label={t("approvals.tabsAria")}
         className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface p-0.5"
       >
         <button
@@ -463,7 +476,7 @@ export default function ApprovalsPage() {
               : "text-muted-foreground hover:text-foreground",
           )}
         >
-          Pending
+          {t("approvals.tabPending")}
         </button>
         <button
           type="button"
@@ -480,7 +493,7 @@ export default function ApprovalsPage() {
               : "text-muted-foreground hover:text-foreground",
           )}
         >
-          History
+          {t("approvals.tabHistory")}
         </button>
       </div>
 
@@ -509,7 +522,11 @@ export default function ApprovalsPage() {
               {tab === "pending" ? (
                 <TableHead className="w-10">
                   <Checkbox
-                    aria-label={allSelected ? "取消全选" : "全选"}
+                    aria-label={
+                      allSelected
+                        ? t("approvals.deselectAll")
+                        : t("approvals.selectAll")
+                    }
                     checked={allSelected}
                     ref={(el) => {
                       if (el) el.indeterminate = !allSelected && someSelected;
@@ -519,12 +536,14 @@ export default function ApprovalsPage() {
                   />
                 </TableHead>
               ) : null}
-              <TableHead>Plugin.Tool</TableHead>
-              <TableHead>Session</TableHead>
-              <TableHead>Args</TableHead>
-              <TableHead>Requested</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="w-72">Actions</TableHead>
+              <TableHead>{t("approvals.colPluginTool")}</TableHead>
+              <TableHead>{t("approvals.colSession")}</TableHead>
+              <TableHead>{t("approvals.colArgs")}</TableHead>
+              <TableHead>{t("approvals.colRequested")}</TableHead>
+              <TableHead>{t("approvals.colStatus")}</TableHead>
+              <TableHead className="w-72">
+                {t("approvals.colActions")}
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -546,7 +565,7 @@ export default function ApprovalsPage() {
                   colSpan={tab === "pending" ? 7 : 6}
                   className="py-8 text-center text-sm text-destructive"
                 >
-                  load failed: {(query.error as Error).message}
+                  {t("approvals.loadFailed")}: {(query.error as Error).message}
                 </TableCell>
               </TableRow>
             ) : showEmpty ? (
@@ -574,7 +593,10 @@ export default function ApprovalsPage() {
                       <TableCell>
                         {isPending ? (
                           <Checkbox
-                            aria-label={`选中 ${row.plugin}.${row.tool}`}
+                            aria-label={t("approvals.selectOneAria", {
+                              plugin: row.plugin,
+                              tool: row.tool,
+                            })}
                             checked={isSelected}
                             onChange={() => toggleOne(row.id)}
                             disabled={anyMutating}
@@ -586,7 +608,7 @@ export default function ApprovalsPage() {
                       {row.plugin}.{row.tool}
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
-                      {row.session_key || "(none)"}
+                      {row.session_key || t("approvals.noneValue")}
                     </TableCell>
                     <TableCell className="max-w-[16rem] truncate font-mono text-xs text-muted-foreground">
                       {truncateArgs(row.args_json)}
@@ -612,7 +634,7 @@ export default function ApprovalsPage() {
                               }
                               disabled={anyMutating}
                             >
-                              Approve
+                              {t("approvals.approve")}
                             </Button>
                             <Button
                               size="sm"
@@ -622,7 +644,7 @@ export default function ApprovalsPage() {
                               }
                               disabled={anyMutating}
                             >
-                              Deny
+                              {t("approvals.deny")}
                             </Button>
                           </>
                         ) : null}
@@ -643,8 +665,8 @@ export default function ApprovalsPage() {
         }}
         targetLabel={
           denyDialog?.kind === "batch"
-            ? `${denyDialog.ids.length} 条`
-            : "此条"
+            ? t("approvals.batchTarget", { n: denyDialog.ids.length })
+            : t("approvals.singleTarget")
         }
         onConfirm={handleDenyConfirm}
         submitting={anyMutating}

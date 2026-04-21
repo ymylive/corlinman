@@ -1,3 +1,6 @@
+"use client";
+
+import { useTranslation } from "react-i18next";
 import {
   Dialog,
   DialogContent,
@@ -34,11 +37,12 @@ function prettifyJson(raw: string): string {
 }
 
 export function ArgsDialog({ approval }: { approval: Approval }) {
+  const { t } = useTranslation();
   return (
     <Dialog>
       <DialogTrigger asChild>
         <Button size="sm" variant="outline">
-          view args
+          {t("approvals.viewArgs")}
         </Button>
       </DialogTrigger>
       <DialogContent className="max-w-2xl">
@@ -49,20 +53,20 @@ export function ArgsDialog({ approval }: { approval: Approval }) {
           <DialogDescription asChild>
             <div className="space-y-1 text-xs">
               <div>
-                session_key:{" "}
+                {t("approvals.argsSessionKey")}:{" "}
                 <span className="font-mono">
-                  {approval.session_key || "(empty)"}
+                  {approval.session_key || t("approvals.emptyValue")}
                 </span>
               </div>
               <div>
-                requested_at:{" "}
+                {t("approvals.argsRequestedAt")}:{" "}
                 <span className="font-mono">
                   {formatTime(approval.requested_at)}
                 </span>
               </div>
               {approval.decided_at ? (
                 <div>
-                  decided_at:{" "}
+                  {t("approvals.argsDecidedAt")}:{" "}
                   <span className="font-mono">
                     {formatTime(approval.decided_at)}
                   </span>{" "}

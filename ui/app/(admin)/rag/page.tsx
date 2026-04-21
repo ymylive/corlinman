@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Database, FileText, Tag } from "lucide-react";
 
@@ -24,6 +25,7 @@ import {
  * Rebuild is guarded by a `window.confirm` because it rescans all chunks.
  */
 export default function RagPage() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const stats = useQuery<RagStats>({
     queryKey: ["admin", "rag", "stats"],
@@ -53,11 +55,15 @@ export default function RagPage() {
   const rebuildMutation = useMutation({
     mutationFn: rebuildRag,
     onSuccess: () => {
-      toast.success("Rebuild complete");
+      toast.success(t("rag.rebuildSuccess"));
       qc.invalidateQueries({ queryKey: ["admin", "rag", "stats"] });
     },
     onError: (err) => {
-      toast.error(`Rebuild failed: ${err instanceof Error ? err.message : String(err)}`);
+      toast.error(
+        t("rag.rebuildFailed", {
+          msg: err instanceof Error ? err.message : String(err),
+        }),
+      );
     },
   });
 
@@ -68,12 +74,7 @@ export default function RagPage() {
   };
 
   const handleRebuild = () => {
-    if (
-      !window.confirm(
-        "Rebuild chunks_fts index? This rescans every chunk in the store.",
-      )
-    )
-      return;
+    if (!window.confirm(t("rag.rebuildConfirm"))) return;
     rebuildMutation.mutate();
   };
 
@@ -90,28 +91,27 @@ export default function RagPage() {
   return (
     <>
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">RAG</h1>
-        <p className="text-sm text-muted-foreground">
-          `/admin/rag/stats` · `/query` · `/rebuild` — BM25 debug scan; dense
-          vectors via embedding service.
-        </p>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {t("rag.title")}
+        </h1>
+        <p className="text-sm text-muted-foreground">{t("rag.subtitle")}</p>
       </header>
 
       <section className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <RagStat
-          label="Chunks"
+          label={t("rag.chunks")}
           value={stats.data?.chunks}
           loading={stats.isPending}
           icon={<Database className="h-4 w-4" />}
         />
         <RagStat
-          label="Files"
+          label={t("rag.files")}
           value={stats.data?.files}
           loading={stats.isPending}
           icon={<FileText className="h-4 w-4" />}
         />
         <RagStat
-          label="Tags"
+          label={t("rag.tags")}
           value={stats.data?.tags}
           loading={stats.isPending}
           icon={<Tag className="h-4 w-4" />}
@@ -120,7 +120,7 @@ export default function RagPage() {
 
       <section className="space-y-4 rounded-lg border border-border bg-panel p-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold">Query debug (BM25)</h2>
+          <h2 className="text-sm font-semibold">{t("rag.queryTitle")}</h2>
         </div>
         <form
           className="space-y-3"
@@ -129,7 +129,7 @@ export default function RagPage() {
         >
           <div className="flex flex-wrap gap-2">
             <Input
-              placeholder="Query..."
+              placeholder={t("rag.queryPlaceholder")}
               value={q}
               onChange={(e) => setQ(e.target.value)}
               className="max-w-md"
@@ -137,7 +137,7 @@ export default function RagPage() {
             />
             <div className="flex items-center gap-2">
               <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                k
+                {t("rag.topK")}
               </label>
               <input
                 type="range"
@@ -146,7 +146,7 @@ export default function RagPage() {
                 value={k}
                 onChange={(e) => setK(Number(e.target.value))}
                 className="h-8 w-28 accent-primary"
-                aria-label="top-k"
+                aria-label={t("rag.topKAria")}
               />
               <span className="w-6 font-mono text-xs">{k}</span>
             </div>
@@ -155,22 +155,22 @@ export default function RagPage() {
               size="sm"
               disabled={queryMutation.isPending || !q.trim()}
             >
-              {queryMutation.isPending ? "Querying…" : "Search"}
+              {queryMutation.isPending ? t("rag.searching") : t("rag.search")}
             </Button>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-              Tags
+              {t("rag.tagsLabel")}
             </label>
-            {tagFilter.map((t) => (
+            {tagFilter.map((tag) => (
               <button
-                key={t}
+                key={tag}
                 type="button"
-                onClick={() => removeTag(t)}
+                onClick={() => removeTag(tag)}
                 className="inline-flex items-center gap-1 rounded-md border border-border bg-accent/40 px-2 py-0.5 font-mono text-[10px] text-accent-foreground hover:bg-accent"
-                aria-label={`Remove tag ${t}`}
+                aria-label={t("rag.removeTagAria", { name: tag })}
               >
-                #{t}
+                #{tag}
                 <span aria-hidden>×</span>
               </button>
             ))}
@@ -187,11 +187,11 @@ export default function RagPage() {
                   setTagFilter(tagFilter.slice(0, -1));
                 }
               }}
-              placeholder="add tag..."
+              placeholder={t("rag.addTagPlaceholder")}
               className="h-7 rounded-md border border-input bg-transparent px-2 font-mono text-[11px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
             />
             <p className="text-[10px] text-muted-foreground">
-              (tag filter sent to server once the endpoint supports it)
+              {t("rag.tagFilterHint")}
             </p>
           </div>
         </form>
@@ -203,11 +203,14 @@ export default function RagPage() {
         {results ? (
           <div className="space-y-2">
             <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-              {results.hits.length} hits · backend={results.backend}
+              {t("rag.hits", {
+                n: results.hits.length,
+                backend: results.backend,
+              })}
             </div>
             {results.hits.length === 0 ? (
               <p className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-                no hits
+                {t("rag.noHits")}
               </p>
             ) : (
               <ul className="space-y-2">
@@ -222,9 +225,9 @@ export default function RagPage() {
 
       <section className="flex items-center justify-between rounded-lg border border-border bg-panel p-4">
         <div className="space-y-0.5">
-          <div className="text-sm font-semibold">Rebuild FTS index</div>
+          <div className="text-sm font-semibold">{t("rag.rebuildTitle")}</div>
           <p className="text-xs text-muted-foreground">
-            Rescans `chunks_fts`. Safe but not instant on large corpora.
+            {t("rag.rebuildHint")}
           </p>
         </div>
         <Button
@@ -233,7 +236,7 @@ export default function RagPage() {
           disabled={rebuildMutation.isPending || !stats.data?.ready}
           data-testid="rag-rebuild-btn"
         >
-          {rebuildMutation.isPending ? "Rebuilding…" : "Rebuild"}
+          {rebuildMutation.isPending ? t("rag.rebuilding") : t("rag.rebuild")}
         </Button>
       </section>
     </>

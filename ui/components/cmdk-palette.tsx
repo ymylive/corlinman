@@ -6,6 +6,7 @@
  * Actions:
  *   - Jump to any admin route (10 destinations, synced with the sidebar list).
  *   - Toggle theme.
+ *   - Switch language (zh-CN ↔ en).
  *   - Log out (POST /admin/logout via lib/auth).
  *   - Open a lightweight "Test chat" drawer that POSTs /v1/chat/completions.
  *   - Surface recent commands (top 5, persisted in localStorage).
@@ -21,6 +22,7 @@ import * as React from "react";
 import { Command } from "cmdk";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
   Activity,
@@ -30,6 +32,7 @@ import {
   Command as CommandIcon,
   Database,
   FileTerminal,
+  Languages,
   LogOut,
   MessageCircle,
   MessageSquare,
@@ -94,23 +97,23 @@ function pushRecent(id: string): void {
 
 interface NavCmd {
   id: string;
-  label: string;
+  labelKey: string;
   href: string;
   icon: React.ComponentType<{ className?: string }>;
   keywords?: string;
 }
 
 const NAV_CMDS: NavCmd[] = [
-  { id: "nav.dashboard", label: "Dashboard", href: "/", icon: Activity, keywords: "overview home home" },
-  { id: "nav.plugins", label: "Plugins", href: "/plugins", icon: Boxes, keywords: "tools manifest" },
-  { id: "nav.agents", label: "Agents", href: "/agents", icon: Bot, keywords: "prompt editor" },
-  { id: "nav.rag", label: "RAG", href: "/rag", icon: Database, keywords: "retrieval chunks embeddings" },
-  { id: "nav.qq", label: "QQ Channel", href: "/channels/qq", icon: MessageCircle, keywords: "channels messaging" },
-  { id: "nav.scheduler", label: "Scheduler", href: "/scheduler", icon: Timer, keywords: "cron jobs" },
-  { id: "nav.approvals", label: "Approvals", href: "/approvals", icon: ClipboardCheck, keywords: "pending tool gate" },
-  { id: "nav.models", label: "Models", href: "/models", icon: Route, keywords: "providers aliases routing" },
-  { id: "nav.config", label: "Config", href: "/config", icon: Settings, keywords: "toml settings" },
-  { id: "nav.logs", label: "Logs", href: "/logs", icon: FileTerminal, keywords: "stream events trace" },
+  { id: "nav.dashboard", labelKey: "nav.dashboard", href: "/", icon: Activity, keywords: "overview home 仪表盘 dashboard" },
+  { id: "nav.plugins", labelKey: "nav.plugins", href: "/plugins", icon: Boxes, keywords: "tools manifest 插件" },
+  { id: "nav.agents", labelKey: "nav.agents", href: "/agents", icon: Bot, keywords: "prompt editor agent" },
+  { id: "nav.rag", labelKey: "nav.rag", href: "/rag", icon: Database, keywords: "retrieval chunks embeddings 向量" },
+  { id: "nav.qq", labelKey: "nav.qq", href: "/channels/qq", icon: MessageCircle, keywords: "channels messaging 通道 qq" },
+  { id: "nav.scheduler", labelKey: "nav.scheduler", href: "/scheduler", icon: Timer, keywords: "cron jobs 定时任务" },
+  { id: "nav.approvals", labelKey: "nav.approvals", href: "/approvals", icon: ClipboardCheck, keywords: "pending tool gate 审批" },
+  { id: "nav.models", labelKey: "nav.models", href: "/models", icon: Route, keywords: "providers aliases routing 模型" },
+  { id: "nav.config", labelKey: "nav.config", href: "/config", icon: Settings, keywords: "toml settings 配置" },
+  { id: "nav.logs", labelKey: "nav.logs", href: "/logs", icon: FileTerminal, keywords: "stream events trace 日志" },
 ];
 
 // --- provider ---------------------------------------------------------------
@@ -153,6 +156,7 @@ function CommandPalette({
 }) {
   const router = useRouter();
   const { theme, setTheme } = useTheme();
+  const { t, i18n } = useTranslation();
   const [recent, setRecent] = React.useState<string[]>([]);
   const [chatOpen, setChatOpen] = React.useState(false);
 
@@ -195,12 +199,12 @@ function CommandPalette({
               "animate-in fade-in-0 zoom-in-95 duration-150",
             )}
           >
-            <Command label="Command menu" loop>
+            <Command label={t("cmdk.commandMenu")} loop>
               <div className="flex items-center gap-2 border-b border-border px-3">
                 <CommandIcon className="h-4 w-4 text-muted-foreground" />
                 <Command.Input
                   autoFocus
-                  placeholder="Type a command or search..."
+                  placeholder={t("cmdk.searchPlaceholder")}
                   className="h-11 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                 />
                 <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
@@ -209,27 +213,28 @@ function CommandPalette({
               </div>
               <Command.List className="max-h-[360px] overflow-y-auto p-1">
                 <Command.Empty className="px-3 py-6 text-center text-sm text-muted-foreground">
-                  No results.
+                  {t("cmdk.noResults")}
                 </Command.Empty>
 
                 {recent.length > 0 ? (
                   <Command.Group
-                    heading="Recent"
+                    heading={t("cmdk.groupRecent")}
                     className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
                   >
                     {recent.map((rid) => {
                       const n = navById.get(rid);
                       if (!n) return null;
                       const Icon = n.icon;
+                      const label = t(n.labelKey);
                       return (
                         <PaletteItem
                           key={`recent-${rid}`}
-                          value={`recent ${n.label} ${n.keywords ?? ""}`}
+                          value={`recent ${label} ${n.keywords ?? ""}`}
                           onSelect={() =>
                             run(n.id, () => router.push(n.href as never))
                           }
                           icon={<Icon className="h-4 w-4" />}
-                          label={n.label}
+                          label={label}
                           hint={n.href}
                         />
                       );
@@ -238,20 +243,21 @@ function CommandPalette({
                 ) : null}
 
                 <Command.Group
-                  heading="Navigate"
+                  heading={t("cmdk.groupNavigate")}
                   className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
                 >
                   {NAV_CMDS.map((n) => {
                     const Icon = n.icon;
+                    const label = t(n.labelKey);
                     return (
                       <PaletteItem
                         key={n.id}
-                        value={`${n.label} ${n.keywords ?? ""}`}
+                        value={`${label} ${n.keywords ?? ""}`}
                         onSelect={() =>
                           run(n.id, () => router.push(n.href as never))
                         }
                         icon={<Icon className="h-4 w-4" />}
-                        label={n.label}
+                        label={label}
                         hint={n.href}
                       />
                     );
@@ -259,22 +265,22 @@ function CommandPalette({
                 </Command.Group>
 
                 <Command.Group
-                  heading="Actions"
+                  heading={t("cmdk.groupActions")}
                   className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
                 >
                   <PaletteItem
-                    value="test chat completion"
+                    value="test chat completion 测试"
                     onSelect={() =>
                       run("action.chat", () => {
                         setChatOpen(true);
                       })
                     }
                     icon={<MessageSquare className="h-4 w-4" />}
-                    label="Test chat..."
-                    hint="POST /v1/chat/completions"
+                    label={t("cmdk.testChat")}
+                    hint={t("cmdk.testChatHint")}
                   />
                   <PaletteItem
-                    value="toggle theme dark light"
+                    value="toggle theme dark light 主题"
                     onSelect={() =>
                       run("action.theme", () =>
                         setTheme(theme === "dark" ? "light" : "dark"),
@@ -287,16 +293,34 @@ function CommandPalette({
                         <Moon className="h-4 w-4" />
                       )
                     }
-                    label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                    label={
+                      theme === "dark"
+                        ? t("nav.switchToLight")
+                        : t("nav.switchToDark")
+                    }
                     hint="⇧⌘L"
                   />
                   <PaletteItem
-                    value="logout sign out"
+                    value="switch language i18n 语言 chinese english 中英"
+                    onSelect={() =>
+                      run("action.language", () => {
+                        const next = i18n.language?.startsWith("zh")
+                          ? "en"
+                          : "zh-CN";
+                        i18n.changeLanguage(next);
+                      })
+                    }
+                    icon={<Languages className="h-4 w-4" />}
+                    label={t("cmdk.switchLanguage")}
+                    hint={t("cmdk.switchLanguageHint")}
+                  />
+                  <PaletteItem
+                    value="logout sign out 退出"
                     onSelect={() =>
                       run("action.logout", async () => {
                         try {
                           await logout();
-                          toast.success("已退出登录");
+                          toast.success(t("auth.logoutSuccess"));
                         } catch {
                           /* idempotent */
                         } finally {
@@ -305,8 +329,8 @@ function CommandPalette({
                       })
                     }
                     icon={<LogOut className="h-4 w-4" />}
-                    label="Log out"
-                    hint="/admin/logout"
+                    label={t("cmdk.logout")}
+                    hint={t("cmdk.logoutHint")}
                   />
                 </Command.Group>
               </Command.List>
@@ -356,6 +380,7 @@ function PaletteItem({
 // --- test chat drawer -------------------------------------------------------
 
 function TestChatDrawer({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
   const [prompt, setPrompt] = React.useState("Hello!");
   const [answer, setAnswer] = React.useState<string>("");
   const [submitting, setSubmitting] = React.useState(false);
@@ -420,7 +445,7 @@ function TestChatDrawer({ onClose }: { onClose: () => void }) {
         )}
       >
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold">Test chat completion</h2>
+          <h2 className="text-sm font-semibold">{t("cmdk.testChatTitle")}</h2>
           <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
             ESC
           </kbd>
@@ -434,14 +459,14 @@ function TestChatDrawer({ onClose }: { onClose: () => void }) {
           />
           <div className="flex items-center justify-between">
             <span className="text-xs text-muted-foreground">
-              POST /v1/chat/completions · model=default
+              {t("cmdk.testChatHintInline")}
             </span>
             <button
               type="submit"
               disabled={submitting || !prompt.trim()}
               className="inline-flex h-8 items-center rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
             >
-              {submitting ? "Sending..." : "Send"}
+              {submitting ? t("cmdk.sending") : t("cmdk.send")}
             </button>
           </div>
         </form>

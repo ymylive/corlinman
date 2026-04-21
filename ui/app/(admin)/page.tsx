@@ -3,6 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import {
   ActivityIcon,
   ArrowUpRight,
@@ -53,6 +54,7 @@ interface LogEvent {
 const RECENT_MAX = 20;
 
 export default function DashboardPage() {
+  const { t } = useTranslation();
   // Each query wrapped in .catch(() => undefined) would swallow errors; we
   // keep isError around instead so the UI can render "—" for failures.
   const plugins = useQuery<PluginSummary[]>({
@@ -107,16 +109,18 @@ export default function DashboardPage() {
       <section className="relative overflow-hidden rounded-lg border border-border bg-surface/40 p-6 dashboard-hero-glow">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div className="space-y-1">
-            <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
+            <h1 className="text-2xl font-semibold tracking-tight">
+              {t("dashboard.title")}
+            </h1>
             <p className="text-sm text-muted-foreground">
-              Rust gateway · Python AI layer · runtime health at a glance.
+              {t("dashboard.subtitle")}
             </p>
           </div>
           <Link
             href="/logs"
             className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
           >
-            Live logs
+            {t("dashboard.liveLogs")}
             <ArrowUpRight className="h-3 w-3" />
           </Link>
         </div>
@@ -125,45 +129,52 @@ export default function DashboardPage() {
       {/* stat cards */}
       <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
         <StatCard
-          label="Plugins"
+          label={t("dashboard.plugins")}
           value={plugins.isError ? undefined : plugins.data?.length}
           hint={
             plugins.data
-              ? `${pluginsHealthy ?? 0} loaded`
+              ? t("dashboard.pluginsLoaded", { n: pluginsHealthy ?? 0 })
               : plugins.isError
-                ? "endpoint offline"
-                : "loading…"
+                ? t("dashboard.endpointOffline")
+                : t("dashboard.loadingHint")
           }
           icon={<Boxes className="h-4 w-4" />}
           href="/plugins"
           sparkSeed={plugins.data?.length ?? 0}
         />
         <StatCard
-          label="Agents"
+          label={t("dashboard.agents")}
           value={agents.isError ? undefined : agents.data?.length}
-          hint={agents.isError ? "endpoint offline" : "markdown prompts"}
+          hint={
+            agents.isError
+              ? t("dashboard.endpointOffline")
+              : t("dashboard.agentsHint")
+          }
           icon={<Bot className="h-4 w-4" />}
           href="/agents"
           sparkSeed={agents.data?.length ?? 0}
         />
         <StatCard
-          label="RAG chunks"
+          label={t("dashboard.ragChunks")}
           value={rag.isError ? undefined : rag.data?.chunks}
           hint={
             rag.data
-              ? `${rag.data.files} files · ${rag.data.tags} tags`
+              ? t("dashboard.ragFilesTags", {
+                  files: rag.data.files,
+                  tags: rag.data.tags,
+                })
               : rag.isError
-                ? "endpoint offline"
-                : "loading…"
+                ? t("dashboard.endpointOffline")
+                : t("dashboard.loadingHint")
           }
           icon={<Database className="h-4 w-4" />}
           href="/rag"
           sparkSeed={rag.data?.chunks ?? 0}
         />
         <StatCard
-          label="Chat req (24h)"
+          label={t("dashboard.chat24h")}
           value={chat24}
-          hint="metrics endpoint pending"
+          hint={t("dashboard.metricsPending")}
           icon={<MessageSquare className="h-4 w-4" />}
           href="/logs"
           sparkSeed={0}
@@ -263,24 +274,25 @@ function Sparkline({ seed }: { seed: number }) {
 // ---- activity card --------------------------------------------------------
 
 function ActivityCard({ events }: { events: LogEvent[] }) {
+  const { t } = useTranslation();
   return (
     <div className="flex min-h-[320px] flex-col rounded-lg border border-border bg-panel">
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <div className="flex items-center gap-2 text-sm font-medium">
           <ActivityIcon className="h-4 w-4 text-muted-foreground" />
-          Recent activity
+          {t("dashboard.recentActivity")}
         </div>
         <Link
           href="/logs"
           className="text-xs text-muted-foreground transition-colors hover:text-foreground"
         >
-          View all →
+          {t("dashboard.viewAll")}
         </Link>
       </div>
       <ul className="flex-1 divide-y divide-border overflow-auto font-mono text-xs">
         {events.length === 0 ? (
           <li className="p-6 text-center text-sm text-muted-foreground">
-            Waiting for events…
+            {t("dashboard.waitingForEvents")}
           </li>
         ) : (
           events.map((e, i) => (
@@ -340,6 +352,7 @@ function HealthCard({
   health: HealthStatus | undefined;
   error: boolean;
 }) {
+  const { t } = useTranslation();
   // Fabricate a 7-check list if the endpoint hasn't been extended yet.
   const fallback: HealthCheck[] = [
     { name: "gateway", ok: !error },
@@ -357,7 +370,7 @@ function HealthCard({
   return (
     <div className="flex min-h-[320px] flex-col rounded-lg border border-border bg-panel">
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <div className="text-sm font-medium">System health</div>
+        <div className="text-sm font-medium">{t("dashboard.systemHealth")}</div>
         <div className="font-mono text-xs text-muted-foreground">
           {ok} / {total}
         </div>

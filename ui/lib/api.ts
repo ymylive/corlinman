@@ -4,9 +4,14 @@
  * Two fetch paths, picked per call:
  *   1. `NEXT_PUBLIC_MOCK_API_URL` set → hit the standalone mock server
  *      (see ui/mock/server.ts; default http://127.0.0.1:7777).
- *   2. Otherwise → real gateway at `NEXT_PUBLIC_GATEWAY_URL`
- *      (default http://localhost:6005), with `credentials: "include"` so
- *      the browser forwards any auth cookie the gateway sets.
+ *   2. Otherwise → real gateway at `NEXT_PUBLIC_GATEWAY_URL`. Default is an
+ *      empty string so request paths resolve relative to the current origin
+ *      (nginx proxies `/admin/*`, `/health`, `/v1/*`, `/metrics`, and
+ *      `/plugin-callback` to the gateway in production). `credentials:
+ *      "include"` forwards the session cookie the gateway sets.
+ *
+ * For local dev without a reverse proxy, set `NEXT_PUBLIC_GATEWAY_URL=
+ * http://localhost:6005` as an opt-in escape hatch.
  *
  * M6 note: admin endpoints are HTTP Basic right now — either hit them from a
  * browser after a Basic-auth prompt or set the `Authorization` header on the
@@ -16,8 +21,7 @@
  * gateway running: set `NEXT_PUBLIC_MOCK_MODE=1` to enable it.
  */
 
-export const GATEWAY_BASE_URL =
-  process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:6005";
+export const GATEWAY_BASE_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? "";
 
 /** Empty string means "no mock server"; any non-empty value routes all calls there. */
 export const MOCK_API_URL = process.env.NEXT_PUBLIC_MOCK_API_URL ?? "";

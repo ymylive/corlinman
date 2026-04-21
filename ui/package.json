@@ -27,6 +27,8 @@
     "cmdk": "^1.1.1",
     "framer-motion": "^12.38.0",
     "geist": "^1.7.0",
+    "i18next": "^26.0.6",
+    "i18next-browser-languagedetector": "^8.2.1",
     "lucide-react": "latest",
     "next": "^15.1.0",
     "next-intl": "^3.26.0",
@@ -34,6 +36,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-hook-form": "^7.53.2",
+    "react-i18next": "^17.0.4",
     "sonner": "^2.0.7",
     "tailwind-merge": "^2.5.4",
     "zod": "^3.23.8"

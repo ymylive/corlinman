@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useTranslation } from "react-i18next";
 import {
   Dialog,
   DialogContent,
@@ -18,15 +19,11 @@ import { Label } from "@/components/ui/label";
  * Required minimum length = 5 chars, matching the copy in the task spec.
  * Reason travels to the Rust `DecideBody { approve: false, reason }` which
  * is stored alongside the decision (see `approvals.rs::decide_approval`).
- *
- * Approve-with-reason is not implemented this round because the UX value
- * is small and the spec flagged it as optional; deny is where audit
- * context actually matters.
  */
 export interface DenyReasonDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Human label for the action — "1 条" or "3 条" etc. */
+  /** Human label for the action — already localized by the caller. */
   targetLabel: string;
   onConfirm: (reason: string) => void;
   submitting?: boolean;
@@ -41,6 +38,7 @@ export function DenyReasonDialog({
   onConfirm,
   submitting = false,
 }: DenyReasonDialogProps) {
+  const { t } = useTranslation();
   const [reason, setReason] = React.useState("");
 
   React.useEffect(() => {
@@ -54,19 +52,21 @@ export function DenyReasonDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>拒绝 {targetLabel}</DialogTitle>
+          <DialogTitle>
+            {t("approvals.denyDialogTitle", { target: targetLabel })}
+          </DialogTitle>
           <DialogDescription>
-            拒绝理由将随决定一起持久化，至少 {MIN_REASON} 个字符。
+            {t("approvals.denyDialogBody", { min: MIN_REASON })}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          <Label htmlFor="deny-reason">Reason</Label>
+          <Label htmlFor="deny-reason">{t("approvals.denyReasonLabel")}</Label>
           <Input
             id="deny-reason"
             value={reason}
             autoFocus
             onChange={(e) => setReason(e.target.value)}
-            placeholder="eg. 命中黑名单路径 / 参数不安全"
+            placeholder={t("approvals.denyReasonPlaceholder")}
             disabled={submitting}
           />
         </div>
@@ -76,14 +76,14 @@ export function DenyReasonDialog({
             onClick={() => onOpenChange(false)}
             disabled={submitting}
           >
-            取消
+            {t("approvals.denyCancel")}
           </Button>
           <Button
             variant="destructive"
             onClick={() => onConfirm(trimmed)}
             disabled={tooShort || submitting}
           >
-            拒绝
+            {t("approvals.denyConfirm")}
           </Button>
         </DialogFooter>
       </DialogContent>

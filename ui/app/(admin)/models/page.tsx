@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Check, Key, Pencil, Plus, Trash2, X } from "lucide-react";
 
@@ -27,6 +28,7 @@ import { fetchModels, updateAliases, type ModelsResponse } from "@/lib/api";
  * the target cell to point it elsewhere.
  */
 export default function ModelsPage() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const models = useQuery<ModelsResponse>({
     queryKey: ["admin", "models"],
@@ -53,32 +55,33 @@ export default function ModelsPage() {
       return updateAliases(map, defaultModel.trim() || undefined);
     },
     onSuccess: () => {
-      toast.success("Aliases saved");
+      toast.success(t("models.saveSuccess"));
       qc.invalidateQueries({ queryKey: ["admin", "models"] });
     },
     onError: (err) =>
       toast.error(
-        `Save failed: ${err instanceof Error ? err.message : String(err)}`,
+        t("models.saveFailed", {
+          msg: err instanceof Error ? err.message : String(err),
+        }),
       ),
   });
 
   return (
     <>
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Models</h1>
-        <p className="text-sm text-muted-foreground">
-          `/admin/models` · `/admin/models/aliases`. Provider enable toggle
-          lives in the config editor (flips `[providers.*]`).
-        </p>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {t("models.title")}
+        </h1>
+        <p className="text-sm text-muted-foreground">{t("models.subtitle")}</p>
       </header>
 
       <section className="space-y-2">
-        <h2 className="text-sm font-semibold">Providers</h2>
+        <h2 className="text-sm font-semibold">{t("models.providers")}</h2>
         {models.isPending ? (
           <Skeleton className="h-24 w-full" />
         ) : models.data && models.data.providers.length === 0 ? (
           <p className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-            No providers configured.
+            {t("models.providersEmpty")}
           </p>
         ) : (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -104,24 +107,26 @@ export default function ModelsPage() {
                   </div>
                   {p.enabled ? (
                     <Badge className="border-transparent bg-ok/15 text-ok">
-                      enabled
+                      {t("common.enabled")}
                     </Badge>
                   ) : (
-                    <Badge variant="secondary">disabled</Badge>
+                    <Badge variant="secondary">{t("common.disabled")}</Badge>
                   )}
                 </div>
                 <div className="flex items-center gap-2 text-xs">
                   <Key className="h-3 w-3 text-muted-foreground" />
                   {p.has_api_key ? (
                     <span className="font-mono text-muted-foreground">
-                      key: {p.api_key_kind}
+                      {t("models.keyKind", { kind: p.api_key_kind })}
                     </span>
                   ) : (
-                    <span className="text-destructive">key missing</span>
+                    <span className="text-destructive">
+                      {t("models.keyMissing")}
+                    </span>
                   )}
                 </div>
                 <div className="font-mono text-[11px] text-muted-foreground">
-                  {p.base_url ?? "(provider default)"}
+                  {p.base_url ?? t("models.providerDefault")}
                 </div>
               </div>
             ))}
@@ -132,14 +137,14 @@ export default function ModelsPage() {
       <section className="space-y-3 rounded-lg border border-border bg-panel p-4">
         <div className="flex items-center justify-between gap-2">
           <div>
-            <h2 className="text-sm font-semibold">Aliases</h2>
+            <h2 className="text-sm font-semibold">{t("models.aliases")}</h2>
             <p className="text-xs text-muted-foreground">
-              Click an alias or target cell to edit it in place.
+              {t("models.aliasesHint")}
             </p>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-              default
+              {t("models.defaultLabel")}
             </span>
             <Input
               value={defaultModel}
@@ -153,7 +158,7 @@ export default function ModelsPage() {
               onClick={() => setAliases([...aliases, ["", ""]])}
             >
               <Plus className="h-3 w-3" />
-              Alias
+              {t("models.addAlias")}
             </Button>
             <Button
               size="sm"
@@ -161,15 +166,17 @@ export default function ModelsPage() {
               disabled={saveMutation.isPending}
               data-testid="models-save-btn"
             >
-              {saveMutation.isPending ? "Saving..." : "Save"}
+              {saveMutation.isPending ? t("models.saving") : t("models.save")}
             </Button>
           </div>
         </div>
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border hover:bg-transparent">
-              <TableHead className="w-52 pl-3">Alias</TableHead>
-              <TableHead>Target model</TableHead>
+              <TableHead className="w-52 pl-3">
+                {t("models.aliasHeader")}
+              </TableHead>
+              <TableHead>{t("models.aliasTargetHeader")}</TableHead>
               <TableHead className="w-16"></TableHead>
             </TableRow>
           </TableHeader>
@@ -180,7 +187,7 @@ export default function ModelsPage() {
                   colSpan={3}
                   className="py-6 text-center text-sm text-muted-foreground"
                 >
-                  no aliases — click + Alias to add one
+                  {t("models.noAliases")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -207,7 +214,7 @@ export default function ModelsPage() {
             {(saveMutation.error as Error).message}
           </p>
         ) : saveMutation.isSuccess ? (
-          <p className="text-xs text-ok">aliases saved</p>
+          <p className="text-xs text-ok">{t("models.aliasSavedInline")}</p>
         ) : null}
       </section>
     </>
@@ -226,6 +233,7 @@ function AliasRow({
   onChange: (next: [string, string]) => void;
   onRemove: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <TableRow className="border-b border-border">
       <TableCell className="pl-3">
@@ -245,7 +253,12 @@ function AliasRow({
         />
       </TableCell>
       <TableCell>
-        <Button size="sm" variant="ghost" onClick={onRemove} aria-label="Remove">
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onRemove}
+          aria-label={t("models.remove")}
+        >
           <Trash2 className="h-3.5 w-3.5" />
         </Button>
       </TableCell>
@@ -264,6 +277,7 @@ function InlineEdit({
   placeholder?: string;
   mono?: boolean;
 }) {
+  const { t } = useTranslation();
   const [editing, setEditing] = React.useState(!value);
   const [draft, setDraft] = React.useState(value);
   React.useEffect(() => {
@@ -280,7 +294,7 @@ function InlineEdit({
         )}
       >
         <span className={!value ? "text-muted-foreground" : ""}>
-          {value || placeholder || "(empty)"}
+          {value || placeholder || t("models.emptyValue")}
         </span>
         <Pencil className="h-3 w-3 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
       </button>
@@ -311,7 +325,7 @@ function InlineEdit({
           setEditing(false);
         }}
         className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-        aria-label="Commit"
+        aria-label={t("models.commit")}
       >
         <Check className="h-3.5 w-3.5" />
       </button>
@@ -322,7 +336,7 @@ function InlineEdit({
           setEditing(false);
         }}
         className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-        aria-label="Cancel"
+        aria-label={t("models.cancel")}
       >
         <X className="h-3.5 w-3.5" />
       </button>

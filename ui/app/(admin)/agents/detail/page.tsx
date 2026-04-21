@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
+import { useTranslation } from "react-i18next";
 import { ArrowLeft, Circle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -23,6 +24,7 @@ const Editor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
  * the draft diverges from the last loaded content.
  */
 export default function AgentDetailPage() {
+  const { t } = useTranslation();
   const search = useSearchParams();
   const name = search?.get("name") ?? "";
   const qc = useQueryClient();
@@ -59,9 +61,9 @@ export default function AgentDetailPage() {
   if (!name) {
     return (
       <p className="text-sm text-muted-foreground">
-        missing `?name=…` in URL — go via{" "}
+        {t("agents.missingName")}{" "}
         <Link href="/agents" className="underline">
-          agent list
+          {t("agents.agentListLink")}
         </Link>
       </p>
     );
@@ -76,14 +78,14 @@ export default function AgentDetailPage() {
             className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
           >
             <ArrowLeft className="h-3 w-3" />
-            Back to agents
+            {t("agents.backToList")}
           </Link>
           <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
             {name}
             {dirty ? (
               <Circle
                 className="h-2 w-2 fill-warn text-warn"
-                aria-label="unsaved changes"
+                aria-label={t("agents.unsavedIndicator")}
               />
             ) : null}
           </h1>
@@ -100,7 +102,7 @@ export default function AgentDetailPage() {
           disabled={!initialized || save.isPending}
           data-testid="agent-save-btn"
         >
-          {save.isPending ? "Saving…" : "Save"}
+          {save.isPending ? t("common.saving") : t("common.save")}
         </Button>
       </header>
 
@@ -108,7 +110,7 @@ export default function AgentDetailPage() {
         <Skeleton className="h-[600px] w-full" />
       ) : agent.isError ? (
         <p className="text-sm text-destructive">
-          load failed: {(agent.error as Error).message}
+          {t("agents.loadFailed")}: {(agent.error as Error).message}
         </p>
       ) : (
         <section className="flex-1 overflow-hidden rounded-lg border border-border bg-panel">
@@ -131,7 +133,7 @@ export default function AgentDetailPage() {
 
       {save.isError ? (
         <p className="text-sm text-destructive">
-          save failed: {(save.error as Error).message}
+          {t("agents.saveFailed")}: {(save.error as Error).message}
         </p>
       ) : save.isSuccess ? (
         <p
@@ -141,7 +143,7 @@ export default function AgentDetailPage() {
             "animate-in fade-in-0",
           )}
         >
-          保存成功
+          {t("agents.saveSuccess")}
         </p>
       ) : null}
     </div>

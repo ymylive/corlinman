@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Play } from "lucide-react";
 
@@ -36,6 +37,7 @@ import {
  * dispatches a POST and surfaces the resulting history entry.
  */
 export default function SchedulerPage() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const jobs = useQuery<SchedulerJob[]>({
     queryKey: ["admin", "scheduler", "jobs"],
@@ -53,12 +55,12 @@ export default function SchedulerPage() {
   const triggerMutation = useMutation({
     mutationFn: (name: string) => triggerSchedulerJob(name),
     onSuccess: (_, name) => {
-      toast.success(`Triggered "${name}" — see history`);
+      toast.success(t("scheduler.triggered", { name }));
       qc.invalidateQueries({ queryKey: ["admin", "scheduler", "history"] });
     },
     onError: (err, name) => {
       const msg = err instanceof Error ? err.message : String(err);
-      toast.warning(`"${name}" trigger: ${msg}`);
+      toast.warning(t("scheduler.triggerFail", { name, msg }));
       qc.invalidateQueries({ queryKey: ["admin", "scheduler", "history"] });
     },
   });
@@ -71,10 +73,11 @@ export default function SchedulerPage() {
   return (
     <>
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Scheduler</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {t("scheduler.title")}
+        </h1>
         <p className="text-sm text-muted-foreground">
-          `[[scheduler.jobs]]` snapshot. Cron runtime lands in M7; trigger is
-          recorded but a 501 means it was a dry run.
+          {t("scheduler.subtitle")}
         </p>
       </header>
 
@@ -82,12 +85,12 @@ export default function SchedulerPage() {
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border hover:bg-transparent">
-              <TableHead className="pl-4">Name</TableHead>
-              <TableHead>Cron</TableHead>
-              <TableHead>TZ</TableHead>
-              <TableHead>Action</TableHead>
-              <TableHead>Next fire</TableHead>
-              <TableHead>Last status</TableHead>
+              <TableHead className="pl-4">{t("scheduler.colName")}</TableHead>
+              <TableHead>{t("scheduler.colCron")}</TableHead>
+              <TableHead>{t("scheduler.colTz")}</TableHead>
+              <TableHead>{t("scheduler.colAction")}</TableHead>
+              <TableHead>{t("scheduler.colNextFire")}</TableHead>
+              <TableHead>{t("scheduler.colLastStatus")}</TableHead>
               <TableHead className="w-32"></TableHead>
             </TableRow>
           </TableHeader>
@@ -104,7 +107,7 @@ export default function SchedulerPage() {
                   colSpan={7}
                   className="py-10 text-center text-sm text-muted-foreground"
                 >
-                  No jobs configured.
+                  {t("scheduler.noJobs")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -143,7 +146,7 @@ export default function SchedulerPage() {
                       data-testid={`scheduler-trigger-${j.name}`}
                     >
                       <Play className="h-3 w-3" />
-                      Trigger
+                      {t("scheduler.triggerBtn")}
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -160,7 +163,7 @@ export default function SchedulerPage() {
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>
-              History
+              {t("scheduler.historyTitle")}
               {historyJob ? (
                 <span className="ml-2 font-mono text-xs text-muted-foreground">
                   {historyJob}
@@ -172,10 +175,10 @@ export default function SchedulerPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>At</TableHead>
-                  <TableHead>Source</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Message</TableHead>
+                  <TableHead>{t("scheduler.historyAt")}</TableHead>
+                  <TableHead>{t("scheduler.historySource")}</TableHead>
+                  <TableHead>{t("scheduler.historyStatus")}</TableHead>
+                  <TableHead>{t("scheduler.historyMessage")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -185,7 +188,7 @@ export default function SchedulerPage() {
                       colSpan={4}
                       className="py-4 text-center text-sm text-muted-foreground"
                     >
-                      no history yet
+                      {t("scheduler.noHistory")}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -215,6 +218,7 @@ export default function SchedulerPage() {
 
 /** Live countdown to `iso`. Updates every second. */
 function Countdown({ iso }: { iso: string | null }) {
+  const { t } = useTranslation();
   const [now, setNow] = React.useState(() => Date.now());
   React.useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -227,7 +231,9 @@ function Countdown({ iso }: { iso: string | null }) {
     return <span className="font-mono text-xs text-muted-foreground">{iso}</span>;
   if (delta <= 0) {
     return (
-      <span className="font-mono text-xs text-warn">due · {iso.slice(11, 19)}</span>
+      <span className="font-mono text-xs text-warn">
+        {t("scheduler.due")} · {iso.slice(11, 19)}
+      </span>
     );
   }
   const s = Math.floor(delta / 1000);

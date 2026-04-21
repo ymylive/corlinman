@@ -3,6 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { RefreshCw, Search } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -71,6 +72,7 @@ function TypeBadge({ type }: { type: string }) {
 }
 
 export default function PluginsPage() {
+  const { t } = useTranslation();
   const [search, setSearch] = React.useState("");
   const query = useQuery<PluginSummary[]>({
     queryKey: ["admin", "plugins"],
@@ -91,16 +93,18 @@ export default function PluginsPage() {
     <>
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">Plugins</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {t("plugins.title")}
+          </h1>
           <p className="text-sm text-muted-foreground">
-            Manifest-first discovery · origin · sandbox config · doctor output.
+            {t("plugins.subtitle")}
           </p>
         </div>
         <div className="flex items-center gap-2">
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Filter plugins..."
+              placeholder={t("plugins.filterPlaceholder")}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="h-8 w-56 pl-8 text-xs"
@@ -111,7 +115,7 @@ export default function PluginsPage() {
             size="sm"
             onClick={() => query.refetch()}
             disabled={query.isFetching}
-            aria-label="Refresh plugins"
+            aria-label={t("plugins.refreshAria")}
           >
             <RefreshCw
               className={cn(
@@ -119,7 +123,7 @@ export default function PluginsPage() {
                 query.isFetching && "animate-spin",
               )}
             />
-            Refresh
+            {t("plugins.refresh")}
           </Button>
         </div>
       </header>
@@ -128,12 +132,12 @@ export default function PluginsPage() {
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border hover:bg-transparent">
-              <TableHead className="pl-4">Name</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Tools</TableHead>
-              <TableHead>Origin</TableHead>
-              <TableHead>Last touched</TableHead>
+              <TableHead className="pl-4">{t("plugins.colName")}</TableHead>
+              <TableHead>{t("plugins.colType")}</TableHead>
+              <TableHead>{t("plugins.colStatus")}</TableHead>
+              <TableHead>{t("plugins.colTools")}</TableHead>
+              <TableHead>{t("plugins.colOrigin")}</TableHead>
+              <TableHead>{t("plugins.colLastTouched")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -153,7 +157,7 @@ export default function PluginsPage() {
                   colSpan={6}
                   className="py-10 text-center text-sm text-destructive"
                 >
-                  load failed: {(query.error as Error).message}
+                  {t("plugins.loadFailed")}: {(query.error as Error).message}
                 </TableCell>
               </TableRow>
             ) : filtered.length === 0 ? (
@@ -162,7 +166,7 @@ export default function PluginsPage() {
                   colSpan={6}
                   className="py-10 text-center text-sm text-muted-foreground"
                 >
-                  {search ? "No plugins match." : "No plugins registered."}
+                  {search ? t("plugins.noMatches") : t("plugins.noneRegistered")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -206,7 +210,7 @@ export default function PluginsPage() {
                     </Badge>
                   </TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground">
-                    {formatRelative(p.last_touched_at)}
+                    {formatRelative(p.last_touched_at, t)}
                   </TableCell>
                 </TableRow>
               ))
@@ -218,15 +222,18 @@ export default function PluginsPage() {
   );
 }
 
-function formatRelative(iso: string): string {
+function formatRelative(
+  iso: string,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): string {
   try {
     const then = new Date(iso).getTime();
     const now = Date.now();
     const s = Math.round((now - then) / 1000);
-    if (s < 60) return `${s}s ago`;
-    if (s < 3600) return `${Math.round(s / 60)}m ago`;
-    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-    return `${Math.round(s / 86400)}d ago`;
+    if (s < 60) return t("common.secondsAgo", { n: s });
+    if (s < 3600) return t("common.minutesAgo", { n: Math.round(s / 60) });
+    if (s < 86400) return t("common.hoursAgo", { n: Math.round(s / 3600) });
+    return t("common.daysAgo", { n: Math.round(s / 86400) });
   } catch {
     return iso;
   }

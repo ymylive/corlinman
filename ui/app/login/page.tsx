@@ -15,10 +15,12 @@
 
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useTranslation } from "react-i18next";
 
 import { login } from "@/lib/auth";
 import { CorlinmanApiError } from "@/lib/api";
 import { BrandMark } from "@/components/layout/brand-mark";
+import { LanguageToggle } from "@/components/layout/language-toggle";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,8 +29,9 @@ import { Label } from "@/components/ui/label";
 export default function LoginPage() {
   return (
     <div className="relative grid min-h-dvh grid-cols-1 md:grid-cols-[40%_60%]">
-      {/* theme toggle in top-right regardless of column */}
-      <div className="absolute right-4 top-4 z-10">
+      {/* theme + language toggles in top-right regardless of column */}
+      <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
+        <LanguageToggle />
         <ThemeToggle />
       </div>
       <HeroColumn />
@@ -42,6 +45,7 @@ export default function LoginPage() {
 }
 
 function HeroColumn() {
+  const { t } = useTranslation();
   return (
     <aside className="relative hidden overflow-hidden border-r border-border bg-surface/60 md:flex md:flex-col md:justify-between md:p-10">
       <div className="flex items-center gap-2">
@@ -49,11 +53,10 @@ function HeroColumn() {
       </div>
       <div className="relative z-10 space-y-2">
         <h2 className="text-lg font-semibold tracking-tight">
-          Run agents, route tools, keep the edge boring.
+          {t("auth.heroTitle")}
         </h2>
         <p className="max-w-xs text-sm text-muted-foreground">
-          Rust gateway, Python AI layer, static admin UI. All in one control
-          plane.
+          {t("auth.heroBody")}
         </p>
       </div>
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -76,6 +79,7 @@ function HeroColumn() {
 }
 
 function LoginForm() {
+  const { t } = useTranslation();
   const router = useRouter();
   const params = useSearchParams();
   const redirect = params.get("redirect") ?? "/";
@@ -97,9 +101,9 @@ function LoginForm() {
       if (err instanceof CorlinmanApiError) {
         setError(
           err.status === 401
-            ? "用户名或密码错误"
+            ? t("auth.invalidCredentials")
             : err.status === 503
-              ? "管理员凭据未配置 (config.toml [admin])"
+              ? t("auth.adminNotConfigured")
               : err.message,
         );
       } else {
@@ -117,10 +121,10 @@ function LoginForm() {
         <BrandMark />
       </div>
       <div className="space-y-1">
-        <h1 className="text-xl font-semibold tracking-tight">Sign in</h1>
-        <p className="text-sm text-muted-foreground">
-          登录以进入 corlinman 管理后台。
-        </p>
+        <h1 className="text-xl font-semibold tracking-tight">
+          {t("auth.signIn")}
+        </h1>
+        <p className="text-sm text-muted-foreground">{t("auth.subtitle")}</p>
       </div>
       <form
         onSubmit={onSubmit}
@@ -130,7 +134,7 @@ function LoginForm() {
         style={error ? { animation: "login-shake 220ms ease-out" } : undefined}
       >
         <div className="space-y-2">
-          <Label htmlFor="username">用户名</Label>
+          <Label htmlFor="username">{t("auth.username")}</Label>
           <Input
             id="username"
             name="username"
@@ -142,7 +146,7 @@ function LoginForm() {
           />
         </div>
         <div className="space-y-2">
-          <Label htmlFor="password">密码</Label>
+          <Label htmlFor="password">{t("auth.password")}</Label>
           <Input
             id="password"
             name="password"
@@ -164,36 +168,37 @@ function LoginForm() {
           </p>
         ) : null}
         <Button type="submit" className="w-full" disabled={submitting}>
-          {submitting ? "登录中..." : "登录"}
+          {submitting ? t("auth.submitting") : t("auth.submit")}
         </Button>
       </form>
       <p className="text-center text-xs text-muted-foreground">
-        Session backed by argon2 · HttpOnly cookie.
+        {t("auth.sessionHint")}
       </p>
     </div>
   );
 }
 
 function LoginFormShell({ disabled }: { disabled?: boolean }) {
+  const { t } = useTranslation();
   return (
     <div className="w-full max-w-sm space-y-6">
       <div className="space-y-1">
-        <h1 className="text-xl font-semibold tracking-tight">Sign in</h1>
-        <p className="text-sm text-muted-foreground">
-          登录以进入 corlinman 管理后台。
-        </p>
+        <h1 className="text-xl font-semibold tracking-tight">
+          {t("auth.signIn")}
+        </h1>
+        <p className="text-sm text-muted-foreground">{t("auth.subtitle")}</p>
       </div>
       <div className="space-y-4">
         <div className="space-y-2">
-          <Label htmlFor="username">用户名</Label>
+          <Label htmlFor="username">{t("auth.username")}</Label>
           <Input id="username" disabled={disabled} />
         </div>
         <div className="space-y-2">
-          <Label htmlFor="password">密码</Label>
+          <Label htmlFor="password">{t("auth.password")}</Label>
           <Input id="password" type="password" disabled={disabled} />
         </div>
         <Button type="button" className="w-full" disabled>
-          登录
+          {t("auth.submit")}
         </Button>
       </div>
     </div>

@@ -3,31 +3,35 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useTranslation } from "react-i18next";
 import { ChevronRight } from "lucide-react";
 
-const LABELS: Record<string, string> = {
-  "": "Dashboard",
-  plugins: "Plugins",
-  detail: "Detail",
-  agents: "Agents",
-  rag: "RAG",
-  channels: "Channels",
-  qq: "QQ",
-  scheduler: "Scheduler",
-  approvals: "Approvals",
-  models: "Models",
-  config: "Config",
-  logs: "Logs",
+// Maps URL segments to i18n keys under the `breadcrumbs.*` namespace.
+const SEGMENT_KEY: Record<string, string> = {
+  plugins: "breadcrumbs.plugins",
+  detail: "breadcrumbs.detail",
+  agents: "breadcrumbs.agents",
+  rag: "breadcrumbs.rag",
+  channels: "breadcrumbs.channels",
+  qq: "breadcrumbs.qq",
+  scheduler: "breadcrumbs.scheduler",
+  approvals: "breadcrumbs.approvals",
+  models: "breadcrumbs.models",
+  config: "breadcrumbs.config",
+  logs: "breadcrumbs.logs",
 };
 
 /** Auto-derived breadcrumb from `usePathname`. */
 export function Breadcrumbs() {
   const pathname = usePathname() ?? "/";
+  const { t } = useTranslation();
   const segments = pathname.split("/").filter(Boolean);
 
   if (segments.length === 0) {
     return (
-      <span className="text-sm font-medium text-foreground">Dashboard</span>
+      <span className="text-sm font-medium text-foreground">
+        {t("breadcrumbs.dashboard")}
+      </span>
     );
   }
 
@@ -35,7 +39,8 @@ export function Breadcrumbs() {
   let acc = "";
   for (const seg of segments) {
     acc += `/${seg}`;
-    crumbs.push({ href: acc, label: LABELS[seg] ?? seg });
+    const key = SEGMENT_KEY[seg];
+    crumbs.push({ href: acc, label: key ? t(key) : seg });
   }
 
   return (
@@ -44,7 +49,7 @@ export function Breadcrumbs() {
         href="/"
         className="text-muted-foreground transition-colors hover:text-foreground"
       >
-        Dashboard
+        {t("breadcrumbs.dashboard")}
       </Link>
       {crumbs.map((c, i) => (
         <React.Fragment key={c.href}>
