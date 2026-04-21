@@ -48,6 +48,7 @@ reqwest = { workspace = true }
 prometheus = { workspace = true }
 once_cell = { workspace = true }
 argon2 = { workspace = true }
+sha2 = { workspace = true }
 walkdir = { workspace = true }
 time = { workspace = true }
 toml = { workspace = true }

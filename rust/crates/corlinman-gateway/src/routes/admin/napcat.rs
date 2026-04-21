@@ -297,12 +297,21 @@ impl NapcatContext {
     }
 
     async fn post(&self, path: &str, body: Value) -> Result<Value, NapcatError> {
+        // NapCat v2 webui wraps every protected endpoint in a JWT-ish
+        // `Credential` obtained by POST /api/auth/login { hash: sha256(token+".napcat") }.
+        // Bearer with the raw token just returns Unauthorized. Login lazily
+        // per call — NapCat's credentials expire after ~1h so caching adds
+        // fragility for negligible throughput gain on an admin surface.
+        let credential = match self.access_token.as_deref() {
+            Some(t) if !t.is_empty() => Some(self.login_credential(t).await?),
+            _ => None,
+        };
         let mut req = self
             .client
             .post(format!("{}{}", self.url, path))
             .json(&body);
-        if let Some(t) = self.access_token.as_deref() {
-            req = req.bearer_auth(t);
+        if let Some(c) = credential.as_deref() {
+            req = req.bearer_auth(c);
         }
         let resp = req.send().await.map_err(NapcatError::transport)?;
         if !resp.status().is_success() {
@@ -311,6 +320,38 @@ impl NapcatContext {
             return Err(NapcatError::upstream(code, text));
         }
         resp.json::<Value>().await.map_err(NapcatError::decode)
+    }
+
+    /// Exchange the raw admin-panel token for a short-lived Credential per
+    /// the NapCat webui auth flow:
+    ///
+    ///     POST /api/auth/login { "hash": sha256(token + ".napcat") }
+    ///     → { code: 0, data: { Credential: <base64-json> } }
+    async fn login_credential(&self, token: &str) -> Result<String, NapcatError> {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(token.as_bytes());
+        h.update(b".napcat");
+        let hash = format!("{:x}", h.finalize());
+        let url = format!("{}/api/auth/login", self.url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&json!({ "hash": hash }))
+            .send()
+            .await
+            .map_err(NapcatError::transport)?;
+        if !resp.status().is_success() {
+            let code = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(NapcatError::upstream(code, text));
+        }
+        let body: Value = resp.json().await.map_err(NapcatError::decode)?;
+        let data = extract_ok_data(&body)?;
+        data.get("Credential")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string())
+            .ok_or_else(|| NapcatError::bad_response("missing data.Credential"))
     }
 }
 
