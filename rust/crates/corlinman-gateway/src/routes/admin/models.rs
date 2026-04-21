@@ -322,6 +322,9 @@ where
     }
 
     state.config.store(std::sync::Arc::new(new_cfg));
+    // Feature C last-mile: re-serialise for the Python subprocess after
+    // every alias mutation.
+    state.rewrite_py_config().await;
     let live = state.config.load_full();
     render(&live)
 }

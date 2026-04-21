@@ -7,6 +7,7 @@
 pub mod log_broadcast;
 pub mod metrics;
 pub mod middleware;
+pub mod py_config;
 pub mod routes;
 pub mod server;
 pub mod services;

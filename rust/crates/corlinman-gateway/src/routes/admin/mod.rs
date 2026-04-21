@@ -81,6 +81,13 @@ pub struct AdminState {
     /// cron runtime lands in M7 (see `corlinman-scheduler`); the
     /// admin routes degrade gracefully to empty-list.
     pub scheduler_history: Option<Arc<scheduler::SchedulerHistory>>,
+    /// Feature C last-mile: path to the Python-side JSON config drop
+    /// (`$CORLINMAN_DATA_DIR/py-config.json`). When set, every admin
+    /// write that mutates providers / aliases / embedding re-serialises
+    /// the active [`Config`] to this file so the Python subprocess picks
+    /// up the new shape on its next resolve call. `None` on test harnesses
+    /// that don't exercise the Python integration.
+    pub py_config_path: Option<PathBuf>,
 }
 
 impl AdminState {
@@ -94,6 +101,7 @@ impl AdminState {
             log_broadcast: None,
             rag_store: None,
             scheduler_history: None,
+            py_config_path: None,
         }
     }
 
@@ -138,6 +146,31 @@ impl AdminState {
     pub fn with_scheduler_history(mut self, history: Arc<scheduler::SchedulerHistory>) -> Self {
         self.scheduler_history = Some(history);
         self
+    }
+
+    /// Fluent: attach the path of the Python-side JSON config drop so
+    /// admin write handlers can re-serialise after every mutation.
+    pub fn with_py_config_path(mut self, path: PathBuf) -> Self {
+        self.py_config_path = Some(path);
+        self
+    }
+
+    /// Re-serialise the current config snapshot to the Python-side JSON
+    /// drop. No-op + warn when the path isn't configured — admin writes
+    /// still succeed (the TOML write already landed), they just can't
+    /// propagate to the Python side until the next process restart.
+    pub async fn rewrite_py_config(&self) {
+        let Some(path) = self.py_config_path.as_ref() else {
+            return;
+        };
+        let cfg = self.config.load_full();
+        if let Err(err) = crate::py_config::write_py_config(&cfg, path).await {
+            tracing::warn!(
+                error = %err,
+                path = %path.display(),
+                "py-config: rewrite after admin mutation failed",
+            );
+        }
     }
 }
 

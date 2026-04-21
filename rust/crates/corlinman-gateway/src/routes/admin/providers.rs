@@ -653,6 +653,9 @@ where
     }
 
     state.config.store(Arc::new(new_cfg));
+    // Feature C last-mile: re-serialise for the Python subprocess after
+    // every provider mutation.
+    state.rewrite_py_config().await;
     let live = state.config.load_full();
     render(&live)
 }
@@ -1030,6 +1033,48 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let v = body_json(resp).await;
         assert_eq!(v["references"]["embedding"], true);
+    }
+
+    #[tokio::test]
+    async fn upsert_rewrites_py_config_json() {
+        // Gap 1 integration: after a provider upsert lands in config.toml,
+        // the py-config.json drop the Rust gateway hands to Python must
+        // also carry the new slot so a pending Python resolve call sees it.
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let py_path = tmp.path().join("py-config.json");
+        let mut state = base_state(Some(cfg_path));
+        state = state.with_py_config_path(py_path.clone());
+        let app = router(state.clone());
+        let body = json!({
+            "name": "openai",
+            "kind": "openai",
+            "enabled": true,
+            "api_key": { "env": "OPENAI_API_KEY" },
+            "params": { "temperature": 0.7 }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(py_path.exists(), "py-config.json should be written");
+        let parsed: JsonValue =
+            serde_json::from_str(&tokio::fs::read_to_string(&py_path).await.unwrap()).unwrap();
+        let providers = parsed["providers"].as_array().unwrap();
+        assert!(
+            providers
+                .iter()
+                .any(|p| p["name"] == "openai" && p["kind"] == "openai"),
+            "openai slot should appear in py-config.json; got {parsed}"
+        );
     }
 
     #[test]

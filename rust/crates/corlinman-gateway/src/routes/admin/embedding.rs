@@ -12,10 +12,11 @@
 //!   kind-level JSON Schema.
 //!
 //! - `POST /admin/embedding/benchmark` — compute a similarity matrix +
-//!   latency report for a set of sample strings. Proxies to the Python
-//!   helper; until the gRPC method is wired up, returns **501
-//!   `pending_python_implementation`** so the UI can render a "coming
-//!   soon" surface without feature-flagging.
+//!   latency report for a set of sample strings. Passes through to the
+//!   Python admin sidecar at `$CORLINMAN_PY_ADMIN_URL` (default
+//!   `http://127.0.0.1:50052`). Connect failures surface as **503
+//!   `python_sidecar_unavailable`** so the UI can distinguish "Python
+//!   offline" from client-side validation errors.
 
 use axum::{
     extract::State,
@@ -175,15 +176,23 @@ async fn post_embedding(
 pub struct BenchmarkBody {
     pub samples: Vec<String>,
     #[serde(default)]
+    pub dimension: Option<u32>,
+    #[serde(default)]
+    pub params: Option<ParamsMap>,
+    /// Unused — retained for backward-compat with earlier UI builds.
+    #[serde(default)]
     pub limit: Option<usize>,
 }
+
+/// Env var overriding the Python admin sidecar address (used in tests).
+const ENV_PY_ADMIN_URL: &str = "CORLINMAN_PY_ADMIN_URL";
+const DEFAULT_PY_ADMIN_URL: &str = "http://127.0.0.1:50052";
+const BENCHMARK_TIMEOUT_SECS: u64 = 60;
 
 async fn post_benchmark(
     State(_state): State<AdminState>,
     Json(body): Json<BenchmarkBody>,
 ) -> Response {
-    // Minimal sanity check so obvious client bugs surface as 400 rather than
-    // 501 (distinguishing pilot-error from "not wired yet").
     if body.samples.is_empty() {
         return bad_request("invalid_samples", "samples must be non-empty");
     }
@@ -194,19 +203,78 @@ async fn post_benchmark(
         );
     }
 
-    // Real implementation proxies to the Python embedding service over gRPC
-    // via a new BenchmarkEmbedding RPC. That RPC is being landed by the
-    // Python agent in a parallel worktree — until the orchestrator wires
-    // them together, advertise the endpoint but return 501 so the UI can
-    // show a disabled state without spinning on a timeout.
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({
-            "error": "pending_python_implementation",
-            "message": "embedding benchmark proxies to the Python embedding service; that gRPC path is not wired yet",
-        })),
-    )
-        .into_response()
+    // Forward to the Python admin sidecar — a localhost HTTP endpoint that
+    // runs in the `corlinman-python-server` process. Connection errors are
+    // surfaced as 503 so the UI can distinguish "Python offline" from
+    // client-side validation failures.
+    let base = std::env::var(ENV_PY_ADMIN_URL).unwrap_or_else(|_| DEFAULT_PY_ADMIN_URL.to_string());
+    let url = format!("{}/embedding/benchmark", base.trim_end_matches('/'));
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("samples".into(), serde_json::json!(body.samples));
+    if let Some(d) = body.dimension {
+        payload.insert("dimension".into(), serde_json::json!(d));
+    }
+    if let Some(p) = body.params {
+        payload.insert("params".into(), serde_json::to_value(p).unwrap_or_default());
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(BENCHMARK_TIMEOUT_SECS))
+        .build()
+    {
+        Ok(c) => c,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "client_build_failed",
+                    "message": err.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let resp = match client.post(&url).json(&payload).send().await {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(error = %err, url = %url, "embedding benchmark: sidecar unreachable");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "python_sidecar_unavailable",
+                    "message": err.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let status = resp.status();
+    let body_bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": "python_sidecar_read_failed",
+                    "message": err.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Pass through the sidecar's JSON verbatim — success or error — so the
+    // shape the Python side emits (the `BenchmarkView` contract on success,
+    // `{error, message}` on failure) reaches the caller unchanged. We only
+    // remap the HTTP status when reqwest can't translate it; otherwise
+    // axum emits whatever the Python side chose.
+    let status_code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let json_body: serde_json::Value = serde_json::from_slice(&body_bytes)
+        .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&body_bytes)}));
+    (status_code, Json(json_body)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +316,9 @@ where
     }
 
     state.config.store(std::sync::Arc::new(new_cfg));
+    // Feature C last-mile: re-serialise for the Python subprocess after
+    // every embedding mutation.
+    state.rewrite_py_config().await;
     let live = state.config.load_full();
     render(&live)
 }
@@ -442,7 +513,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn benchmark_returns_501_pending_python() {
+    async fn benchmark_returns_503_when_sidecar_unreachable() {
+        // Point the handler at a port nothing is listening on — reqwest's
+        // connect failure maps to 503 `python_sidecar_unavailable` so the
+        // UI can distinguish "Python down" from validation errors.
+        //
+        // We use an invalid hostname (TLD `.invalid` is reserved per RFC
+        // 2606) which forces a DNS resolution failure faster + more
+        // reliably than probing a closed port on localhost.
+        std::env::set_var(
+            "CORLINMAN_PY_ADMIN_URL",
+            "http://corlinman-unreachable.invalid:50052",
+        );
         let state = state_with_openai(None, true);
         let app = router(state);
         let body = json!({
@@ -459,9 +541,18 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        std::env::remove_var("CORLINMAN_PY_ADMIN_URL");
+        let status = resp.status();
         let v = body_json(resp).await;
-        assert_eq!(v["error"], "pending_python_implementation");
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "expected 503 on sidecar unreachable, got {status} body={v}"
+        );
+        assert_eq!(
+            v["error"], "python_sidecar_unavailable",
+            "expected python_sidecar_unavailable body, got {v}"
+        );
     }
 
     #[tokio::test]

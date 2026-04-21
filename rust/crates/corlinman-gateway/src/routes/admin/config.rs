@@ -242,6 +242,11 @@ async fn post_config(
         gate.swap_rules(new_config.approvals.rules.clone());
     }
 
+    // Feature C last-mile: propagate to the Python-side JSON drop so the
+    // ProviderRegistry subprocess picks up the new alias / provider /
+    // embedding shape on its next resolve call.
+    state.rewrite_py_config().await;
+
     let version = hash8_of(&new_config);
     Json(PostConfigResponse {
         status: "ok",

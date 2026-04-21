@@ -282,6 +282,33 @@ pub async fn build_runtime_with_logs(
             StdDuration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
         ))
     });
+    // Feature C last-mile: drop the Python-side JSON config so the
+    // `ProviderRegistry` / `EmbeddingSpec` subprocess boots with the
+    // full provider / alias / embedding map. The env var `CORLINMAN_PY_CONFIG`
+    // points the Python side at the file; exporting it here means every
+    // child process (including any in-code `Command::spawn` that lands
+    // later) inherits it. Supervisors that launch the Python server in a
+    // sibling container should set the same env via `docker/start.sh`.
+    let py_config_path = crate::py_config::default_py_config_path();
+    let config_snapshot = config_handle.load_full();
+    match crate::py_config::write_py_config_sync(&config_snapshot, &py_config_path) {
+        Ok(()) => {
+            std::env::set_var(crate::py_config::ENV_PY_CONFIG, &py_config_path);
+            tracing::info!(
+                path = %py_config_path.display(),
+                env = crate::py_config::ENV_PY_CONFIG,
+                "py-config: exported for python subprocess",
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %py_config_path.display(),
+                "py-config: initial write failed; python will fall back to legacy prefix table",
+            );
+        }
+    }
+
     let admin_state = build_admin_state_with_config(
         registry.clone(),
         log_tx,
@@ -290,6 +317,7 @@ pub async fn build_runtime_with_logs(
         approval_gate,
         config_handle,
         cfg_path,
+        Some(py_config_path),
     );
     let router = mount_admin_routes(base_router, admin_state);
 
@@ -298,6 +326,7 @@ pub async fn build_runtime_with_logs(
 
 /// Variant of [`build_admin_state`] that reuses a pre-loaded config handle
 /// so boot code can share the same live-reload swap with `/health`.
+#[allow(clippy::too_many_arguments)]
 fn build_admin_state_with_config(
     plugins: Arc<PluginRegistry>,
     log_tx: Option<broadcast::Sender<LogRecord>>,
@@ -306,6 +335,7 @@ fn build_admin_state_with_config(
     approval_gate: Option<Arc<ApprovalGate>>,
     config_handle: Arc<ArcSwap<Config>>,
     cfg_path: Option<PathBuf>,
+    py_config_path: Option<PathBuf>,
 ) -> AdminState {
     let session_store = Arc::new(AdminSessionStore::new(StdDuration::from_secs(
         DEFAULT_ADMIN_SESSION_TTL_SECS,
@@ -328,6 +358,9 @@ fn build_admin_state_with_config(
     }
     if let Some(gate) = approval_gate {
         admin = admin.with_approval_gate(gate);
+    }
+    if let Some(path) = py_config_path {
+        admin = admin.with_py_config_path(path);
     }
     admin
 }
