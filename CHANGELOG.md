@@ -4,10 +4,104 @@ All notable changes to corlinman are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-04-21
+
+Admin UI redesign. Pure frontend release — no Rust, Python, or
+Dockerfile changes.
+
+### Changed
+
+- **Admin UI fully redesigned in a Linear / Vercel aesthetic**: dark-first
+  with a single indigo accent, Geist Sans / Mono typography, borders-over-shadows,
+  compact 6–8 px radii. `next-themes` light/dark toggle preserved.
+- **New dashboard landing page** (`/`): four stat cards with inline
+  sparklines, SSE-driven recent-activity feed, and a 7-check system health
+  panel backed by `/health`.
+- **Sidebar + topnav**: 240 ↔ 56 px collapsible sidebar with an animated
+  active-indicator (framer-motion `layoutId`); topnav adds auto
+  breadcrumb, live health dot, theme toggle, and a `⌘K` search pill.
+- **Global command palette** (`cmdk`): fuzzy navigation over all
+  destinations, a test-chat drawer that POSTs to `/v1/chat/completions`,
+  plus theme-toggle and logout actions. Recent commands persist in
+  `localStorage`.
+- **Motion language**: 200 ms page-transition fades, skeleton shimmers,
+  `sonner` toasts, slide-up issues drawer on the config page. No bouncy
+  spring animations.
+- **Refined pages**: Plugins, Agents, RAG, Channels, Scheduler, Approvals,
+  Models, Config, Logs — consistent status dots, inline-edit affordances,
+  virtualised logs list with pause-stream toggle, live scheduler countdowns.
+- **New login page**: two-column layout with a constellation backdrop
+  SVG and inline error with shake micro-animation.
+
+### Added
+
+- `framer-motion`, `cmdk`, `geist`, `sonner` as UI dependencies.
+- `fetchHealth()` + `HealthStatus` type in `ui/lib/api.ts`.
+
+### Stability
+
+- Playwright E2E selectors audited and preserved.
+- Vitest suite (including Chinese login-form labels) still green.
+- No API contracts changed.
+
+[0.1.2]: https://github.com/ymylive/corlinman/releases/tag/v0.1.2
+
+## [0.1.1] — 2026-04-21
+
+Deployment hotfix. Surfaced the first time the 1.0 image was built
+against a real server. All changes are docker / runtime fixes — no
+code behaviour changes outside the boot path.
+
+### Fixed
+
+- **`docker/Dockerfile`**: drop stale `pnpm -C ui export` step —
+  Next.js 14 removed the `next export` command; `output: "export"` in
+  `ui/next.config.ts` already emits the static bundle during
+  `next build`.
+- **`docker/Dockerfile`**: bump rust base from `1.85-slim` to
+  `1.95-slim` to match the project's `rust-toolchain.toml`.
+  `cargo-chef 0.1.77` transitively raised its MSRV to `rustc 1.88`.
+- **`docker/Dockerfile`**: add `binutils` + `g++` to the rust-builder
+  apt layer (required by `link-cplusplus`) and force the BFD linker via
+  `RUSTFLAGS=-C link-arg=-fuse-ld=bfd`. `lld` SIGSEGVs under Rosetta 2
+  / QEMU user-mode emulation when cross-building amd64 images from
+  Apple Silicon hosts.
+- **`docker/Dockerfile`**: correct runtime `COPY` of the CLI binary —
+  cargo emits `/build/target/release/corlinman` (per `[[bin]] name`),
+  not `corlinman-cli`.
+- **`rust/crates/corlinman-gateway/src/main.rs`**: honour `BIND` env
+  var (default `127.0.0.1`, containerised deploys set `0.0.0.0`).
+  Previously the listener was hard-bound to `127.0.0.1` and docker
+  port-publishing never reached it.
+- **`docker/Dockerfile`**: carry the python source tree into the
+  runtime image. `uv sync --no-editable` ignores workspace members, so
+  venv `.pth` shims pointed at `/build/python/packages/*/src/` which
+  don't exist in runtime — `corlinman-python-server` died at
+  `ModuleNotFoundError`. Adding `COPY --from=py-builder /build/python
+  /build/python` resolves the editable paths.
+
+### Added
+
+- **Runtime env knobs**: `BIND` (listener address) and `OPENAI_BASE_URL`
+  (consumed by `AsyncOpenAI` when `[providers.openai].base_url` isn't
+  threaded through — see Known Issues).
+
+### Known issues carried over
+
+- `corlinman_providers.registry.resolve()` still ignores `[providers.*]`
+  settings from `config.toml`. Until a deeper fix lands, point non-default
+  OpenAI-compatible backends at the right host via `OPENAI_BASE_URL`.
+- Docker image does not supervise the python agent out of the box;
+  production deploys use a startup script (`docker/start.sh` pattern)
+  that spawns `corlinman-python-server` alongside `corlinman-gateway`.
+
+[0.1.1]: https://github.com/ymylive/corlinman/releases/tag/v0.1.1
+
 ## [0.1.0] — 2026-04-21
 
 First tagged release. The 1.0 release prep sprint (S8) wraps seven prior
-implementation sprints (M0–M7) into a shippable self-hosted LLM toolbox.
+implementation sprints (M0–M7) into a shippable self-hosted intelligent
+agent platform.
 
 ### Added
 
@@ -63,7 +157,7 @@ implementation sprints (M0–M7) into a shippable self-hosted LLM toolbox.
 ### Known gaps (deferred to 0.1.1)
 
 - **No prebuilt docker image yet.** Build from source with `cargo build
-  --release -p corlinman-gateway -p corlinman-cli`; the `ghcr.io/ymylive/corlinma:0.1.0`
+  --release -p corlinman-gateway -p corlinman-cli`; the `ghcr.io/ymylive/corlinman:0.1.0`
   image is pending a v0.1.1 follow-up once a build host with docker is
   available.
 - **Screenshot placeholder**: `README.md` references
