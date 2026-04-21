@@ -7,6 +7,7 @@ import { getSession, type AdminSession } from "@/lib/auth";
 import { TopNav } from "@/components/layout/nav";
 import { Sidebar } from "@/components/layout/sidebar";
 import { PageTransition } from "@/components/layout/page-transition";
+import { PageErrorBoundary } from "@/components/layout/error-boundary";
 
 /**
  * Admin route group layout — Linear-style two-column shell.
@@ -75,7 +76,9 @@ export default function AdminLayout({
         <TopNav />
         <main className="relative flex flex-1 flex-col">
           <div className="mx-auto w-full max-w-[1440px] flex-1 space-y-6 px-6 py-6">
-            <PageTransition>{children}</PageTransition>
+            <PageTransition>
+              <PageErrorBoundary>{children}</PageErrorBoundary>
+            </PageTransition>
           </div>
         </main>
       </div>

@@ -98,7 +98,10 @@ export function validateAgainstSchema(
   }
 
   if (type === "object" && schema.properties) {
-    const obj = (value as ParamsValue) ?? {};
+    const obj =
+      typeof value === "object" && value !== null && !Array.isArray(value)
+        ? (value as ParamsValue)
+        : ({} as ParamsValue);
     for (const [key, sub] of Object.entries(schema.properties)) {
       const subPointer = `${pointer}/${key}`;
       if (
@@ -228,6 +231,15 @@ function SchemaField({
   onChange,
   testIdPrefix,
 }: SchemaFieldProps) {
+  // Defensive: backend is expected to send a concrete sub-schema for every
+  // property, but guard against a misshapen payload so a single bad entry
+  // doesn't crash the whole form.
+  if (!schema || typeof schema !== "object") {
+    return (
+      <p className="text-xs text-muted-foreground">(missing schema for {name})</p>
+    );
+  }
+
   const labelText = schema.title ?? name;
   const description = schema.description;
   const fieldId = `${testIdPrefix}${pointer.replace(/\//g, "-")}`;
@@ -236,7 +248,10 @@ function SchemaField({
 
   // Nested object — render as a fieldset with the same renderer recursing.
   if (kind === "object") {
-    const nested = (value as ParamsValue) ?? {};
+    const nested =
+      typeof value === "object" && value !== null && !Array.isArray(value)
+        ? (value as ParamsValue)
+        : ({} as ParamsValue);
     return (
       <fieldset className="space-y-2 rounded-md border border-dashed border-border px-3 py-2">
         <legend className="px-1 text-xs font-medium text-foreground">
@@ -245,7 +260,7 @@ function SchemaField({
         {description ? (
           <p className="text-[11px] text-muted-foreground">{description}</p>
         ) : null}
-        {Object.entries(schema.properties ?? {}).map(
+        {Object.entries(schema?.properties ?? {}).map(
           ([subKey, subSchema]) => (
             <SchemaField
               key={subKey}
