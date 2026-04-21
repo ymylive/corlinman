@@ -99,20 +99,12 @@ RUN uv sync --frozen --no-dev --no-editable
 RUN chmod +x scripts/gen-proto.sh && scripts/gen-proto.sh
 
 # ---------------------------------------------------------------------------
-# Stage 4: ui-builder — pnpm install + Next.js build + export
-# ---------------------------------------------------------------------------
-FROM node:20-slim AS ui-builder
-WORKDIR /build
-
-RUN corepack enable \
- && corepack prepare pnpm@latest --activate
-
-COPY pnpm-workspace.yaml package.json* pnpm-lock.yaml* ./
-COPY ui ./ui
-
-RUN pnpm install --frozen-lockfile \
- && pnpm -C ui build
-
+# (Stage 4 removed) — UI is built outside the image and served by nginx from
+# `/opt/corlinman/ui-static/`. Bundling it into the container was dead weight
+# and the in-emulator node build segfaults under Rosetta 2 on Apple Silicon.
+# Operators pointing at gateway-served UI should place a built bundle under
+# `$CORLINMAN_UI_DIR` via a bind mount.
+#
 # ---------------------------------------------------------------------------
 # Stage 5: runtime — slim final image
 # ---------------------------------------------------------------------------
@@ -142,8 +134,9 @@ COPY --from=rust-builder /build/target/release/corlinman         /usr/local/bin/
 COPY --from=py-builder /opt/venv /opt/venv
 COPY --from=py-builder /build/python /build/python
 
-# Next.js exported static bundle
-COPY --from=ui-builder /build/ui/out /app/ui-static
+# Admin UI: NOT bundled — production uses nginx to serve the static export
+# from the host. A bind mount at /app/ui-static works if anyone wants the
+# gateway to serve it directly instead.
 
 ENV PATH="/opt/venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
