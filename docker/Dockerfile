@@ -82,7 +82,12 @@ RUN apt-get update \
       curl \
       bash \
  && rm -rf /var/lib/apt/lists/* \
- && pip install --no-cache-dir uv
+ && pip install --no-cache-dir \
+      --retries 5 \
+      --timeout 120 \
+      --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+      --extra-index-url https://pypi.org/simple \
+      uv
 
 COPY pyproject.toml uv.lock* ./
 COPY python ./python
