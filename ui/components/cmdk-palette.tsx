@@ -19,11 +19,16 @@
  */
 
 import * as React from "react";
-import { Command } from "cmdk";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+
+import {
+  CommandPalette as TidepoolCommandPalette,
+  type PaletteGroup,
+  type PaletteItem,
+} from "@/components/ui/command-palette";
 import {
   Activity,
   Bot,
@@ -196,7 +201,6 @@ function CommandPalette({
   const router = useRouter();
   const { theme, setTheme } = useTheme();
   const { t, i18n } = useTranslation();
-  const { reduced } = useMotion();
   const { routes: recentRoutes } = useRecentRoutes();
   const [recent, setRecent] = React.useState<string[]>([]);
   const [chatOpen, setChatOpen] = React.useState(false);
@@ -205,21 +209,17 @@ function CommandPalette({
     if (open) setRecent(readRecent());
   }, [open]);
 
-  const run = (id: string, fn: () => void) => {
-    pushRecent(id);
-    setOpen(false);
-    // defer side effect so the palette closes before navigation
-    requestAnimationFrame(() => fn());
-  };
+  // defer side effect so the palette closes before navigation
+  const defer = (fn: () => void) => requestAnimationFrame(fn);
 
-  const navById = React.useMemo(() => {
-    const m = new Map<string, NavCmd>();
-    for (const n of NAV_CMDS) m.set(n.id, n);
-    return m;
-  }, []);
   const navByHref = React.useMemo(() => {
     const m = new Map<string, NavCmd>();
     for (const n of NAV_CMDS) m.set(n.href, n);
+    return m;
+  }, []);
+  const navById = React.useMemo(() => {
+    const m = new Map<string, NavCmd>();
+    for (const n of NAV_CMDS) m.set(n.id, n);
     return m;
   }, []);
 
@@ -245,262 +245,158 @@ function CommandPalette({
     return out.slice(0, 5);
   }, [recentRoutes, recent, navByHref, navById]);
 
-  if (!open && !chatOpen) return null;
+  // Build the PaletteGroup[] consumed by the new Tidepool primitive.
+  const groups = React.useMemo<PaletteGroup[]>(() => {
+    const gs: PaletteGroup[] = [];
+
+    if (recentEntries.length > 0) {
+      gs.push({
+        id: "recent",
+        label: t("cmdk.groupRecent"),
+        items: recentEntries.map(({ key, nav: n }): PaletteItem => {
+          const Icon = n.icon;
+          return {
+            id: `recent-${key}`,
+            label: t(n.labelKey),
+            icon: <Icon className="h-4 w-4" />,
+            meta: n.href,
+            keywords: ["recent", n.keywords ?? ""],
+            onRun: () => {
+              pushRecent(n.id);
+              defer(() => router.push(n.href as never));
+            },
+          };
+        }),
+      });
+    }
+
+    gs.push({
+      id: "navigate",
+      label: t("cmdk.groupNavigate"),
+      items: NAV_CMDS.map((n): PaletteItem => {
+        const Icon = n.icon;
+        return {
+          id: n.id,
+          label: t(n.labelKey),
+          icon: <Icon className="h-4 w-4" />,
+          meta: n.href,
+          keywords: n.keywords ? [n.keywords] : [],
+          onRun: () => {
+            pushRecent(n.id);
+            defer(() => router.push(n.href as never));
+          },
+        };
+      }),
+    });
+
+    gs.push({
+      id: "actions",
+      label: t("cmdk.groupActions"),
+      items: [
+        {
+          id: "action.chat",
+          label: t("cmdk.testChat"),
+          icon: <MessageSquare className="h-4 w-4" />,
+          meta: t("cmdk.testChatHint"),
+          keywords: ["test", "chat", "completion", "测试"],
+          onRun: () => {
+            pushRecent("action.chat");
+            defer(() => setChatOpen(true));
+          },
+        },
+        {
+          id: "action.theme",
+          label: theme === "dark" ? t("nav.switchToLight") : t("nav.switchToDark"),
+          icon:
+            theme === "dark" ? (
+              <Sun className="h-4 w-4" />
+            ) : (
+              <Moon className="h-4 w-4" />
+            ),
+          shortcut: "⇧⌘L",
+          keywords: ["toggle", "theme", "dark", "light", "主题"],
+          onRun: () => {
+            pushRecent("action.theme");
+            defer(() => setTheme(theme === "dark" ? "light" : "dark"));
+          },
+        },
+        {
+          id: "action.language",
+          label: t("cmdk.switchLanguage"),
+          icon: <Languages className="h-4 w-4" />,
+          meta: t("cmdk.switchLanguageHint"),
+          keywords: ["i18n", "语言", "chinese", "english"],
+          onRun: () => {
+            pushRecent("action.language");
+            defer(() => {
+              const next = i18n.language?.startsWith("zh") ? "en" : "zh-CN";
+              void i18n.changeLanguage(next);
+            });
+          },
+        },
+        {
+          id: "action.reload-config",
+          label: t("cmdk.reloadConfig"),
+          icon: <RefreshCw className="h-4 w-4" />,
+          meta: t("cmdk.reloadConfigHint"),
+          keywords: ["reload", "refresh", "toml", "重载"],
+          onRun: () => {
+            pushRecent("action.reload-config");
+            defer(() => toast.success(t("cmdk.reloadConfig")));
+          },
+        },
+        {
+          id: "action.clear-filter",
+          label: t("cmdk.clearFilter"),
+          icon: <FilterX className="h-4 w-4" />,
+          meta: t("cmdk.clearFilterHint"),
+          keywords: ["clear", "filter", "reset", "清除筛选"],
+          onRun: () => {
+            pushRecent("action.clear-filter");
+            defer(() => {
+              window.dispatchEvent(new CustomEvent("corlinman.filter.clear"));
+              toast.success(t("cmdk.clearFilter"));
+            });
+          },
+        },
+        {
+          id: "action.logout",
+          label: t("cmdk.logout"),
+          icon: <LogOut className="h-4 w-4" />,
+          meta: t("cmdk.logoutHint"),
+          keywords: ["logout", "sign out", "退出"],
+          onRun: () => {
+            pushRecent("action.logout");
+            defer(async () => {
+              try {
+                await logout();
+                toast.success(t("auth.logoutSuccess"));
+              } catch {
+                /* idempotent */
+              } finally {
+                router.push("/login");
+              }
+            });
+          },
+        },
+      ],
+    });
+
+    return gs;
+  }, [recentEntries, theme, router, setTheme, t, i18n]);
 
   return (
     <>
-      {open ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("cmdk.commandMenu")}
-          className="fixed inset-0 z-[60] flex items-start justify-center px-4 pt-[15vh]"
-        >
-          {/* blurred backdrop */}
-          <div
-            className={cn(
-              "absolute inset-0 bg-black/60 backdrop-blur-sm",
-              reduced ? null : "animate-in fade-in-0 duration-150",
-            )}
-            onClick={() => setOpen(false)}
-            aria-hidden
-          />
-          <div
-            className={cn(
-              "relative z-10 w-full max-w-[640px] overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-2xl",
-              // springPop opening animation; stripped under reduced-motion.
-              reduced ? null : "animate-in fade-in-0 zoom-in-95 duration-150",
-            )}
-            data-motion={reduced ? "reduced" : "spring"}
-          >
-            <Command label={t("cmdk.commandMenu")} loop>
-              <div className="flex items-center gap-2 border-b border-border px-3">
-                <CommandIcon className="h-4 w-4 text-muted-foreground" />
-                <Command.Input
-                  autoFocus
-                  placeholder={t("cmdk.searchPlaceholder")}
-                  className="h-11 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-                />
-                <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                  ESC
-                </kbd>
-              </div>
-              <Command.List className="max-h-[360px] overflow-y-auto p-1">
-                <Command.Empty className="px-3 py-6 text-center text-sm text-muted-foreground">
-                  {t("cmdk.noResults")}
-                </Command.Empty>
-
-                {recentEntries.length > 0 ? (
-                  <Command.Group
-                    heading={t("cmdk.groupRecent")}
-                    className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
-                  >
-                    {recentEntries.map(({ key, nav: n }) => {
-                      const Icon = n.icon;
-                      const label = t(n.labelKey);
-                      return (
-                        <PaletteItem
-                          key={`recent-${key}`}
-                          value={`recent ${label} ${n.keywords ?? ""}`}
-                          onSelect={() =>
-                            run(n.id, () => router.push(n.href as never))
-                          }
-                          icon={<Icon className="h-4 w-4" />}
-                          label={label}
-                          hint={n.href}
-                        />
-                      );
-                    })}
-                  </Command.Group>
-                ) : null}
-
-                <Command.Group
-                  heading={t("cmdk.groupNavigate")}
-                  className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
-                >
-                  {NAV_CMDS.map((n) => {
-                    const Icon = n.icon;
-                    const label = t(n.labelKey);
-                    return (
-                      <PaletteItem
-                        key={n.id}
-                        value={`${label} ${n.keywords ?? ""}`}
-                        onSelect={() =>
-                          run(n.id, () => router.push(n.href as never))
-                        }
-                        icon={<Icon className="h-4 w-4" />}
-                        label={label}
-                        hint={n.href}
-                      />
-                    );
-                  })}
-                </Command.Group>
-
-                <Command.Group
-                  heading={t("cmdk.groupActions")}
-                  className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
-                >
-                  <PaletteItem
-                    value="test chat completion 测试"
-                    onSelect={() =>
-                      run("action.chat", () => {
-                        setChatOpen(true);
-                      })
-                    }
-                    icon={<MessageSquare className="h-4 w-4" />}
-                    label={t("cmdk.testChat")}
-                    hint={t("cmdk.testChatHint")}
-                  />
-                  <PaletteItem
-                    value="toggle theme dark light 主题"
-                    onSelect={() =>
-                      run("action.theme", () =>
-                        setTheme(theme === "dark" ? "light" : "dark"),
-                      )
-                    }
-                    icon={
-                      theme === "dark" ? (
-                        <Sun className="h-4 w-4" />
-                      ) : (
-                        <Moon className="h-4 w-4" />
-                      )
-                    }
-                    label={
-                      theme === "dark"
-                        ? t("nav.switchToLight")
-                        : t("nav.switchToDark")
-                    }
-                    hint="⇧⌘L"
-                  />
-                  <PaletteItem
-                    value="switch language i18n 语言 chinese english 中英"
-                    onSelect={() =>
-                      run("action.language", () => {
-                        const next = i18n.language?.startsWith("zh")
-                          ? "en"
-                          : "zh-CN";
-                        i18n.changeLanguage(next);
-                      })
-                    }
-                    icon={<Languages className="h-4 w-4" />}
-                    label={t("cmdk.switchLanguage")}
-                    hint={t("cmdk.switchLanguageHint")}
-                  />
-                  <PaletteItem
-                    value="reload config refresh toml 重载配置"
-                    onSelect={() =>
-                      run("action.reload-config", () => {
-                        // TODO(B4): wire to POST /admin/config/reload once the
-                        // gateway exposes the endpoint. For now surface a
-                        // confirmation toast so users see the keyboard path.
-                        toast.success(t("cmdk.reloadConfig"));
-                      })
-                    }
-                    icon={<RefreshCw className="h-4 w-4" />}
-                    label={t("cmdk.reloadConfig")}
-                    hint={t("cmdk.reloadConfigHint")}
-                  />
-                  <PaletteItem
-                    value="clear filter reset 清除筛选"
-                    onSelect={() =>
-                      run("action.clear-filter", () => {
-                        // TODO(B3): broadcast a `corlinman.filter.clear` event
-                        // once the per-page filter stores land. For now this
-                        // is a stub + toast so the shortcut is discoverable.
-                        window.dispatchEvent(
-                          new CustomEvent("corlinman.filter.clear"),
-                        );
-                        toast.success(t("cmdk.clearFilter"));
-                      })
-                    }
-                    icon={<FilterX className="h-4 w-4" />}
-                    label={t("cmdk.clearFilter")}
-                    hint={t("cmdk.clearFilterHint")}
-                  />
-                  <PaletteItem
-                    value="logout sign out 退出"
-                    onSelect={() =>
-                      run("action.logout", async () => {
-                        try {
-                          await logout();
-                          toast.success(t("auth.logoutSuccess"));
-                        } catch {
-                          /* idempotent */
-                        } finally {
-                          router.push("/login");
-                        }
-                      })
-                    }
-                    icon={<LogOut className="h-4 w-4" />}
-                    label={t("cmdk.logout")}
-                    hint={t("cmdk.logoutHint")}
-                  />
-                </Command.Group>
-              </Command.List>
-              <PaletteShortcutFooter />
-            </Command>
-          </div>
-        </div>
-      ) : null}
-
+      <TidepoolCommandPalette
+        open={open}
+        onOpenChange={setOpen}
+        groups={groups}
+        placeholder={t("cmdk.searchPlaceholder")}
+      />
       {chatOpen ? (
         <TestChatDrawer onClose={() => setChatOpen(false)} />
       ) : null}
     </>
-  );
-}
-
-function PaletteItem({
-  value,
-  onSelect,
-  icon,
-  label,
-  hint,
-}: {
-  value: string;
-  onSelect: () => void;
-  icon: React.ReactNode;
-  label: string;
-  hint?: string;
-}) {
-  return (
-    <Command.Item
-      value={value}
-      onSelect={onSelect}
-      className={cn(
-        "flex cursor-pointer select-none items-center gap-3 rounded-md px-2 py-2 text-sm outline-none",
-        "data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground",
-      )}
-    >
-      <span className="text-muted-foreground">{icon}</span>
-      <span className="flex-1">{label}</span>
-      {hint ? (
-        <span className="font-mono text-[10px] text-muted-foreground">{hint}</span>
-      ) : null}
-    </Command.Item>
-  );
-}
-
-function PaletteShortcutFooter() {
-  const { t } = useTranslation();
-  const parts = [
-    t("cmdk.hintNavigate"),
-    t("cmdk.hintSelect"),
-    t("cmdk.hintClose"),
-    t("cmdk.hintToggle"),
-  ];
-  return (
-    <div
-      className="flex items-center gap-3 border-t border-border px-3 py-2 text-[10px] text-muted-foreground"
-      data-testid="cmdk-footer"
-      aria-hidden="true"
-    >
-      {parts.map((p, i) => (
-        <span key={i} className="font-mono">
-          {p}
-        </span>
-      ))}
-    </div>
   );
 }
 
