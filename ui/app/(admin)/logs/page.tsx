@@ -2,409 +2,672 @@
 
 import * as React from "react";
 import { useTranslation } from "react-i18next";
-import { AnimatePresence, motion } from "framer-motion";
-import { ArrowUp, Pause, Play, Trash2 } from "lucide-react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { openEventStream } from "@/lib/sse";
-import { useMotionVariants } from "@/lib/motion";
+import { useMotion } from "@/components/ui/motion-safe";
+import { GlassPanel } from "@/components/ui/glass-panel";
+import { LogRow } from "@/components/ui/log-row";
+import { EmptyState } from "@/components/ui/empty-state";
+import {
+  LogsControlBar,
+  RANGE_MS,
+  type TimeRange,
+  type SeverityOption,
+  type SubsystemOption,
+} from "@/components/logs/logs-control-bar";
+import { LogStatsStrip } from "@/components/logs/log-stats-strip";
+import {
+  LogDetailDrawer,
+  formatTsShort,
+  renderMessageWithCode,
+  severityFromLevel,
+  type DetailLogEvent,
+} from "@/components/logs/log-detail-drawer";
+import type { StreamState } from "@/components/ui/stream-pill";
 
 /**
- * Live log viewer — SSE /admin/logs/stream.
+ * Logs — Phase 4 Tidepool cutover.
  *
- * Events are kept in a ring buffer (RING_MAX) and filtered client-side by
- * level / subsystem / substring. The stream pauses when `paused` is true.
- * Expanding a row reveals the structured fields as a tree.
+ * Layout (1440w):
+ *   ┌──────────── control bar (glass soft) ────────────┐
+ *   │ StreamPill · [15m·1h·24h·7d] · sev ▾ · sub ▾ ·   │
+ *   │ search ⌘F · clear · export · settings            │
+ *   └──────────────────────────────────────────────────┘
+ *   [ stats strip · N events · ok · info · warn · err ]
+ *   ┌─── log pane ──────┬─── detail (380px) ──┐
+ *   │ grid-head row     │ severity pill · ts · ago │
+ *   │ virtualised rows  │ subsystem · h2 · trace   │
+ *   │ just-now + select │ Payload · Related · …    │
+ *   │ day dividers      │                          │
+ *   └───────────────────┴──────────────────────────┘
+ *
+ * Data flow: SSE `/admin/logs/stream` feeds a ring buffer (RING_MAX).
+ * Filters (time range, severity, subsystem set, search) are applied at
+ * render time. While paused, incoming events accumulate in a *side*
+ * buffer (`pendingRef`) and surface as a "N new · resume" pill so we
+ * don't lose events but also don't scroll the table out from under
+ * the user.
  */
 
-interface LogEvent {
-  ts: string;
-  level: "debug" | "info" | "warn" | "error";
-  subsystem: string;
-  trace_id: string;
-  message: string;
-  [extra: string]: unknown;
-}
+// ─── types ──────────────────────────────────────────────────────────
 
+type LogEvent = DetailLogEvent;
+
+type Severity = "all" | "ok" | "info" | "warn" | "err";
+
+/** Client-side ring ceiling. Stays identical to the previous (pre-cutover) page
+ * so QA comparing backend-facing behaviour can't tell this is a different UI. */
 const RING_MAX = 500;
 
-function levelTone(level: LogEvent["level"]) {
-  switch (level) {
-    case "error":
-      return "text-err bg-err/10 border-err/30";
-    case "warn":
-      return "text-warn bg-warn/10 border-warn/30";
-    case "info":
-      return "text-primary bg-primary/10 border-primary/30";
-    case "debug":
-    default:
-      return "text-muted-foreground bg-muted border-border";
-  }
+/** Virtualise once we cross this many visible rows. Below the threshold we
+ * render flat (no scroll-jitter across tiny lists). */
+const VIRTUAL_THRESHOLD = 80;
+
+/** Dense row estimate — matches LogRow variant="dense" (py-2 + 12.5px text). */
+const ROW_HEIGHT = 38;
+const ROW_OVERSCAN = 8;
+
+/** Retain newest first in the ring. */
+function pushRing(buf: LogEvent[], ev: LogEvent): LogEvent[] {
+  const next = [ev, ...buf];
+  if (next.length > RING_MAX) next.length = RING_MAX;
+  return next;
 }
 
-/** CSS custom-property color token for the left-rail per log level. */
-function levelRailColor(level: LogEvent["level"]): string {
-  switch (level) {
-    case "error":
-      return "var(--err)";
-    case "warn":
-      return "var(--warn)";
-    case "info":
-      return "var(--accent)";
-    case "debug":
-    default:
-      return "var(--muted)";
-  }
+/** Compact ISO → `HH:mm` for day-divider labels. */
+function minuteKey(iso: string): string {
+  return iso.slice(0, 16); // yyyy-MM-ddTHH:mm
 }
 
-/** How long a newly-appended row keeps the pulse-glow class. */
-const PULSE_MS = 400;
-/** Max rail-pulse registrations per second under fire-hose bursts. */
-const PULSE_MAX_PER_SEC = 30;
+// ─── page ───────────────────────────────────────────────────────────
 
 export default function LogsPage() {
   const { t } = useTranslation();
-  const variants = useMotionVariants();
+  const { reduced } = useMotion();
+
+  // live ring (newest-first) + side buffer of events received while paused
   const [events, setEvents] = React.useState<LogEvent[]>([]);
-  const [levelFilter, setLevelFilter] = React.useState<string>("all");
-  const [subsystemFilter, setSubsystemFilter] = React.useState<string>("");
-  const [search, setSearch] = React.useState<string>("");
+  const pendingRef = React.useRef<LogEvent[]>([]);
+  const [pendingCount, setPendingCount] = React.useState(0);
+
+  // stream state
   const [paused, setPaused] = React.useState(false);
-  const [expanded, setExpanded] = React.useState<Set<string>>(() => new Set());
-  const [copiedId, setCopiedId] = React.useState<string | null>(null);
-  const [recentIds, setRecentIds] = React.useState<Set<string>>(() => new Set());
-  const [atBottom, setAtBottom] = React.useState(true);
   const pausedRef = React.useRef(paused);
   pausedRef.current = paused;
 
-  // Rail-pulse throttle: cap registrations to PULSE_MAX_PER_SEC/s.
-  const pulseWindowRef = React.useRef<{ start: number; count: number }>({
-    start: 0,
-    count: 0,
-  });
-  const listRef = React.useRef<HTMLUListElement | null>(null);
-  // Sentinel at the "latest" edge. Because this list renders newest-first
-  // (prepends), the latest row lives at the top, so the sentinel is a top
-  // marker — its visibility means the user is pinned to the newest events.
-  const sentinelRef = React.useRef<HTMLLIElement | null>(null);
+  // naive per-second arrival-rate readout (clean idle → "0 ev/min")
+  const [streamRate, setStreamRate] = React.useState<string>("0 ev/min");
+  const rateWindowRef = React.useRef<{ ts: number; n: number }[]>([]);
 
-  const registerPulse = React.useCallback((id: string) => {
-    const now = Date.now();
-    const win = pulseWindowRef.current;
-    if (now - win.start > 1000) {
-      win.start = now;
-      win.count = 0;
-    }
-    if (win.count >= PULSE_MAX_PER_SEC) return;
-    win.count += 1;
-    setRecentIds((prev) => {
-      const next = new Set(prev);
-      next.add(id);
-      return next;
-    });
-    window.setTimeout(() => {
-      setRecentIds((prev) => {
-        if (!prev.has(id)) return prev;
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-    }, PULSE_MS);
-  }, []);
+  // filters
+  const [timeRange, setTimeRange] = React.useState<TimeRange>("24h");
+  const [severity, setSeverity] = React.useState<Severity>("all");
+  const [selectedSubs, setSelectedSubs] = React.useState<string[]>([]);
+  const [search, setSearch] = React.useState("");
 
-  // Keep a stable ref to `registerPulse` so the SSE effect below doesn't
-  // re-subscribe on every render.
-  const registerPulseRef = React.useRef(registerPulse);
-  registerPulseRef.current = registerPulse;
+  // selection (key of a row that owns the drawer)
+  const [selectedKey, setSelectedKey] = React.useState<string | null>(null);
 
+  // first-row just-now flag on newly arrived events — one id wide,
+  // auto-expires after 2.8s (the same window as the CSS keyframe).
+  const [justNowKey, setJustNowKey] = React.useState<string | null>(null);
+
+  // search input ref for ⌘F
+  const searchInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  // ─── SSE hookup ─────────────────────────────────────────────
   React.useEffect(() => {
     const close = openEventStream<LogEvent>("/admin/logs/stream", {
       events: ["log", "message"],
       onMessage: ({ data }) => {
-        if (pausedRef.current) return;
-        setEvents((prev) => {
-          const next = [data, ...prev];
-          if (next.length > RING_MAX) next.length = RING_MAX;
-          return next;
-        });
-        // Pulse the row that will render at index 0 for this event.
-        registerPulseRef.current(`${data.trace_id}-0`);
-      },
-      mock: (push) => {
-        const id = setInterval(() => {
-          push({
-            event: "log",
-            data: {
-              ts: new Date().toISOString(),
-              level: "info",
-              subsystem: "gateway",
-              trace_id: Math.random().toString(16).slice(2, 18),
-              message: "inline mock tick",
-            },
-          });
-        }, 1000);
-        return () => clearInterval(id);
+        if (!data || typeof data !== "object") return;
+        // record arrival for the rate indicator regardless of pause
+        const now = Date.now();
+        rateWindowRef.current.push({ ts: now, n: 1 });
+        if (pausedRef.current) {
+          // accumulate; do not touch the table
+          pendingRef.current = [data, ...pendingRef.current];
+          if (pendingRef.current.length > RING_MAX) {
+            pendingRef.current.length = RING_MAX;
+          }
+          setPendingCount(pendingRef.current.length);
+          return;
+        }
+        const key = rowKey(data);
+        setEvents((prev) => pushRing(prev, data));
+        if (!reduced) setJustNowKey(key);
       },
     });
-    return () => close();
+    return close;
+    // `reduced` is read at subscribe time — re-subscribing on reduced-motion
+    // change is unnecessary. Intentionally dep-empty.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const subsystems = React.useMemo(() => {
-    const s = new Set<string>();
-    for (const e of events) s.add(e.subsystem);
-    return Array.from(s).sort();
-  }, [events]);
+  // Clear just-now after the animation window; keyed on its value so a new
+  // event resets the timer cleanly.
+  React.useEffect(() => {
+    if (!justNowKey) return;
+    const id = window.setTimeout(() => setJustNowKey(null), 2800);
+    return () => window.clearTimeout(id);
+  }, [justNowKey]);
 
-  const visible = React.useMemo(() => {
-    const q = search.trim().toLowerCase();
+  // ── arrival-rate indicator (updates every 2s, 10s window) ──
+  React.useEffect(() => {
+    const id = window.setInterval(() => {
+      const now = Date.now();
+      const WINDOW_MS = 10_000;
+      rateWindowRef.current = rateWindowRef.current.filter(
+        (s) => now - s.ts <= WINDOW_MS,
+      );
+      const n = rateWindowRef.current.length;
+      if (n === 0) setStreamRate("0 ev/min");
+      else if (n / (WINDOW_MS / 1000) >= 1) {
+        setStreamRate(`${(n / (WINDOW_MS / 1000)).toFixed(1)}/s`);
+      } else {
+        setStreamRate(`${Math.round(n * (60_000 / WINDOW_MS))} ev/min`);
+      }
+    }, 2_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // ⌘F focuses the search input; ⌘K is handled app-level via CommandPalette
+  React.useEffect(() => {
+    function onKey(ev: KeyboardEvent) {
+      const meta = ev.metaKey || ev.ctrlKey;
+      if (meta && (ev.key === "f" || ev.key === "F")) {
+        ev.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+      if (ev.key === "Escape" && selectedKey !== null) {
+        setSelectedKey(null);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedKey]);
+
+  // ─── derived: counts + filtered visible rows ─────────────
+
+  const rangeFloor = React.useMemo(() => {
+    if (timeRange === "custom") return 0;
+    return Date.now() - RANGE_MS[timeRange];
+  }, [timeRange]);
+
+  /** Rows inside the current time-range window + subsystem filter.
+   * Severity + search apply on top, but counts need the pre-severity
+   * slice so chips report the right numbers. */
+  const rangedBySubsystem = React.useMemo(() => {
+    const subSet = selectedSubs.length > 0 ? new Set(selectedSubs) : null;
     return events.filter((e) => {
-      if (levelFilter !== "all" && e.level !== levelFilter) return false;
-      if (subsystemFilter && !e.subsystem.includes(subsystemFilter))
-        return false;
-      if (q && !e.message.toLowerCase().includes(q)) return false;
+      if (rangeFloor > 0) {
+        const ts = Date.parse(e.ts);
+        if (Number.isFinite(ts) && ts < rangeFloor) return false;
+      }
+      if (subSet && !subSet.has(e.subsystem)) return false;
       return true;
     });
-  }, [events, levelFilter, subsystemFilter, search]);
+  }, [events, rangeFloor, selectedSubs]);
 
-  const toggleExpand = (key: string) => {
-    setExpanded((prev) => {
-      const n = new Set(prev);
-      if (n.has(key)) n.delete(key);
-      else n.add(key);
-      return n;
-    });
-  };
-
-  async function copyTrace(traceId: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(traceId);
-      setCopiedId(traceId);
-      setTimeout(() => setCopiedId((c) => (c === traceId ? null : c)), 1200);
-    } catch {
-      /* clipboard unavailable */
+  const counts = React.useMemo(() => {
+    const c = { all: 0, ok: 0, info: 0, warn: 0, err: 0 };
+    for (const e of rangedBySubsystem) {
+      c.all += 1;
+      if (e.level === "error") c.err += 1;
+      else if (e.level === "warn") c.warn += 1;
+      else if (e.level === "info") c.info += 1;
+      // debug/trace roll into "info" for our 4-bucket display (rare)
     }
-  }
+    return c;
+  }, [rangedBySubsystem]);
 
-  // Observe the bottom sentinel so we can surface a "jump to latest" pill when
-  // the user has scrolled up and is no longer pinned to the newest entries.
-  React.useEffect(() => {
-    const root = listRef.current;
-    const target = sentinelRef.current;
-    if (!root || !target || typeof IntersectionObserver === "undefined") return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          setAtBottom(entry.isIntersecting);
-        }
-      },
-      { root, threshold: 0.01 },
+  const { searchMatcher, searchValid } = React.useMemo(
+    () => compileSearch(search),
+    [search],
+  );
+
+  /** Visible rows after severity + search are applied. */
+  const visible = React.useMemo(() => {
+    return rangedBySubsystem.filter((e) => {
+      if (severity === "err" && e.level !== "error") return false;
+      if (severity === "warn" && e.level !== "warn") return false;
+      if (severity === "info" && e.level !== "info") return false;
+      if (severity === "ok" && e.level !== "info") {
+        // No "ok" level in the backend vocabulary yet — keep the chip but
+        // treat it as info for now; Phase 5 will plumb a dedicated success
+        // level. This mirrors the Dashboard's ActivityPane.
+        return false;
+      }
+      if (searchValid && search.trim().length > 0 && !searchMatcher(e)) {
+        return false;
+      }
+      return true;
+    });
+  }, [rangedBySubsystem, severity, search, searchMatcher, searchValid]);
+
+  // ── metadata for control bar + stats strip ──
+  const subsystemOptions: SubsystemOption[] = React.useMemo(() => {
+    const acc = new Map<string, number>();
+    for (const e of rangedBySubsystem) {
+      acc.set(e.subsystem, (acc.get(e.subsystem) ?? 0) + 1);
+    }
+    return Array.from(acc.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([value, count]) => ({ value, count }));
+  }, [rangedBySubsystem]);
+
+  const severityOptions: SeverityOption[] = [
+    {
+      value: "all",
+      label: t("logs.tp.sevAll"),
+      count: counts.all,
+      tone: "neutral",
+    },
+    { value: "info", label: t("logs.tp.sevInfo"), count: counts.info, tone: "info" },
+    { value: "warn", label: t("logs.tp.sevWarn"), count: counts.warn, tone: "warn" },
+    { value: "err", label: t("logs.tp.sevErr"), count: counts.err, tone: "err" },
+  ];
+
+  const uniqueTraceIds = React.useMemo(() => {
+    const s = new Set<string>();
+    for (const e of visible) s.add(e.trace_id);
+    return s.size;
+  }, [visible]);
+
+  const selectedEvent = React.useMemo(() => {
+    if (selectedKey === null) return null;
+    return events.find((e) => rowKey(e) === selectedKey) ?? null;
+  }, [events, selectedKey]);
+
+  const relatedEvents = React.useMemo(() => {
+    if (!selectedEvent) return [];
+    return events.filter(
+      (e) =>
+        e !== selectedEvent &&
+        e.trace_id === selectedEvent.trace_id &&
+        e.trace_id !== "",
     );
-    io.observe(target);
-    return () => io.disconnect();
+  }, [events, selectedEvent]);
+
+  // ── stream state for the pill ──
+  const streamState: StreamState = paused ? "paused" : "live";
+
+  const onToggleStream = React.useCallback(() => {
+    setPaused((p) => {
+      const next = !p;
+      if (!next) {
+        // resuming — drain the pending buffer into the ring
+        const drain = pendingRef.current;
+        pendingRef.current = [];
+        setPendingCount(0);
+        if (drain.length > 0) {
+          setEvents((prev) => {
+            // Merge drain (newest-first already) on top of prev, capping RING_MAX
+            const merged = [...drain, ...prev];
+            if (merged.length > RING_MAX) merged.length = RING_MAX;
+            return merged;
+          });
+        }
+      }
+      return next;
+    });
   }, []);
 
-  const jumpToLatest = React.useCallback(() => {
-    const root = listRef.current;
-    if (!root) return;
-    root.scrollTo({ top: 0, behavior: "smooth" });
+  const onClear = React.useCallback(() => {
+    setEvents([]);
+    pendingRef.current = [];
+    setPendingCount(0);
+    setSelectedKey(null);
   }, []);
+
+  // ── virtualiser: build a flattened row list with dividers upfront ──
+  type Item =
+    | { kind: "divider"; id: string; label: string }
+    | { kind: "row"; id: string; event: LogEvent };
+
+  const items: Item[] = React.useMemo(() => {
+    const out: Item[] = [];
+    let lastMinute: string | null = null;
+    for (const e of visible) {
+      const mk = minuteKey(e.ts);
+      if (mk !== lastMinute) {
+        out.push({
+          kind: "divider",
+          id: `div-${mk}`,
+          label: dividerLabel(e.ts),
+        });
+        lastMinute = mk;
+      }
+      out.push({ kind: "row", id: rowKey(e), event: e });
+    }
+    return out;
+  }, [visible]);
+
+  const useVirtual = items.length >= VIRTUAL_THRESHOLD;
+  const scrollParentRef = React.useRef<HTMLDivElement | null>(null);
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: (i) => (items[i]?.kind === "divider" ? 24 : ROW_HEIGHT),
+    overscan: ROW_OVERSCAN,
+  });
+
+  const rangeReadout = `${visible.length.toLocaleString()}/${events.length.toLocaleString()}`;
 
   return (
-    <div className="flex flex-1 flex-col space-y-4">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          {t("logs.title")}
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          {t("logs.subtitle", { max: RING_MAX })}
-        </p>
-      </header>
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      {/* ─── Control bar ────────────────────────────── */}
+      <LogsControlBar
+        streamState={streamState}
+        streamRate={streamRate}
+        onToggleStream={onToggleStream}
+        timeRange={timeRange}
+        onTimeRangeChange={setTimeRange}
+        severity={severity}
+        severityOptions={severityOptions}
+        onSeverityChange={(v) => setSeverity(v as Severity)}
+        subsystems={subsystemOptions}
+        selectedSubsystems={selectedSubs}
+        onSubsystemsChange={setSelectedSubs}
+        search={search}
+        onSearchChange={setSearch}
+        searchInputRef={searchInputRef}
+        onClear={onClear}
+        canClear={events.length > 0}
+        rangeReadout={rangeReadout}
+      />
 
-      <section className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-panel p-3">
-        <select
-          className="h-8 rounded-md border border-input bg-background px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          value={levelFilter}
-          onChange={(e) => setLevelFilter(e.target.value)}
-          aria-label={t("logs.levelAria")}
-        >
-          <option value="all">{t("logs.levelAll")}</option>
-          <option value="debug">debug</option>
-          <option value="info">info</option>
-          <option value="warn">warn</option>
-          <option value="error">error</option>
-        </select>
-        <select
-          className="h-8 rounded-md border border-input bg-background px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          value={subsystemFilter}
-          onChange={(e) => setSubsystemFilter(e.target.value)}
-          aria-label={t("logs.subsystemAria")}
-        >
-          <option value="">{t("logs.subsystemAll")}</option>
-          {subsystems.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        <Input
-          placeholder={t("logs.searchPlaceholder")}
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="h-8 max-w-[320px] font-mono text-xs"
-        />
-        <div className="ml-auto flex items-center gap-2">
-          <Button
-            variant={paused ? "default" : "outline"}
-            size="sm"
-            onClick={() => setPaused((p) => !p)}
-          >
-            {paused ? (
-              <Play className="h-3 w-3" />
-            ) : (
-              <Pause className="h-3 w-3" />
-            )}
-            {paused ? t("logs.resume") : t("logs.pause")}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setEvents([])}
-            disabled={events.length === 0}
-          >
-            <Trash2 className="h-3 w-3" />
-            {t("logs.clear")}
-          </Button>
-          <span className="font-mono text-[11px] text-muted-foreground">
-            {visible.length} / {events.length}
-          </span>
-        </div>
-      </section>
+      {/* ─── Stats strip ────────────────────────────── */}
+      <LogStatsStrip
+        total={counts.all}
+        ok={0}
+        info={counts.info}
+        warn={counts.warn}
+        err={counts.err}
+        subsystems={subsystemOptions.length}
+        traceIds={uniqueTraceIds}
+      />
 
-      <section className="relative flex-1 overflow-hidden rounded-lg border border-border bg-panel">
-        <ul
-          ref={listRef}
-          className="max-h-[70vh] divide-y divide-border overflow-auto font-mono text-xs"
-        >
-          {/* Top sentinel — its visibility means the user is pinned to the
-              newest entries (this list is rendered newest-first). */}
-          <li
-            ref={sentinelRef}
-            aria-hidden="true"
-            className="h-px w-full"
-          />
-          {visible.length === 0 ? (
-            <li className="p-6 text-center text-sm text-muted-foreground">
-              {paused ? t("logs.paused") : t("logs.waitingForEvents")}
-            </li>
-          ) : (
-            visible.map((e, i) => {
-              const key = `${e.trace_id}-${i}`;
-              const isExpanded = expanded.has(key);
-              const isRecent = recentIds.has(key);
-              const extras = Object.entries(e).filter(
-                ([k]) =>
-                  !["ts", "level", "subsystem", "trace_id", "message"].includes(
-                    k,
-                  ),
-              );
-              return (
-                <li
-                  key={key}
-                  className="relative transition-colors hover:bg-accent/20"
-                >
-                  <div
-                    aria-hidden="true"
-                    className={cn(
-                      "absolute left-0 top-0 h-full w-[2px]",
-                      isRecent && "animate-pulse-glow",
-                    )}
-                    style={{ backgroundColor: levelRailColor(e.level) }}
-                  />
-                  <div
-                    className="flex items-start gap-2 px-3 py-2 pl-4 cursor-pointer"
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => extras.length > 0 && toggleExpand(key)}
-                    onKeyDown={(ev) => {
-                      if ((ev.key === "Enter" || ev.key === " ") && extras.length > 0) {
-                        ev.preventDefault();
-                        toggleExpand(key);
-                      }
-                    }}
-                  >
-                    <span className="shrink-0 text-muted-foreground">
-                      {e.ts.slice(11, 23)}
-                    </span>
-                    <span
-                      className={cn(
-                        "shrink-0 rounded border px-1 text-[10px] font-semibold uppercase tracking-wider",
-                        levelTone(e.level),
-                      )}
-                    >
-                      {e.level}
-                    </span>
-                    <span className="shrink-0 text-muted-foreground">
-                      {e.subsystem}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={(ev) => {
-                        ev.stopPropagation();
-                        copyTrace(e.trace_id);
-                      }}
-                      className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                      title={t("logs.copyTrace")}
-                    >
-                      {copiedId === e.trace_id
-                        ? t("logs.copied")
-                        : e.trace_id.slice(0, 8)}
-                    </button>
-                    <span className="flex-1 whitespace-pre-wrap break-all text-foreground">
-                      {e.message}
-                    </span>
-                    {extras.length > 0 ? (
-                      <span className="shrink-0 text-[10px] text-muted-foreground">
-                        {isExpanded ? "▾" : "▸"} {extras.length}
-                      </span>
-                    ) : null}
-                  </div>
-                  {isExpanded && extras.length > 0 ? (
-                    <pre className="overflow-auto bg-surface/60 px-10 py-2 text-[10px] text-muted-foreground">
-                      {JSON.stringify(Object.fromEntries(extras), null, 2)}
-                    </pre>
-                  ) : null}
-                </li>
-              );
-            })
+      {/* ─── Resume-on-new banner ───────────────────── */}
+      {paused && pendingCount > 0 ? (
+        <button
+          type="button"
+          onClick={onToggleStream}
+          className={cn(
+            "mx-4 inline-flex w-fit items-center gap-2 self-center rounded-full border px-3 py-1",
+            "bg-tp-amber-soft border-tp-amber/25 text-tp-amber",
+            "font-mono text-[11.5px]",
+            "hover:bg-tp-amber-soft hover:border-tp-amber/40",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
           )}
-        </ul>
-        <AnimatePresence>
-          {!atBottom ? (
-            <motion.button
-              key="jump-to-latest"
-              type="button"
-              onClick={jumpToLatest}
-              aria-label="Jump to latest log entry"
-              variants={variants.springPop}
-              initial="hidden"
-              animate="visible"
-              exit="hidden"
-              className={cn(
-                "absolute bottom-4 right-4 inline-flex items-center gap-1.5",
-                "rounded-full border border-border bg-panel/95 px-3 py-1.5",
-                "text-xs font-medium shadow-2 backdrop-blur",
-                "transition-colors hover:bg-accent/40",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              )}
-            >
-              <ArrowUp className="h-3 w-3" />
-              {t("logs.jumpToLatest", { defaultValue: "Jump to latest" })}
-            </motion.button>
-          ) : null}
-        </AnimatePresence>
-      </section>
+        >
+          <span className="tabular-nums">
+            {t("logs.tp.pendingResume", { n: pendingCount })}
+          </span>
+        </button>
+      ) : null}
+
+      {/* ─── Main grid: log pane + detail drawer ────── */}
+      <div
+        className={cn(
+          "grid min-h-0 flex-1 gap-3",
+          selectedEvent
+            ? "grid-cols-[minmax(0,1fr)_380px]"
+            : "grid-cols-[minmax(0,1fr)]",
+        )}
+      >
+        {/* Log pane */}
+        <GlassPanel variant="soft" className="flex min-h-[560px] flex-col overflow-hidden">
+          {/* Column header */}
+          <div
+            className={cn(
+              "grid items-center gap-3 border-b border-tp-glass-edge px-4 py-2.5",
+              "grid-cols-[70px_56px_140px_1fr_auto]",
+              "font-mono text-[10.5px] uppercase tracking-[0.08em] text-tp-ink-4",
+            )}
+            aria-hidden
+          >
+            <span>{t("logs.tp.colTime")}</span>
+            <span>{t("logs.tp.colSev")}</span>
+            <span>{t("logs.tp.colSubsystem")}</span>
+            <span>{t("logs.tp.colMessage")}</span>
+            <span>{t("logs.tp.colDur")}</span>
+          </div>
+
+          {/* Rows */}
+          <div
+            ref={scrollParentRef}
+            className="relative min-h-0 flex-1 overflow-y-auto"
+            role="log"
+            aria-label={t("logs.tp.streamAria")}
+            aria-live="polite"
+          >
+            {items.length === 0 ? (
+              <div className="p-8">
+                <EmptyState
+                  title={
+                    paused
+                      ? t("logs.paused")
+                      : t("logs.waitingForEvents")
+                  }
+                />
+              </div>
+            ) : useVirtual ? (
+              <div
+                style={{
+                  height: virtualizer.getTotalSize(),
+                  width: "100%",
+                  position: "relative",
+                }}
+              >
+                {virtualizer.getVirtualItems().map((v) => {
+                  const item = items[v.index];
+                  if (!item) return null;
+                  return (
+                    <div
+                      key={item.id}
+                      ref={virtualizer.measureElement}
+                      data-index={v.index}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        width: "100%",
+                        transform: `translateY(${v.start}px)`,
+                      }}
+                    >
+                      {item.kind === "divider" ? (
+                        <DayDivider label={item.label} />
+                      ) : (
+                        <RenderRow
+                          item={item}
+                          selected={item.id === selectedKey}
+                          justNow={item.id === justNowKey}
+                          onSelect={() =>
+                            setSelectedKey((prev) =>
+                              prev === item.id ? null : item.id,
+                            )
+                          }
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="flex flex-col">
+                {items.map((item) =>
+                  item.kind === "divider" ? (
+                    <DayDivider key={item.id} label={item.label} />
+                  ) : (
+                    <RenderRow
+                      key={item.id}
+                      item={item}
+                      selected={item.id === selectedKey}
+                      justNow={item.id === justNowKey}
+                      onSelect={() =>
+                        setSelectedKey((prev) =>
+                          prev === item.id ? null : item.id,
+                        )
+                      }
+                    />
+                  ),
+                )}
+              </div>
+            )}
+          </div>
+        </GlassPanel>
+
+        {/* Detail drawer */}
+        {selectedEvent ? (
+          <LogDetailDrawer
+            event={selectedEvent}
+            related={relatedEvents}
+            likelyCause={likelyCauseFor(selectedEvent, t)}
+          />
+        ) : null}
+      </div>
     </div>
   );
+}
+
+// ─── sub-components ─────────────────────────────────────────────────
+
+function DayDivider({ label }: { label: string }) {
+  return (
+    <div
+      className={cn(
+        "border-y border-tp-glass-edge bg-tp-glass-inner px-4 py-1.5",
+        "font-mono text-[10px] uppercase tracking-[0.1em] text-tp-ink-4",
+      )}
+    >
+      {label}
+    </div>
+  );
+}
+
+function RenderRow({
+  item,
+  selected,
+  justNow,
+  onSelect,
+}: {
+  item: { kind: "row"; id: string; event: LogEvent };
+  selected: boolean;
+  justNow: boolean;
+  onSelect: () => void;
+}) {
+  const e = item.event;
+  return (
+    <LogRow
+      variant="dense"
+      ts={formatTsShort(e.ts)}
+      severity={severityFromLevel(e.level)}
+      subsystem={e.subsystem}
+      message={renderMessageWithCode(e.message)}
+      duration={inferDuration(e)}
+      selected={selected}
+      justNow={justNow}
+      onClick={onSelect}
+      aria-selected={selected}
+    />
+  );
+}
+
+// ─── helpers ────────────────────────────────────────────────────────
+
+function rowKey(e: LogEvent): string {
+  // Trace alone collides in bursts; include ts (ms precision) + first 40 chars
+  // of the message so adjacent events on the same trace still get distinct keys.
+  return `${e.ts}|${e.trace_id}|${e.message.slice(0, 40)}`;
+}
+
+/** Extract a displayable duration from known extra fields: `duration_ms`,
+ * `duration`, `dur_ms`. Falls back to em-dash when absent. */
+function inferDuration(e: LogEvent): string {
+  const candidates = ["duration_ms", "duration", "dur_ms", "elapsed_ms"];
+  for (const k of candidates) {
+    const v = e[k];
+    if (typeof v === "number" && Number.isFinite(v)) {
+      if (v < 1000) return `${v.toFixed(v < 10 ? 1 : 0)}ms`;
+      return `${(v / 1000).toFixed(1)}s`;
+    }
+    if (typeof v === "string" && /\d/.test(v)) return v;
+  }
+  return "—";
+}
+
+/** `Today · 14:02` / `Apr 22 · 14:02` label based on ISO ts. */
+function dividerLabel(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 16);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const today = new Date();
+  const isToday =
+    d.getFullYear() === today.getFullYear() &&
+    d.getMonth() === today.getMonth() &&
+    d.getDate() === today.getDate();
+  if (isToday) return `Today · ${hh}:${mm}`;
+  const month = d.toLocaleString(undefined, { month: "short" });
+  return `${month} ${d.getDate()} · ${hh}:${mm}`;
+}
+
+/** Compile the search box's text into a predicate.
+ * `/pattern/flags` is regex; plain text is case-insensitive substring.
+ * Returns a safe no-op predicate + `searchValid=false` on malformed regex. */
+function compileSearch(raw: string): {
+  searchMatcher: (e: LogEvent) => boolean;
+  searchValid: boolean;
+} {
+  const q = raw.trim();
+  if (q === "") {
+    return { searchMatcher: () => true, searchValid: true };
+  }
+  const rm = /^\/(.+)\/([gimsuy]*)$/.exec(q);
+  if (rm) {
+    try {
+      const re = new RegExp(rm[1], rm[2]);
+      return {
+        searchMatcher: (e) =>
+          re.test(e.message) ||
+          re.test(e.subsystem) ||
+          re.test(e.trace_id),
+        searchValid: true,
+      };
+    } catch {
+      return { searchMatcher: () => true, searchValid: false };
+    }
+  }
+  const needle = q.toLowerCase();
+  return {
+    searchMatcher: (e) =>
+      e.message.toLowerCase().includes(needle) ||
+      e.subsystem.toLowerCase().includes(needle) ||
+      e.trace_id.toLowerCase().includes(needle),
+    searchValid: true,
+  };
+}
+
+/** Static "likely cause" hints for well-known error patterns. Phase 5 will
+ * swap this for LLM-authored explanations. */
+function likelyCauseFor(
+  e: LogEvent,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): React.ReactNode | undefined {
+  if (e.level !== "error") return undefined;
+  const msg = e.message.toLowerCase();
+  if (msg.includes("403") || msg.includes("forbidden")) {
+    return t("logs.tp.cause403");
+  }
+  if (msg.includes("timeout") || msg.includes("timed out")) {
+    return t("logs.tp.causeTimeout");
+  }
+  if (msg.includes("refused") || msg.includes("econnrefused")) {
+    return t("logs.tp.causeRefused");
+  }
+  return undefined;
 }

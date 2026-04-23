@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1440" />
+<title>corlinman · Direction A — Linear 120%</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Identity: Linear but pushed. Near-black + Anthropic-ish rust as the single accent. */
+    --bg:        oklch(0.145 0.01 255);
+    --panel:     oklch(0.178 0.012 255);
+    --panel-2:   oklch(0.21 0.014 255);
+    --border:    oklch(0.255 0.012 255);
+    --border-2:  oklch(0.32 0.01 255);
+    --ink:       oklch(0.97 0 0);
+    --ink-2:     oklch(0.78 0.01 255);
+    --ink-3:     oklch(0.55 0.012 255);
+    --accent:    oklch(0.72 0.175 48);       /* rust-orange signature */
+    --accent-2:  oklch(0.78 0.13 180);       /* teal for data */
+    --ok:        oklch(0.74 0.16 150);
+    --warn:      oklch(0.82 0.15 85);
+    --err:       oklch(0.68 0.2 25);
+
+    --radius: 6px;
+    --font-sans: 'Geist', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--ink);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    font-size: 14px; line-height: 1.5;
+  }
+
+  /* ─── Shell ────────────────────────────────────────────── */
+  .app { display: grid; grid-template-columns: 232px 1fr; min-height: 100vh; }
+
+  aside.sidebar {
+    border-right: 1px solid var(--border);
+    background: color-mix(in oklch, var(--panel) 92%, transparent);
+    padding: 18px 14px;
+    display: flex; flex-direction: column; gap: 28px;
+    position: sticky; top: 0; height: 100vh;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 4px 6px; }
+  .brand-mark { width: 28px; height: 28px; }
+  .brand-name { font-family: var(--font-mono); font-weight: 600; font-size: 14px; letter-spacing: -0.01em; }
+  .brand-ver { font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); margin-top: 1px; }
+
+  .nav-section { display: flex; flex-direction: column; gap: 2px; }
+  .nav-section h4 {
+    margin: 8px 8px 6px; font-size: 10px; font-weight: 500;
+    color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.1em;
+  }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 10px; border-radius: 5px;
+    color: var(--ink-2); font-size: 13px;
+    text-decoration: none; cursor: pointer;
+  }
+  .nav-item:hover { background: var(--panel-2); color: var(--ink); }
+  .nav-item.active { background: color-mix(in oklch, var(--accent) 18%, transparent); color: var(--ink); }
+  .nav-item.active .dot { background: var(--accent); }
+  .nav-item .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ink-3); }
+  .nav-item svg { width: 14px; height: 14px; stroke-width: 1.75; opacity: 0.85; }
+
+  /* ─── Main ─────────────────────────────────────────────── */
+  main { display: flex; flex-direction: column; min-width: 0; }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 28px; border-bottom: 1px solid var(--border);
+    background: color-mix(in oklch, var(--bg) 92%, transparent);
+    backdrop-filter: blur(8px);
+  }
+  .crumbs { font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); }
+  .crumbs b { color: var(--ink); font-weight: 500; }
+  .topbar-right { display: flex; align-items: center; gap: 14px; }
+  .kbd {
+    font-family: var(--font-mono); font-size: 11px;
+    padding: 2px 6px; border: 1px solid var(--border-2); border-radius: 4px;
+    background: var(--panel); color: var(--ink-2);
+  }
+  .avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--accent); }
+
+  /* ─── Trace strip (signature detail) ──────────────────── */
+  .trace-strip {
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 28px; border-bottom: 1px solid var(--border);
+    font-family: var(--font-mono); font-size: 11px; color: var(--ink-3);
+    background: color-mix(in oklch, var(--panel) 40%, transparent);
+  }
+  .trace-label { color: var(--ink-2); font-weight: 500; }
+  .trace-track { flex: 1; height: 22px; position: relative; overflow: hidden; }
+  .trace-bar {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    height: 3px; border-radius: 2px;
+  }
+  .trace-bar.t1 { left: 0;   width: 18%; background: color-mix(in oklch, var(--accent) 70%, transparent); }
+  .trace-bar.t2 { left: 20%; width: 12%; background: color-mix(in oklch, var(--accent-2) 70%, transparent); }
+  .trace-bar.t3 { left: 34%; width: 24%; background: color-mix(in oklch, var(--accent) 60%, transparent); }
+  .trace-bar.t4 { left: 60%; width: 8%;  background: color-mix(in oklch, var(--ok) 70%, transparent); }
+  .trace-bar.t5 { left: 70%; width: 28%; background: color-mix(in oklch, var(--accent-2) 50%, transparent); }
+  .trace-num { color: var(--ink-2); }
+
+  /* ─── Content ──────────────────────────────────────────── */
+  .content { padding: 28px; display: flex; flex-direction: column; gap: 28px; }
+
+  .hero {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 40px;
+    padding: 24px 28px 24px;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: radial-gradient(900px 300px at 10% 0%, color-mix(in oklch, var(--accent) 10%, transparent), transparent 60%), var(--panel);
+    position: relative; overflow: hidden;
+  }
+  .hero h1 {
+    margin: 0 0 4px; font-size: 28px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1;
+  }
+  .hero .tag { color: var(--ink-2); font-size: 13px; }
+  .hero .ver-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-bottom: 12px;
+    padding: 3px 9px; border-radius: 999px;
+    border: 1px solid color-mix(in oklch, var(--accent) 35%, var(--border));
+    background: color-mix(in oklch, var(--accent) 12%, transparent);
+    font-family: var(--font-mono); font-size: 11px; color: var(--accent);
+  }
+  .hero .hero-stats { display: flex; gap: 28px; align-items: flex-end; }
+  .hero .hero-stats .hs { text-align: right; }
+  .hero .hero-stats .hs .label { font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.1em; }
+  .hero .hero-stats .hs .val { font-family: var(--font-mono); font-size: 22px; font-weight: 500; color: var(--ink); margin-top: 2px; }
+
+  /* ─── Stat row ─────────────────────────────────────────── */
+  .stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .stat {
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--panel);
+    padding: 16px; display: flex; flex-direction: column; gap: 12px;
+    transition: border-color .15s;
+  }
+  .stat:hover { border-color: color-mix(in oklch, var(--accent) 30%, var(--border)); }
+  .stat-head { display: flex; justify-content: space-between; align-items: center; }
+  .stat-head .label {
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-3);
+    text-transform: uppercase; letter-spacing: 0.1em;
+  }
+  .stat-head svg { width: 14px; height: 14px; color: var(--ink-3); }
+  .stat-body { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .stat-val {
+    font-family: var(--font-mono); font-size: 32px; font-weight: 500;
+    letter-spacing: -0.02em; color: var(--ink);
+  }
+  .stat-delta {
+    font-family: var(--font-mono); font-size: 11px;
+    display: inline-flex; align-items: center; gap: 4px;
+    color: var(--ok);
+  }
+  .stat-delta.down { color: var(--err); }
+  .stat-delta.flat { color: var(--ink-3); }
+  .stat-spark { width: 100%; height: 32px; }
+  .stat-foot { font-size: 11px; color: var(--ink-3); display: flex; justify-content: space-between; }
+
+  /* ─── Main grid ────────────────────────────────────────── */
+  .main-grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 16px; }
+
+  .card {
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--panel);
+    display: flex; flex-direction: column;
+  }
+  .card-head {
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .card-title { font-size: 13px; font-weight: 500; display: inline-flex; align-items: center; gap: 8px; }
+  .live-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 50%, transparent);
+    animation: pulse 1.8s ease-out infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 60%, transparent); }
+    100% { box-shadow: 0 0 0 8px transparent; }
+  }
+  .card-head .more { font-size: 11px; color: var(--ink-3); font-family: var(--font-mono); }
+
+  /* activity */
+  .activity { max-height: 360px; overflow: auto; }
+  .log-row {
+    display: grid; grid-template-columns: 70px 56px 140px 1fr;
+    gap: 12px; padding: 7px 16px; font-family: var(--font-mono); font-size: 11.5px;
+    border-bottom: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+  }
+  .log-row:hover { background: var(--panel-2); }
+  .log-ts { color: var(--ink-3); }
+  .log-lvl { display: inline-flex; align-items: center; justify-content: flex-start; }
+  .log-lvl .pill {
+    display: inline-flex; padding: 1px 6px; border-radius: 3px;
+    font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .log-lvl.info .pill { background: color-mix(in oklch, var(--accent-2) 20%, transparent); color: var(--accent-2); }
+  .log-lvl.warn .pill { background: color-mix(in oklch, var(--warn) 20%, transparent); color: var(--warn); }
+  .log-lvl.error .pill { background: color-mix(in oklch, var(--err) 22%, transparent); color: var(--err); }
+  .log-lvl.ok .pill { background: color-mix(in oklch, var(--ok) 20%, transparent); color: var(--ok); }
+  .log-sub { color: var(--ink-2); }
+  .log-msg { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* health */
+  .health-body { padding: 20px 16px 10px; display: flex; flex-direction: column; gap: 18px; }
+  .health-ring-wrap { display: flex; justify-content: center; }
+  .health-ring { width: 120px; height: 120px; }
+  .health-ring .bg   { stroke: var(--border-2); }
+  .health-ring .fg   { stroke: var(--accent); transform: rotate(-90deg); transform-origin: center; }
+  .health-ring text  { text-anchor: middle; font-family: var(--font-mono); fill: var(--ink); }
+  .health-list { display: flex; flex-direction: column; padding: 0 4px; }
+  .health-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; font-family: var(--font-mono); font-size: 11.5px; }
+  .health-row + .health-row { border-top: 1px solid color-mix(in oklch, var(--border) 50%, transparent); }
+  .health-row .n { display: flex; align-items: center; gap: 8px; color: var(--ink); }
+  .health-row .n::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+  .health-row.bad .n::before { background: var(--err); }
+  .health-row .d { color: var(--ink-3); font-size: 10px; }
+
+  /* ─── Icons (inline, no deps) ─────────────────────────── */
+  svg.ic { fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── Sidebar ─────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="brand">
+      <!-- Custom wordmark: "cm" monogram with a subtle rust slice. Hand-drawn; proportions are balanced against Geist Mono cap-height. -->
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-label="corlinman">
+        <rect x="1" y="1" width="30" height="30" rx="7" fill="oklch(0.178 0.012 255)" stroke="oklch(0.32 0.01 255)"/>
+        <path d="M11 10.5v5" stroke="oklch(0.97 0 0)" stroke-width="2" stroke-linecap="round"/>
+        <path d="M11 21.5v-3" stroke="oklch(0.97 0 0)" stroke-width="2" stroke-linecap="round"/>
+        <path d="M14 12.5h4a3.5 3.5 0 0 1 3.5 3.5v5" stroke="oklch(0.97 0 0)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <path d="M21.5 18v3" stroke="oklch(0.72 0.175 48)" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <div>
+        <div class="brand-name">corlinman</div>
+        <div class="brand-ver">v0.3.0 · batch 1—5</div>
+      </div>
+    </div>
+
+    <div class="nav-section">
+      <h4>Overview</h4>
+      <a class="nav-item active"><span class="dot"></span>Dashboard</a>
+      <a class="nav-item"><span class="dot"></span>Logs</a>
+      <a class="nav-item"><span class="dot"></span>Hooks Monitor</a>
+    </div>
+
+    <div class="nav-section">
+      <h4>Agents</h4>
+      <a class="nav-item"><span class="dot"></span>Plugins</a>
+      <a class="nav-item"><span class="dot"></span>Skills</a>
+      <a class="nav-item"><span class="dot"></span>Characters</a>
+      <a class="nav-item"><span class="dot"></span>Approvals</a>
+      <a class="nav-item"><span class="dot"></span>Scheduler</a>
+    </div>
+
+    <div class="nav-section">
+      <h4>Protocols</h4>
+      <a class="nav-item"><span class="dot"></span>Playground</a>
+      <a class="nav-item"><span class="dot"></span>Nodes</a>
+      <a class="nav-item"><span class="dot"></span>Canvas</a>
+    </div>
+
+    <div class="nav-section">
+      <h4>Data</h4>
+      <a class="nav-item"><span class="dot"></span>Tag Memo</a>
+      <a class="nav-item"><span class="dot"></span>Diary</a>
+    </div>
+
+    <div class="nav-section" style="margin-top: auto;">
+      <a class="nav-item"><span class="dot"></span>Channels</a>
+      <a class="nav-item"><span class="dot"></span>Config</a>
+    </div>
+  </aside>
+
+  <!-- ── Main ────────────────────────────────────────── -->
+  <main>
+    <div class="topbar">
+      <div class="crumbs">/ <b>dashboard</b></div>
+      <div class="topbar-right">
+        <span class="kbd">⌘K</span>
+        <div class="avatar"></div>
+      </div>
+    </div>
+
+    <!-- Signature detail: live request trace strip. Shows the last ~12s of request/response bars across subsystems. -->
+    <div class="trace-strip">
+      <span class="trace-label">gateway trace</span>
+      <div class="trace-track">
+        <div class="trace-bar t1"></div>
+        <div class="trace-bar t2"></div>
+        <div class="trace-bar t3"></div>
+        <div class="trace-bar t4"></div>
+        <div class="trace-bar t5"></div>
+      </div>
+      <span class="trace-num">p50 <b style="color:var(--ink-2)">124 ms</b></span>
+      <span class="trace-num">p95 <b style="color:var(--ink-2)">612 ms</b></span>
+      <span class="trace-num">rps <b style="color:var(--ink-2)">41.2</b></span>
+    </div>
+
+    <div class="content">
+      <!-- Hero -->
+      <section class="hero">
+        <div>
+          <span class="ver-pill">● batch 1—5 shipped</span>
+          <h1>Good morning, Ian.</h1>
+          <div class="tag">7 agents · 23 plugins · 14 skills loaded · 2 hooks awaiting approval.</div>
+        </div>
+        <div class="hero-stats">
+          <div class="hs"><div class="label">uptime</div><div class="val">11d 04:17</div></div>
+          <div class="hs"><div class="label">requests / 24h</div><div class="val">38,214</div></div>
+          <div class="hs"><div class="label">tokens / 24h</div><div class="val">4.12M</div></div>
+        </div>
+      </section>
+
+      <!-- Stat row -->
+      <section class="stat-row">
+        <!-- Plugins -->
+        <div class="stat">
+          <div class="stat-head">
+            <div class="label">Plugins</div>
+            <svg class="ic" viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/></svg>
+          </div>
+          <div class="stat-body">
+            <div class="stat-val">23</div>
+            <div class="stat-delta">↑ 2 <span style="color: var(--ink-3)">/ 7d</span></div>
+          </div>
+          <svg class="stat-spark" viewBox="0 0 160 32" preserveAspectRatio="none">
+            <path d="M0 22 L16 20 L32 21 L48 17 L64 18 L80 14 L96 15 L112 11 L128 12 L144 8 L160 9" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+            <path d="M0 22 L16 20 L32 21 L48 17 L64 18 L80 14 L96 15 L112 11 L128 12 L144 8 L160 9 L160 32 L0 32 Z" fill="url(#gradA)"/>
+            <defs>
+              <linearGradient id="gradA" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stop-color="oklch(0.72 0.175 48 / 0.3)"/>
+                <stop offset="100%" stop-color="oklch(0.72 0.175 48 / 0)"/>
+              </linearGradient>
+            </defs>
+          </svg>
+          <div class="stat-foot"><span>21 loaded</span><span>2 sandboxed</span></div>
+        </div>
+
+        <!-- Agents -->
+        <div class="stat">
+          <div class="stat-head">
+            <div class="label">Agents</div>
+            <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/></svg>
+          </div>
+          <div class="stat-body">
+            <div class="stat-val">7</div>
+            <div class="stat-delta flat">= 0 <span style="color: var(--ink-3)">/ 7d</span></div>
+          </div>
+          <svg class="stat-spark" viewBox="0 0 160 32" preserveAspectRatio="none">
+            <path d="M0 18 L20 18 L40 12 L60 14 L80 10 L100 15 L120 8 L140 12 L160 10" stroke="var(--accent-2)" stroke-width="1.5" fill="none"/>
+          </svg>
+          <div class="stat-foot"><span>mentor · editor · researcher +4</span><span>all active</span></div>
+        </div>
+
+        <!-- RAG Chunks -->
+        <div class="stat">
+          <div class="stat-head">
+            <div class="label">RAG Chunks</div>
+            <svg class="ic" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.6 3.6 3 8 3s8-1.4 8-3V5M4 12v6c0 1.6 3.6 3 8 3s8-1.4 8-3v-6"/></svg>
+          </div>
+          <div class="stat-body">
+            <div class="stat-val">84,291</div>
+            <div class="stat-delta">↑ 412 <span style="color: var(--ink-3)">/ 24h</span></div>
+          </div>
+          <svg class="stat-spark" viewBox="0 0 160 32" preserveAspectRatio="none">
+            <path d="M0 28 L20 26 L40 24 L60 22 L80 19 L100 17 L120 13 L140 10 L160 6" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+          </svg>
+          <div class="stat-foot"><span>1,204 files · 318 tags</span><span>schema v6</span></div>
+        </div>
+
+        <!-- Hooks -->
+        <div class="stat">
+          <div class="stat-head">
+            <div class="label">Hooks Dispatched</div>
+            <svg class="ic" viewBox="0 0 24 24"><path d="M6 3v18M6 7l12 0M6 13l8 0M6 19l10 0"/></svg>
+          </div>
+          <div class="stat-body">
+            <div class="stat-val">12,840</div>
+            <div class="stat-delta">↑ 18.4% <span style="color: var(--ink-3)">/ 24h</span></div>
+          </div>
+          <svg class="stat-spark" viewBox="0 0 160 32" preserveAspectRatio="none">
+            <path d="M0 20 L14 14 L28 22 L42 16 L56 8 L70 18 L84 12 L98 24 L112 10 L126 16 L140 6 L160 12" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+          </svg>
+          <div class="stat-foot"><span>8 subscribers</span><span>0 dropped</span></div>
+        </div>
+      </section>
+
+      <!-- Activity + Health -->
+      <section class="main-grid">
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title">
+              <span class="live-dot"></span>Recent activity
+            </div>
+            <span class="more">view all ↗</span>
+          </div>
+          <div class="activity">
+            <div class="log-row"><span class="log-ts">14:02:18</span><span class="log-lvl info"><span class="pill">info</span></span><span class="log-sub">channels:telegram</span><span class="log-msg">update 9841 processed · chat=−100221, user=ivan, 142 tokens</span></div>
+            <div class="log-row"><span class="log-ts">14:02:17</span><span class="log-lvl ok"><span class="pill">ok</span></span><span class="log-sub">hooks</span><span class="log-msg">message.preprocessed dispatched to 4 subscribers in 2.1 ms</span></div>
+            <div class="log-row"><span class="log-ts">14:02:15</span><span class="log-lvl info"><span class="pill">info</span></span><span class="log-sub">plugin:web_search</span><span class="log-msg">invoked · query="claude 4.7 release notes" · runtime=stdio</span></div>
+            <div class="log-row"><span class="log-ts">14:02:14</span><span class="log-lvl warn"><span class="pill">warn</span></span><span class="log-sub">approval</span><span class="log-msg">tool file_write awaiting operator · gateway_held=4.3s</span></div>
+            <div class="log-row"><span class="log-ts">14:02:11</span><span class="log-lvl info"><span class="pill">info</span></span><span class="log-sub">rag</span><span class="log-msg">hybrid search · k=10 · epa_boost=on · recall=0.92</span></div>
+            <div class="log-row"><span class="log-ts">14:02:08</span><span class="log-lvl info"><span class="pill">info</span></span><span class="log-sub">channels:qq</span><span class="log-msg">napcat credential refreshed · exp=+3600s</span></div>
+            <div class="log-row"><span class="log-ts">14:02:05</span><span class="log-lvl error"><span class="pill">err</span></span><span class="log-sub">plugin:file_fetcher</span><span class="log-msg">fetch failed · 403 on ws-tool://node-b/read · retrying</span></div>
+            <div class="log-row"><span class="log-ts">14:02:04</span><span class="log-lvl ok"><span class="pill">ok</span></span><span class="log-sub">gateway</span><span class="log-msg">POST /v1/chat/completions · 342 ms · 201 tokens · provider=anthropic</span></div>
+            <div class="log-row"><span class="log-ts">14:02:02</span><span class="log-lvl info"><span class="pill">info</span></span><span class="log-sub">hooks</span><span class="log-msg">config.changed · reloaded 3 sections · sent SIGHUP=false</span></div>
+            <div class="log-row"><span class="log-ts">14:01:58</span><span class="log-lvl info"><span class="pill">info</span></span><span class="log-sub">skills</span><span class="log-msg">web_search skill bound to agent=researcher · allowed_tools=2</span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title">System health</div>
+            <span class="more">7/7 ok</span>
+          </div>
+          <div class="health-body">
+            <div class="health-ring-wrap">
+              <svg class="health-ring" viewBox="0 0 120 120">
+                <circle class="bg" cx="60" cy="60" r="50" stroke-width="6" fill="none"/>
+                <circle class="fg" cx="60" cy="60" r="50" stroke-width="6" fill="none"
+                        stroke-dasharray="314" stroke-dashoffset="0" stroke-linecap="round"/>
+                <text x="60" y="60" font-size="24" font-weight="500">7/7</text>
+                <text x="60" y="78" font-size="10" fill="oklch(0.55 0.012 255)">checks</text>
+              </svg>
+            </div>
+            <div class="health-list">
+              <div class="health-row"><span class="n">gateway</span><span class="d">ok · 99.98%</span></div>
+              <div class="health-row"><span class="n">provider:anthropic</span><span class="d">ok · 184ms</span></div>
+              <div class="health-row"><span class="n">rag-store</span><span class="d">ok · schema v6</span></div>
+              <div class="health-row"><span class="n">plugin-runtime</span><span class="d">ok · 21 live</span></div>
+              <div class="health-row"><span class="n">scheduler</span><span class="d">ok</span></div>
+              <div class="health-row"><span class="n">approvals</span><span class="d">ok · 1 queue</span></div>
+              <div class="health-row"><span class="n">channels:qq</span><span class="d">ok · napcat</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+</body>
+</html>

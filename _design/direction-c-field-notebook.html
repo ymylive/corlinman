@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1440" />
+<title>corlinman · Direction C — Field Notebook</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Identity: Hara-style editorial calm. Warm paper, deep ink, rust accent. */
+    --paper:     oklch(0.98 0.008 80);           /* warm cream */
+    --paper-2:   oklch(0.955 0.012 80);
+    --panel:     oklch(0.995 0.006 80);           /* slightly lighter than paper for float */
+    --rule:      oklch(0.86 0.01 70);             /* hairline rules */
+    --rule-2:    oklch(0.78 0.01 70);
+    --ink:       oklch(0.22 0.02 60);             /* deep ink brown-black */
+    --ink-2:     oklch(0.45 0.015 60);
+    --ink-3:     oklch(0.62 0.01 60);
+    --rust:      oklch(0.52 0.16 38);             /* single rust accent */
+    --rust-soft: oklch(0.52 0.16 38 / 0.12);
+    --sage:      oklch(0.55 0.08 150);
+    --amber-ink: oklch(0.58 0.14 68);
+    --err:       oklch(0.52 0.18 22);
+
+    --font-serif: 'Newsreader', 'Source Serif Pro', Georgia, serif;
+    --font-sans:  'Inter', ui-sans-serif, system-ui, sans-serif;
+    --font-mono:  'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--paper); color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+
+  /* ─── Sidebar ───────────────────────────────────────────── */
+  aside {
+    padding: 32px 22px; border-right: 1px solid var(--rule);
+    display: flex; flex-direction: column; gap: 32px;
+    background: var(--panel);
+  }
+  .brand { display: flex; align-items: flex-start; gap: 12px; }
+  .brand-mark { width: 34px; height: 34px; flex-shrink: 0; }
+  .brand-text { padding-top: 2px; }
+  .brand-name {
+    font-family: var(--font-serif); font-weight: 500;
+    font-size: 19px; font-variation-settings: "opsz" 18;
+    letter-spacing: -0.01em; color: var(--ink);
+  }
+  .brand-sub {
+    font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--ink-3); letter-spacing: 0.04em; margin-top: 1px;
+  }
+
+  nav .chapter { margin-bottom: 22px; }
+  nav h4 {
+    margin: 0 10px 8px;
+    font-family: var(--font-serif); font-style: italic;
+    font-size: 11.5px; font-weight: 400; letter-spacing: 0.02em;
+    color: var(--ink-3);
+  }
+  nav h4::after { content: ''; display: block; height: 1px; background: var(--rule); margin: 6px 0 0; }
+  .nav {
+    display: flex; align-items: baseline; gap: 10px; padding: 5px 10px; border-radius: 3px;
+    font-size: 13.5px; color: var(--ink-2); cursor: pointer;
+  }
+  .nav:hover { background: var(--paper-2); color: var(--ink); }
+  .nav.active { color: var(--rust); font-weight: 500; }
+  .nav.active::before {
+    content: ''; width: 3px; height: 14px; background: var(--rust); border-radius: 1px;
+    margin-left: -12px; margin-right: -1px;
+  }
+  .nav .num {
+    font-family: var(--font-mono); font-size: 10px; color: var(--ink-3);
+    font-variant-numeric: tabular-nums; margin-left: auto;
+  }
+
+  /* ─── Main ──────────────────────────────────────────────── */
+  main { display: flex; flex-direction: column; min-width: 0; }
+
+  .topbar {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 18px 48px; border-bottom: 1px solid var(--rule);
+    font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3);
+  }
+  .topbar .crumb b { color: var(--ink); font-weight: 500; }
+  .topbar .right { display: flex; gap: 20px; align-items: center; }
+  .topbar .right span { display: inline-flex; align-items: center; gap: 6px; }
+  .topbar .right .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--sage); }
+  .avatar {
+    width: 26px; height: 26px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--rust), oklch(0.72 0.14 58));
+    font-family: var(--font-serif); font-size: 12px; color: white;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+
+  .content { padding: 40px 48px 56px; max-width: 1280px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 44px; }
+
+  /* ─── Hero: editorial chapter heading (SIGNATURE DETAIL) ─── */
+  .chapter-hero {
+    display: grid; grid-template-columns: 1fr 320px; gap: 64px;
+    padding-bottom: 32px; border-bottom: 1px solid var(--rule);
+  }
+  .chapter-label {
+    font-family: var(--font-mono); font-size: 11px; color: var(--rust);
+    text-transform: uppercase; letter-spacing: 0.18em; margin-bottom: 8px;
+  }
+  .chapter-title {
+    font-family: var(--font-serif);
+    font-variation-settings: "opsz" 48;
+    font-size: 52px; line-height: 1.02; font-weight: 400;
+    letter-spacing: -0.025em; color: var(--ink); margin: 0;
+    text-wrap: pretty;
+  }
+  .chapter-title em { font-style: italic; color: var(--rust); }
+  .chapter-lede {
+    margin-top: 18px; font-family: var(--font-serif);
+    font-size: 18px; line-height: 1.5; color: var(--ink-2);
+    max-width: 58ch; font-variation-settings: "opsz" 16;
+  }
+  .chapter-lede em { font-style: italic; }
+
+  .chapter-meta {
+    border-left: 1px solid var(--rule);
+    padding-left: 28px;
+    display: flex; flex-direction: column; gap: 14px;
+    font-size: 13px;
+  }
+  .chapter-meta dt {
+    font-family: var(--font-mono); font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: 0.15em; color: var(--ink-3);
+    margin-bottom: 2px;
+  }
+  .chapter-meta dd {
+    margin: 0; font-family: var(--font-serif);
+    font-size: 17px; color: var(--ink); font-variation-settings: "opsz" 16;
+  }
+  .chapter-meta dd .u { color: var(--ink-3); font-size: 12px; font-family: var(--font-mono); margin-left: 6px; }
+
+  /* ─── Specimen cards ─────────────────────────────────────── */
+  .section-title {
+    display: flex; align-items: baseline; gap: 16px; padding-bottom: 6px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .section-title .num {
+    font-family: var(--font-mono); font-size: 11px; color: var(--rust);
+    letter-spacing: 0.1em;
+  }
+  .section-title h2 {
+    margin: 0; font-family: var(--font-serif); font-weight: 500;
+    font-size: 22px; letter-spacing: -0.015em;
+  }
+  .section-title .lede {
+    flex: 1; text-align: right; font-family: var(--font-serif); font-style: italic;
+    font-size: 13px; color: var(--ink-3);
+  }
+
+  .specimens {
+    margin-top: 20px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px;
+  }
+  .specimen {
+    padding: 20px 22px 22px; background: var(--panel);
+    border: 1px solid var(--rule);
+    display: flex; flex-direction: column; gap: 14px;
+    position: relative;
+  }
+  .specimen .label {
+    font-family: var(--font-mono); font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: 0.15em; color: var(--ink-3);
+  }
+  .specimen .label::before {
+    content: counter(specimen, decimal-leading-zero) " ";
+    counter-increment: specimen;
+    color: var(--rust); margin-right: 4px;
+  }
+  .specimens { counter-reset: specimen; }
+  .specimen .value {
+    font-family: var(--font-serif); font-variation-settings: "opsz" 40;
+    font-size: 40px; line-height: 1; font-weight: 400; color: var(--ink);
+    letter-spacing: -0.03em;
+    font-variant-numeric: oldstyle-nums;
+  }
+  .specimen .caption {
+    font-family: var(--font-serif); font-style: italic;
+    font-size: 13.5px; color: var(--ink-2); line-height: 1.45;
+    font-variation-settings: "opsz" 12;
+  }
+  .specimen .divider {
+    height: 1px; background: var(--rule); margin: 2px 0;
+  }
+  .specimen .foot {
+    display: flex; justify-content: space-between;
+    font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--ink-3);
+  }
+  .specimen .delta { color: var(--sage); font-variant-numeric: tabular-nums; }
+  .specimen .delta.down { color: var(--err); }
+
+  /* ─── Two-column layout ──────────────────────────────────── */
+  .two-col { display: grid; grid-template-columns: 1.4fr 1fr; gap: 40px; }
+
+  .panel-c {
+    background: var(--panel); border: 1px solid var(--rule);
+    display: flex; flex-direction: column;
+  }
+  .panel-c .head {
+    padding: 14px 20px; border-bottom: 1px solid var(--rule);
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .panel-c .head h3 {
+    margin: 0; font-family: var(--font-serif); font-weight: 500;
+    font-size: 17px; letter-spacing: -0.01em;
+  }
+  .panel-c .head .meta {
+    font-family: var(--font-serif); font-style: italic;
+    font-size: 12px; color: var(--ink-3);
+  }
+  .panel-c .head .meta .d { color: var(--sage); margin-left: 8px; }
+  .panel-c .head .meta .d::before { content: '· '; color: var(--rule-2); }
+
+  .log-list { padding: 4px 0; max-height: 440px; overflow: auto; }
+  .log-entry {
+    display: grid; grid-template-columns: 70px 1fr;
+    gap: 16px; padding: 12px 20px;
+    border-bottom: 1px solid color-mix(in oklch, var(--rule) 60%, transparent);
+  }
+  .log-entry .ts {
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-3);
+    letter-spacing: 0.04em; text-align: right;
+  }
+  .log-entry .body {
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .log-entry .head-line {
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--ink-3);
+  }
+  .log-entry .head-line b {
+    color: var(--ink); font-weight: 500; margin-right: 6px;
+  }
+  .log-entry .head-line .lv { margin-left: 6px; font-style: normal; }
+  .log-entry .head-line .lv.info { color: var(--ink-2); }
+  .log-entry .head-line .lv.warn { color: var(--amber-ink); }
+  .log-entry .head-line .lv.err  { color: var(--err); }
+  .log-entry .head-line .lv.ok   { color: var(--sage); }
+  .log-entry .msg {
+    font-family: var(--font-serif); font-size: 14.5px; line-height: 1.4;
+    color: var(--ink); font-variation-settings: "opsz" 14;
+  }
+  .log-entry .msg em { font-style: italic; color: var(--ink-2); }
+
+  /* Health — prose-first */
+  .health-body { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 18px; }
+  .health-lede {
+    font-family: var(--font-serif); font-style: italic;
+    font-size: 14.5px; line-height: 1.55; color: var(--ink-2);
+    padding: 0 4px; font-variation-settings: "opsz" 13;
+  }
+  .health-lede b { font-style: normal; color: var(--ink); font-weight: 500; }
+  .health-lede em { color: var(--rust); }
+
+  .health-rows { display: flex; flex-direction: column; }
+  .health-row {
+    display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: baseline;
+    padding: 9px 4px;
+    border-bottom: 1px dotted var(--rule-2);
+  }
+  .health-row:last-child { border-bottom: 0; }
+  .health-row .n {
+    font-family: var(--font-serif); font-size: 15px; color: var(--ink);
+    font-variation-settings: "opsz" 14;
+  }
+  .health-row .marker {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--sage); margin-right: 8px; vertical-align: 1px;
+  }
+  .health-row.bad .marker { background: var(--err); }
+  .health-row .d {
+    font-family: var(--font-mono); font-size: 11px; color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Bottom note — closes the page like a manuscript footer */
+  .colophon {
+    padding: 22px 4px 0; border-top: 1px solid var(--rule);
+    display: flex; justify-content: space-between;
+    font-family: var(--font-serif); font-size: 13px; font-style: italic;
+    color: var(--ink-3);
+  }
+  .colophon .mono {
+    font-family: var(--font-mono); font-style: normal;
+    font-size: 11px; letter-spacing: 0.05em;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <aside>
+    <div class="brand">
+      <!-- Mark: a hand-set serif "c" inside a thin square — feels like a bookplate. -->
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden>
+        <rect x="1" y="1" width="38" height="38" fill="oklch(0.995 0.006 80)" stroke="oklch(0.52 0.16 38)" stroke-width="1"/>
+        <!-- 'c' glyph, serif-inspired -->
+        <path d="M27.5 14.5 C24 11 18.5 11 15 14.5 C11 18 11 25 15 28.5 C18.5 32 24 32 27.5 28"
+              fill="none" stroke="oklch(0.22 0.02 60)" stroke-width="2.4" stroke-linecap="round"/>
+        <circle cx="31" cy="14" r="1.6" fill="oklch(0.52 0.16 38)"/>
+      </svg>
+      <div class="brand-text">
+        <div class="brand-name">corlinman</div>
+        <div class="brand-sub">v0.3.0 · batch i — v</div>
+      </div>
+    </div>
+
+    <nav>
+      <div class="chapter">
+        <h4>overview</h4>
+        <div class="nav active">Dashboard</div>
+        <div class="nav">Logs<span class="num">1,842</span></div>
+        <div class="nav">Hooks</div>
+      </div>
+
+      <div class="chapter">
+        <h4>agents &amp; skills</h4>
+        <div class="nav">Plugins<span class="num">23</span></div>
+        <div class="nav">Skills<span class="num">14</span></div>
+        <div class="nav">Characters<span class="num">7</span></div>
+        <div class="nav">Approvals<span class="num">2</span></div>
+        <div class="nav">Scheduler</div>
+      </div>
+
+      <div class="chapter">
+        <h4>protocols</h4>
+        <div class="nav">Playground</div>
+        <div class="nav">Nodes<span class="num">3</span></div>
+        <div class="nav">Canvas</div>
+      </div>
+
+      <div class="chapter">
+        <h4>archives</h4>
+        <div class="nav">Tag Memo</div>
+        <div class="nav">Diary</div>
+      </div>
+
+      <div class="chapter" style="margin-top: auto;">
+        <h4>settings</h4>
+        <div class="nav">Channels</div>
+        <div class="nav">Config</div>
+      </div>
+    </nav>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <div class="crumb"><b>Dashboard</b> <span style="margin: 0 10px; color: var(--rule-2)">·</span> No. 01 &thinsp;/&thinsp; 15</div>
+      <div class="right">
+        <span><span class="dot"></span>gateway nominal</span>
+        <span style="color: var(--ink-3)">11d 04:17</span>
+        <span class="avatar">I</span>
+      </div>
+    </div>
+
+    <div class="content">
+      <!-- SIGNATURE: Editorial chapter hero -->
+      <section class="chapter-hero">
+        <div>
+          <div class="chapter-label">— Chapter 01 · The Overview</div>
+          <h1 class="chapter-title">
+            Seven agents.<br>
+            Twenty-three plugins.<br>
+            <em>One quiet afternoon.</em>
+          </h1>
+          <p class="chapter-lede">
+            The harness is steady. Since last Thursday it has served
+            <b>38,214</b> requests, dispatched <b>12,840</b> hook events
+            to eight subscribers, and spent roughly <em>4.12 million tokens</em>
+            on your behalf. Two approvals wait for an operator's judgment.
+          </p>
+        </div>
+
+        <dl class="chapter-meta">
+          <div><dt>Uptime</dt><dd>11<span class="u">days</span> 04<span class="u">h</span> 17<span class="u">m</span></dd></div>
+          <div><dt>Release</dt><dd>v0.3.0<span class="u">batch I—V</span></dd></div>
+          <div><dt>Requests (24h)</dt><dd>38,214</dd></div>
+          <div><dt>Tokens (24h)</dt><dd>4.12<span class="u">M</span></dd></div>
+        </dl>
+      </section>
+
+      <!-- Specimens -->
+      <section>
+        <div class="section-title">
+          <span class="num">§ II</span>
+          <h2>Specimens</h2>
+          <span class="lede">— four measurements of the living system</span>
+        </div>
+        <div class="specimens">
+          <div class="specimen">
+            <div class="label">Plugins</div>
+            <div class="value">23</div>
+            <div class="caption">Twenty-one loaded, two running in the sandbox. Two new arrivals this week — <em>web_search</em> and <em>file_fetcher</em>.</div>
+            <div class="divider"></div>
+            <div class="foot"><span>21 / 23 loaded</span><span class="delta">+2 · 7d</span></div>
+          </div>
+
+          <div class="specimen">
+            <div class="label">Agents</div>
+            <div class="value">7</div>
+            <div class="caption">All active. <em>Mentor</em>, <em>editor</em>, <em>researcher</em>, and four understudies — no character-card cycles detected today.</div>
+            <div class="divider"></div>
+            <div class="foot"><span>nominal</span><span class="delta" style="color: var(--ink-3)">± 0 · 7d</span></div>
+          </div>
+
+          <div class="specimen">
+            <div class="label">RAG Chunks</div>
+            <div class="value">84,291</div>
+            <div class="caption">Across 1,204 files and 318 tags under schema v6. The tag tree grew by four leaves overnight.</div>
+            <div class="divider"></div>
+            <div class="foot"><span>schema v6</span><span class="delta">+412 · 24h</span></div>
+          </div>
+
+          <div class="specimen">
+            <div class="label">Hooks</div>
+            <div class="value">12,840</div>
+            <div class="caption">Dispatched cleanly to eight subscribers, zero dropped. The critical tier observed everyone on time.</div>
+            <div class="divider"></div>
+            <div class="foot"><span>8 subscribers</span><span class="delta">+18.4% · 24h</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Two-column -->
+      <section>
+        <div class="section-title">
+          <span class="num">§ III</span>
+          <h2>Field Notes</h2>
+          <span class="lede">— the most recent activity, in the order it arrived</span>
+        </div>
+
+        <div class="two-col" style="margin-top: 20px;">
+          <div class="panel-c">
+            <div class="head">
+              <h3>Activity stream</h3>
+              <div class="meta">streaming from <code>/admin/logs/stream</code><span class="d">live</span></div>
+            </div>
+            <div class="log-list">
+              <div class="log-entry">
+                <div class="ts">14:02:18</div>
+                <div class="body">
+                  <div class="head-line"><b>channels:telegram</b><span class="lv info">info</span></div>
+                  <div class="msg">Update <em>9841</em> processed. Chat <em>-100221</em>, user <em>ivan</em>, 142 tokens.</div>
+                </div>
+              </div>
+              <div class="log-entry">
+                <div class="ts">14:02:17</div>
+                <div class="body">
+                  <div class="head-line"><b>hooks</b><span class="lv ok">ok</span></div>
+                  <div class="msg"><em>message.preprocessed</em> dispatched to four subscribers in 2.1&thinsp;ms.</div>
+                </div>
+              </div>
+              <div class="log-entry">
+                <div class="ts">14:02:15</div>
+                <div class="body">
+                  <div class="head-line"><b>plugin · web_search</b><span class="lv info">info</span></div>
+                  <div class="msg">Invoked with query <em>"claude 4.7 release notes"</em> — stdio runtime.</div>
+                </div>
+              </div>
+              <div class="log-entry">
+                <div class="ts">14:02:14</div>
+                <div class="body">
+                  <div class="head-line"><b>approval</b><span class="lv warn">warn</span></div>
+                  <div class="msg">Tool <em>file_write</em> awaits an operator. Gateway has held for 4.3&thinsp;s.</div>
+                </div>
+              </div>
+              <div class="log-entry">
+                <div class="ts">14:02:11</div>
+                <div class="body">
+                  <div class="head-line"><b>rag</b><span class="lv info">info</span></div>
+                  <div class="msg">Hybrid search (k=10) with EPA boost — recall@10 measured 0.92.</div>
+                </div>
+              </div>
+              <div class="log-entry">
+                <div class="ts">14:02:08</div>
+                <div class="body">
+                  <div class="head-line"><b>channels:qq · napcat</b><span class="lv info">info</span></div>
+                  <div class="msg">Credential refreshed — new expiry in one hour.</div>
+                </div>
+              </div>
+              <div class="log-entry">
+                <div class="ts">14:02:05</div>
+                <div class="body">
+                  <div class="head-line"><b>plugin · file_fetcher</b><span class="lv err">err</span></div>
+                  <div class="msg">403 on <em>ws-tool://node-b/read</em>. Retrying (attempt 1 of 3).</div>
+                </div>
+              </div>
+              <div class="log-entry">
+                <div class="ts">14:02:04</div>
+                <div class="body">
+                  <div class="head-line"><b>gateway</b><span class="lv ok">ok</span></div>
+                  <div class="msg">POST <em>/v1/chat/completions</em> completed in 342&thinsp;ms. 201 tokens, provider anthropic.</div>
+                </div>
+              </div>
+              <div class="log-entry">
+                <div class="ts">14:02:02</div>
+                <div class="body">
+                  <div class="head-line"><b>hooks</b><span class="lv info">info</span></div>
+                  <div class="msg"><em>config.changed</em> — three sections reconciled without a restart.</div>
+                </div>
+              </div>
+              <div class="log-entry">
+                <div class="ts">14:01:58</div>
+                <div class="body">
+                  <div class="head-line"><b>skills</b><span class="lv info">info</span></div>
+                  <div class="msg"><em>web_search</em> skill bound to the researcher agent, with two allowed tools.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel-c">
+            <div class="head">
+              <h3>System health</h3>
+              <div class="meta">7 of 7<span class="d">all nominal</span></div>
+            </div>
+            <div class="health-body">
+              <p class="health-lede">
+                Nothing is on fire. Every subsystem <b>holds steady</b>; the approval
+                queue carries <em>one item</em> — a tool write waiting for you.
+              </p>
+              <div class="health-rows">
+                <div class="health-row"><span class="n"><span class="marker"></span>gateway</span><span class="d">99.98% · ok</span></div>
+                <div class="health-row"><span class="n"><span class="marker"></span>provider · anthropic</span><span class="d">184 ms</span></div>
+                <div class="health-row"><span class="n"><span class="marker"></span>rag-store</span><span class="d">schema v6</span></div>
+                <div class="health-row"><span class="n"><span class="marker"></span>plugin-runtime</span><span class="d">21 / 23 live</span></div>
+                <div class="health-row"><span class="n"><span class="marker"></span>scheduler</span><span class="d">ok</span></div>
+                <div class="health-row"><span class="n"><span class="marker"></span>approvals</span><span class="d">1 pending</span></div>
+                <div class="health-row"><span class="n"><span class="marker"></span>channels · qq</span><span class="d">napcat ok</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="colophon">
+        <div>The harness attends, while you attend to other things.</div>
+        <div class="mono">2026 · 04 · 23 &nbsp;·&nbsp; compiled from 1,842 log lines</div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

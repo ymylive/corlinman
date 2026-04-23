@@ -1,0 +1,1305 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1440" />
+<title>corlinman · Tidepool · refined</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* ─── DARK (warm dusk) ──────────────────────────── */
+  :root {
+    --bg-a:    #1a120d;
+    --bg-b:    #25170f;
+    --bg-c:    #1e1410;
+    --aurora-1: oklch(0.55 0.18 55 / 0.28);
+    --aurora-2: oklch(0.52 0.18 32 / 0.24);
+    --aurora-3: oklch(0.48 0.15 15 / 0.20);
+
+    --glass:       oklch(0.22 0.02 55 / 0.5);
+    --glass-2:     oklch(0.25 0.025 55 / 0.65);
+    --glass-3:     oklch(0.27 0.03 55 / 0.72);
+    --glass-edge:  oklch(1 0 0 / 0.08);
+    --glass-edge-strong: oklch(1 0 0 / 0.14);
+    --glass-hl:    oklch(1 0 0 / 0.16);
+    --glass-inner: rgba(255,255,255,0.04);
+    --glass-inner-hover: rgba(255,255,255,0.08);
+    --glass-inner-strong: rgba(255,255,255,0.06);
+    --row-alt:     rgba(255,255,255,0.015);
+
+    --ink:     #f8f1e5;
+    --ink-2:   #ccbfa8;
+    --ink-3:   #938774;
+    --ink-4:   #685c49;
+    --ink-5:   #4a4035;
+
+    --amber:      oklch(0.80 0.17 58);
+    --amber-soft: oklch(0.80 0.17 58 / 0.14);
+    --amber-glow: oklch(0.80 0.17 58 / 0.38);
+    --ember:      oklch(0.70 0.19 32);
+    --ember-soft: oklch(0.70 0.19 32 / 0.14);
+    --peach:      oklch(0.84 0.14 48);
+    --ok:         oklch(0.80 0.14 145);
+    --ok-soft:    oklch(0.80 0.14 145 / 0.16);
+    --warn:       oklch(0.82 0.17 85);
+    --warn-soft:  oklch(0.82 0.17 85 / 0.16);
+    --err:        oklch(0.70 0.22 20);
+    --err-soft:   oklch(0.70 0.22 20 / 0.16);
+
+    --grad-text: linear-gradient(135deg, oklch(0.82 0.18 58), oklch(0.76 0.2 32));
+    --grad-border: linear-gradient(135deg, color-mix(in oklch, var(--amber) 55%, transparent), color-mix(in oklch, var(--ember) 45%, transparent));
+
+    --cta-bg:     rgba(255, 255, 255, 0.95);
+    --cta-fg:     #1a120d;
+    --cta-kbd-bg: rgba(0,0,0,0.06);
+    --cta-kbd-fg: rgba(0,0,0,0.6);
+    --cta-shadow: inset 0 1px 0 rgba(255,255,255,0.8), 0 8px 16px -8px rgba(0,0,0,0.4);
+
+    --shadow-hero:  0 30px 60px -30px rgba(15, 8, 2, 0.55);
+    --shadow-panel: 0 8px 24px -10px rgba(15, 8, 2, 0.4);
+    --shadow-primary: 0 0 0 1px color-mix(in oklch, var(--amber) 35%, transparent), 0 0 28px -4px var(--amber-glow), inset 0 1px 0 var(--glass-hl), var(--shadow-panel);
+
+    --badge-warn-bg: var(--amber-soft);
+    --badge-warn-fg: oklch(0.85 0.18 58);
+  }
+
+  /* ─── LIGHT (warm cream morning) ──────────────────── */
+  [data-theme="light"] {
+    --bg-a:    #fbf4e8;
+    --bg-b:    #f7ecde;
+    --bg-c:    #fbf1e0;
+    --aurora-1: oklch(0.82 0.13 58 / 0.30);
+    --aurora-2: oklch(0.80 0.12 30 / 0.25);
+    --aurora-3: oklch(0.84 0.09 15 / 0.20);
+
+    --glass:       rgba(255, 255, 255, 0.58);
+    --glass-2:     rgba(255, 255, 255, 0.78);
+    --glass-3:     rgba(255, 255, 255, 0.9);
+    --glass-edge:  rgba(255, 255, 255, 0.92);
+    --glass-edge-strong: rgba(255, 255, 255, 1);
+    --glass-hl:    rgba(255, 255, 255, 1);
+    --glass-inner: rgba(255, 255, 255, 0.48);
+    --glass-inner-hover: rgba(255, 255, 255, 0.78);
+    --glass-inner-strong: rgba(255, 255, 255, 0.58);
+    --row-alt:     rgba(255, 255, 255, 0.4);
+
+    --ink:     #271810;
+    --ink-2:   #513e2d;
+    --ink-3:   #7c6850;
+    --ink-4:   #a89580;
+    --ink-5:   #c4b4a0;
+
+    --amber:      oklch(0.56 0.19 50);
+    --amber-soft: oklch(0.56 0.19 50 / 0.12);
+    --amber-glow: oklch(0.56 0.19 50 / 0.28);
+    --ember:      oklch(0.48 0.19 30);
+    --ember-soft: oklch(0.48 0.19 30 / 0.10);
+    --peach:      oklch(0.68 0.16 44);
+    --ok:         oklch(0.52 0.14 145);
+    --ok-soft:    oklch(0.52 0.14 145 / 0.14);
+    --warn:       oklch(0.58 0.16 78);
+    --warn-soft:  oklch(0.58 0.16 78 / 0.14);
+    --err:        oklch(0.55 0.22 20);
+    --err-soft:   oklch(0.55 0.22 20 / 0.12);
+
+    --grad-text: linear-gradient(135deg, oklch(0.52 0.2 30), oklch(0.58 0.19 55));
+    --grad-border: linear-gradient(135deg, color-mix(in oklch, var(--amber) 55%, transparent), color-mix(in oklch, var(--ember) 45%, transparent));
+
+    --cta-bg:     #271810;
+    --cta-fg:     #fbf4e8;
+    --cta-kbd-bg: rgba(255,255,255,0.14);
+    --cta-kbd-fg: rgba(255,255,255,0.8);
+    --cta-shadow: inset 0 1px 0 rgba(255,255,255,0.15), 0 8px 18px -8px rgba(70, 40, 20, 0.3);
+
+    --shadow-hero:  0 24px 48px -24px rgba(80, 45, 20, 0.22);
+    --shadow-panel: 0 6px 18px -8px rgba(80, 45, 20, 0.12);
+    --shadow-primary: 0 0 0 1px color-mix(in oklch, var(--amber) 45%, transparent), 0 0 28px -4px var(--amber-glow), var(--shadow-panel);
+
+    --badge-warn-bg: var(--amber-soft);
+    --badge-warn-fg: oklch(0.42 0.2 50);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html { transition: background-color 320ms ease, color 240ms ease; }
+
+  html, body {
+    margin: 0; padding: 0;
+    background:
+      radial-gradient(900px 500px at 15% 10%, var(--aurora-1), transparent 60%),
+      radial-gradient(700px 500px at 85% 20%, var(--aurora-2), transparent 60%),
+      radial-gradient(600px 400px at 50% 95%, var(--aurora-3), transparent 60%),
+      linear-gradient(135deg, var(--bg-a), var(--bg-b) 60%, var(--bg-c));
+    background-attachment: fixed;
+    color: var(--ink);
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    font-size: 14px; line-height: 1.55; letter-spacing: -0.005em;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+    font-feature-settings: "ss01", "cv11";
+    min-height: 100vh;
+  }
+  ::selection { background: color-mix(in oklch, var(--amber) 32%, transparent); }
+
+  aside, .topbar, .hero, .stat-chip, .pane, .meta-pill, .search,
+  .nav-item, .cta, .cta-secondary, .theme-toggle, .theme-toggle button,
+  .activity-row, .health-row, .health-line, .streak-card, .filter-chip,
+  .badge {
+    transition:
+      background-color 320ms ease,
+      color 240ms ease,
+      border-color 280ms ease,
+      box-shadow 340ms ease;
+  }
+
+  .app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+
+  /* ─── Sidebar ──────────────────────── */
+  aside {
+    margin: 16px 0 16px 16px;
+    padding: 22px 14px;
+    background: var(--glass);
+    border: 1px solid var(--glass-edge);
+    border-radius: 18px;
+    backdrop-filter: blur(24px) saturate(1.5);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    display: flex; flex-direction: column; gap: 22px;
+    box-shadow: inset 0 1px 0 var(--glass-hl), var(--shadow-panel);
+    position: sticky; top: 16px; align-self: flex-start;
+    max-height: calc(100vh - 32px); overflow: auto;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 10px; border-bottom: 1px solid var(--glass-edge); }
+  .brand-mark {
+    width: 30px; height: 30px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--amber), var(--ember) 70%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.4), 0 0 16px -4px var(--amber-glow);
+    position: relative; flex-shrink: 0;
+  }
+  .brand-mark::after {
+    content: ''; position: absolute; inset: 4px;
+    border-radius: 6px;
+    background:
+      radial-gradient(circle at 30% 30%, rgba(255,255,255,0.8), transparent 50%),
+      rgba(255,255,255,0.12);
+  }
+  .brand-name { font-size: 14.5px; font-weight: 600; letter-spacing: -0.015em; color: var(--ink); }
+  .brand-ver { font-family: 'JetBrains Mono'; font-size: 10.5px; color: var(--ink-3); margin-top: 1px; }
+
+  .search {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-radius: 10px;
+    background: var(--glass-inner);
+    border: 1px solid var(--glass-edge);
+    color: var(--ink-3); font-size: 12.5px; cursor: pointer;
+  }
+  .search:hover { background: var(--glass-inner-hover); color: var(--ink-2); }
+  .search svg { width: 13px; height: 13px; }
+  .search .kbd {
+    margin-left: auto; font-family: 'JetBrains Mono'; font-size: 10.5px;
+    padding: 1px 6px; border-radius: 4px;
+    background: var(--glass-inner-strong);
+    color: var(--ink-2); border: 1px solid var(--glass-edge);
+  }
+
+  nav { display: flex; flex-direction: column; gap: 18px; }
+  .nav-group h4 {
+    margin: 0 10px 4px; font-size: 10px; font-weight: 500;
+    color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.1em;
+  }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 8px;
+    color: var(--ink-2); font-size: 13px; cursor: pointer;
+    position: relative;
+  }
+  .nav-item:hover { background: var(--glass-inner); color: var(--ink); }
+  .nav-item.active {
+    background: var(--glass-inner-hover);
+    color: var(--ink);
+    box-shadow: inset 0 1px 0 var(--glass-hl);
+  }
+  .nav-item.active::before {
+    content: ''; width: 3px; height: 14px; margin-left: -6px; margin-right: -1px;
+    background: linear-gradient(to bottom, var(--amber), var(--ember));
+    border-radius: 2px;
+    box-shadow: 0 0 8px var(--amber-glow);
+  }
+  .nav-item svg { width: 14px; height: 14px; opacity: 0.8; }
+  .nav-item .num {
+    margin-left: auto; font-family: 'JetBrains Mono'; font-size: 10.5px;
+    color: var(--ink-4); font-variant-numeric: tabular-nums;
+  }
+  /* Attention badge — stronger than .num, used for approvals etc */
+  .nav-item .badge {
+    margin-left: auto;
+    min-width: 18px; height: 18px; padding: 0 6px;
+    border-radius: 999px;
+    font-family: 'JetBrains Mono'; font-size: 10.5px; font-weight: 500;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--badge-warn-bg);
+    color: var(--badge-warn-fg);
+    font-variant-numeric: tabular-nums;
+    border: 1px solid color-mix(in oklch, var(--amber) 30%, transparent);
+  }
+  .nav-item .badge.pulse {
+    animation: badge-pulse 2.2s ease-in-out infinite;
+  }
+  @keyframes badge-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--amber) 40%, transparent); }
+    50%      { box-shadow: 0 0 0 4px color-mix(in oklch, var(--amber) 0%, transparent); }
+  }
+  .nav-item .status-dot {
+    margin-left: auto;
+    width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
+    box-shadow: 0 0 6px color-mix(in oklch, var(--ok) 45%, transparent);
+  }
+
+  /* ─── Main ──────────────────────────── */
+  main {
+    display: flex; flex-direction: column; min-width: 0;
+    padding: 16px 16px 16px 0;
+  }
+
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 22px;
+    background: var(--glass);
+    border: 1px solid var(--glass-edge);
+    backdrop-filter: blur(24px) saturate(1.5);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    border-radius: 14px;
+    box-shadow: inset 0 1px 0 var(--glass-hl);
+  }
+  .crumb { font-size: 13px; color: var(--ink-3); }
+  .crumb b { color: var(--ink); font-weight: 500; }
+  .crumb .slash { color: var(--ink-4); margin: 0 8px; }
+  .topbar-right { display: flex; align-items: center; gap: 14px; }
+  .meta-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px 4px 8px; border-radius: 999px;
+    background: var(--glass-inner);
+    border: 1px solid var(--glass-edge);
+    font-family: 'JetBrains Mono'; font-size: 11px; color: var(--ink-2);
+  }
+  .meta-pill .d {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
+    animation: breathe 2.2s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 50%, transparent); }
+    50%      { box-shadow: 0 0 10px color-mix(in oklch, var(--ok) 40%, transparent); }
+  }
+
+  .theme-toggle {
+    display: inline-flex; gap: 2px; padding: 3px;
+    background: var(--glass-inner);
+    border: 1px solid var(--glass-edge);
+    border-radius: 999px;
+  }
+  .theme-toggle button {
+    width: 26px; height: 26px; border-radius: 999px;
+    border: 0; background: transparent; color: var(--ink-3);
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; padding: 0;
+  }
+  .theme-toggle button:hover { color: var(--ink-2); }
+  .theme-toggle button svg { width: 13px; height: 13px; }
+  [data-theme="light"] .theme-toggle button[data-mode="light"],
+  [data-theme="dark"]  .theme-toggle button[data-mode="dark"] {
+    background: var(--glass-inner-hover);
+    color: var(--amber);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.1), inset 0 0 0 1px var(--glass-edge);
+  }
+
+  .avatar {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--amber), var(--ember));
+    font-size: 11px; font-weight: 600; color: white;
+    display: inline-flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 12px -4px var(--amber-glow);
+    cursor: pointer;
+  }
+
+  .content {
+    padding: 28px 40px 40px; max-width: 1240px;
+    display: flex; flex-direction: column; gap: 28px;
+  }
+
+  /* ─── Hero (refined: prose-first with inline metrics) ──── */
+  .hero {
+    position: relative;
+    padding: 36px 40px 32px;
+    background: var(--glass-2);
+    border: 1px solid var(--glass-edge);
+    border-radius: 22px;
+    backdrop-filter: blur(28px) saturate(1.7);
+    -webkit-backdrop-filter: blur(28px) saturate(1.7);
+    box-shadow: inset 0 1px 0 var(--glass-hl), var(--shadow-hero);
+    overflow: hidden;
+  }
+  .hero::before {
+    content: ''; position: absolute; inset: auto -40px -80px auto;
+    width: 420px; height: 280px;
+    background: radial-gradient(closest-side, var(--amber-glow), transparent 70%);
+    filter: blur(40px); pointer-events: none;
+  }
+  .hero::after {
+    content: ''; position: absolute; inset: -60px auto auto -60px;
+    width: 320px; height: 220px;
+    background: radial-gradient(closest-side, color-mix(in oklch, var(--ember) 40%, transparent), transparent 70%);
+    filter: blur(50px); pointer-events: none;
+  }
+
+  .hero-inner { position: relative; display: grid; grid-template-columns: 1fr auto; gap: 36px; align-items: flex-end; }
+  .hero-left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+  .hero-lead {
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 4px 12px 4px 8px;
+    border-radius: 999px;
+    background: var(--glass-inner-strong);
+    border: 1px solid var(--glass-edge);
+    font-family: 'JetBrains Mono'; font-size: 11px; color: var(--ink-2);
+    width: fit-content;
+    letter-spacing: 0.02em;
+  }
+  .hero-lead .d {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--amber);
+    animation: breathe-amber 2.2s ease-in-out infinite;
+  }
+  @keyframes breathe-amber {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--amber) 50%, transparent); }
+    50%      { box-shadow: 0 0 8px color-mix(in oklch, var(--amber) 40%, transparent); }
+  }
+
+  .greeting {
+    margin: 0;
+    font-family: 'Inter';
+    font-size: 36px; font-weight: 600; letter-spacing: -0.028em; line-height: 1.12;
+    color: var(--ink); text-wrap: balance;
+  }
+  .greeting .running {
+    background: var(--grad-text);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-weight: 600;
+  }
+
+  /* Prose summary with inline metric chips */
+  .summary {
+    font-size: 15px; color: var(--ink-2); max-width: 64ch; margin: 0;
+    line-height: 1.6;
+  }
+  .summary b { color: var(--ink); font-weight: 500; }
+  .summary .inline-metric {
+    font-family: 'JetBrains Mono'; font-size: 13px;
+    padding: 1px 7px; border-radius: 5px;
+    background: var(--glass-inner-strong);
+    border: 1px solid var(--glass-edge);
+    color: var(--ink); font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .summary .inline-metric.warn {
+    background: var(--warn-soft); border-color: color-mix(in oklch, var(--warn) 30%, transparent);
+    color: var(--warn);
+  }
+
+  .hero-actions { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+  .cta {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 9px 14px 9px 12px;
+    border-radius: 10px;
+    background: var(--cta-bg);
+    color: var(--cta-fg); font-size: 13px; font-weight: 500;
+    border: 0; cursor: pointer;
+    box-shadow: var(--cta-shadow);
+    transition: transform .22s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 300ms ease, color 240ms ease, box-shadow 300ms ease;
+  }
+  .cta:hover { transform: translateY(-1px); }
+  .cta svg { width: 14px; height: 14px; }
+  .cta .kbd {
+    font-family: 'JetBrains Mono'; font-size: 10.5px;
+    padding: 1px 6px; border-radius: 4px;
+    background: var(--cta-kbd-bg); color: var(--cta-kbd-fg); margin-left: 4px;
+  }
+  .cta-secondary {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 9px 14px; border-radius: 10px;
+    background: var(--glass-inner); border: 1px solid var(--glass-edge);
+    color: var(--ink-2); font-size: 13px; font-weight: 450; cursor: pointer;
+  }
+  .cta-secondary:hover { background: var(--glass-inner-hover); color: var(--ink); }
+  .cta-secondary.highlight {
+    color: var(--amber);
+    border-color: color-mix(in oklch, var(--amber) 40%, transparent);
+    background: var(--amber-soft);
+  }
+  .cta-secondary.highlight:hover { background: color-mix(in oklch, var(--amber) 22%, transparent); }
+
+  /* ─── Hero right rail: attention-worthy signal ─────── */
+  .hero-right {
+    display: flex; flex-direction: column; gap: 8px;
+    padding: 14px 18px;
+    background: var(--glass-inner);
+    border: 1px solid var(--glass-edge);
+    border-radius: 14px;
+    min-width: 240px;
+  }
+  .hero-right-label {
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.12em;
+  }
+  .hero-right-big {
+    font-family: 'Instrument Serif'; font-variation-settings: "opsz" 40;
+    font-size: 38px; line-height: 1.05; letter-spacing: -0.02em;
+    color: var(--ink); font-weight: 400;
+  }
+  .hero-right-big em { font-style: italic; color: var(--amber); }
+  .hero-right-sub {
+    font-size: 12px; color: var(--ink-3); display: flex; gap: 10px; align-items: center;
+  }
+  .hero-right-sub .bar {
+    flex: 1; height: 4px; background: var(--glass-inner-strong);
+    border-radius: 2px; overflow: hidden; position: relative;
+  }
+  .hero-right-sub .bar::before {
+    content: ''; position: absolute; inset: 0 auto 0 0;
+    width: 94%; background: linear-gradient(90deg, var(--amber), var(--ember));
+    border-radius: 2px;
+  }
+
+  /* ─── Stat glass chips ─────────────── */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .stat-chip {
+    padding: 16px 18px 14px;
+    background: var(--glass);
+    border: 1px solid var(--glass-edge);
+    border-radius: 16px;
+    backdrop-filter: blur(24px) saturate(1.5);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    box-shadow: inset 0 1px 0 var(--glass-hl), var(--shadow-panel);
+    display: flex; flex-direction: column; gap: 8px;
+    position: relative; overflow: hidden;
+    transition: transform .3s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 320ms ease, color 240ms ease, box-shadow 340ms ease;
+  }
+  .stat-chip:hover { transform: translateY(-2px); }
+  /* Primary chip: most-active metric gets subtle amber outline + glow */
+  .stat-chip.primary {
+    background: var(--glass-2);
+    box-shadow: var(--shadow-primary);
+  }
+  .stat-chip .label {
+    font-family: 'JetBrains Mono'; font-size: 10.5px;
+    color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.1em;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .stat-chip .label .badge-live {
+    font-size: 9px; padding: 1px 6px; border-radius: 999px;
+    background: var(--amber-soft); color: var(--amber);
+    letter-spacing: 0.04em; text-transform: lowercase;
+    border: 1px solid color-mix(in oklch, var(--amber) 25%, transparent);
+  }
+  .stat-chip .row { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
+  .stat-chip .value {
+    font-size: 34px; font-weight: 500; letter-spacing: -0.03em; line-height: 1;
+    color: var(--ink); font-variant-numeric: tabular-nums;
+    animation: tick-up 800ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  @keyframes tick-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .stat-chip:nth-child(1) .value { animation-delay: 0ms; }
+  .stat-chip:nth-child(2) .value { animation-delay: 70ms; }
+  .stat-chip:nth-child(3) .value { animation-delay: 140ms; }
+  .stat-chip:nth-child(4) .value { animation-delay: 210ms; }
+  .stat-chip .delta {
+    font-family: 'JetBrains Mono'; font-size: 11px; color: var(--ok);
+  }
+  .stat-chip .delta.flat { color: var(--ink-3); }
+  .stat-chip .foot {
+    font-size: 11.5px; color: var(--ink-3); padding-top: 6px;
+    border-top: 1px dashed var(--glass-edge);
+  }
+  .stat-chip .spark {
+    position: absolute; inset: auto 0 0 0; height: 36px; opacity: 0.5;
+  }
+  .stat-chip.primary .spark { opacity: 0.75; }
+
+  /* ─── Activity pane ──────────────────────── */
+  .main-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; }
+
+  .pane {
+    padding: 18px 18px 12px;
+    background: var(--glass);
+    border: 1px solid var(--glass-edge);
+    border-radius: 16px;
+    backdrop-filter: blur(24px) saturate(1.5);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    box-shadow: inset 0 1px 0 var(--glass-hl), var(--shadow-panel);
+  }
+  .pane-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--glass-edge);
+  }
+  .pane-title {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-size: 14px; font-weight: 600; color: var(--ink);
+  }
+  .pane-title .d {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
+    animation: breathe 2.2s ease-in-out infinite;
+  }
+  .pane-link { font-size: 12.5px; color: var(--ink-3); }
+  .pane-link:hover { color: var(--ink); }
+
+  /* Filter chips at activity-pane top */
+  .filter-chips {
+    display: flex; gap: 6px; padding: 10px 0 8px;
+  }
+  .filter-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 999px;
+    background: var(--glass-inner);
+    border: 1px solid var(--glass-edge);
+    font-family: 'JetBrains Mono'; font-size: 10.5px; color: var(--ink-3);
+    cursor: pointer; letter-spacing: 0.02em;
+  }
+  .filter-chip:hover { background: var(--glass-inner-hover); color: var(--ink-2); }
+  .filter-chip.active {
+    background: var(--ink);
+    color: var(--glass-hl);
+    border-color: var(--ink);
+  }
+  [data-theme="light"] .filter-chip.active {
+    color: var(--glass);  /* contrast on light ink bg */
+  }
+  .filter-chip .n { color: var(--ink-4); font-variant-numeric: tabular-nums; }
+  .filter-chip.active .n { color: color-mix(in oklch, var(--glass-hl) 70%, transparent); }
+  .filter-chip.dot-warn::before,
+  .filter-chip.dot-err::before,
+  .filter-chip.dot-ok::before {
+    content: ''; width: 5px; height: 5px; border-radius: 50%;
+  }
+  .filter-chip.dot-warn::before { background: var(--warn); }
+  .filter-chip.dot-err::before  { background: var(--err); }
+  .filter-chip.dot-ok::before   { background: var(--ok); }
+
+  .activity-list { display: flex; flex-direction: column; padding-top: 2px; }
+  .activity-row {
+    display: grid; grid-template-columns: 64px 128px 1fr auto; gap: 14px;
+    align-items: center; padding: 10px 10px; font-size: 13px;
+    border-bottom: 1px solid var(--glass-edge);
+    cursor: pointer;
+    border-radius: 6px;
+    margin: 0 -4px;
+    position: relative;
+  }
+  .activity-row:nth-child(even) { background: var(--row-alt); }
+  .activity-row:hover { background: var(--glass-inner-hover); }
+  .activity-row:hover .sub { color: var(--amber); }
+  .activity-row:last-child { border-bottom: 0; }
+  .activity-row .ts { font-family: 'JetBrains Mono'; font-size: 11px; color: var(--ink-4); }
+  .activity-row .sub { font-family: 'JetBrains Mono'; font-size: 11px; color: var(--ink-3); transition: color .18s; }
+  .activity-row .msg { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .activity-row .msg em { color: var(--ink); font-style: normal; font-weight: 500; }
+  .activity-row .tag {
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    padding: 1px 7px; border-radius: 999px;
+    letter-spacing: 0.04em; text-transform: lowercase; font-weight: 500;
+    border: 1px solid transparent;
+  }
+  .tag.ok { background: var(--ok-soft); color: var(--ok); border-color: color-mix(in oklch, var(--ok) 25%, transparent); }
+  .tag.warn { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in oklch, var(--warn) 25%, transparent); }
+  .tag.err { background: var(--err-soft); color: var(--err); border-color: color-mix(in oklch, var(--err) 25%, transparent); }
+  .tag.info { background: var(--glass-inner); color: var(--ink-3); border-color: var(--glass-edge); }
+  /* Just-now: left amber glow bar + 2.4s fade */
+  .activity-row.just-now::before {
+    content: ''; position: absolute; left: 0; top: 6px; bottom: 6px;
+    width: 2px; border-radius: 2px;
+    background: var(--amber);
+    box-shadow: 0 0 8px var(--amber-glow);
+    animation: just-now-fade 2.8s ease-out 0.2s forwards;
+  }
+  @keyframes just-now-fade {
+    0%  { opacity: 1; }
+    70% { opacity: 1; }
+    100%{ opacity: 0; }
+  }
+  .activity-row.just-now {
+    background: color-mix(in oklch, var(--amber) 6%, transparent);
+    animation: just-now-bg 2.8s ease-out 0.2s forwards;
+  }
+  @keyframes just-now-bg {
+    0%  { background: color-mix(in oklch, var(--amber) 12%, transparent); }
+    70% { background: color-mix(in oklch, var(--amber) 6%, transparent); }
+    100%{ background: transparent; }
+  }
+
+  /* ─── Health pane — with uptime streak + per-service mini sparkline ─── */
+  .health-body { display: flex; flex-direction: column; gap: 14px; padding: 14px 0 6px; }
+  .streak-card {
+    padding: 14px 16px 16px;
+    background: var(--glass-inner);
+    border: 1px solid var(--glass-edge);
+    border-radius: 12px;
+    display: flex; flex-direction: column; gap: 10px;
+    position: relative; overflow: hidden;
+  }
+  .streak-card::before {
+    content: ''; position: absolute; inset: auto -30px -40px auto;
+    width: 180px; height: 120px;
+    background: radial-gradient(closest-side, var(--amber-glow), transparent 70%);
+    filter: blur(24px); pointer-events: none;
+    opacity: 0.6;
+  }
+  .streak-card-label {
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.12em;
+  }
+  .streak-value {
+    display: flex; align-items: baseline; gap: 8px;
+    position: relative;
+  }
+  .streak-value .big {
+    font-family: 'Inter'; font-weight: 500;
+    font-size: 30px; line-height: 1; letter-spacing: -0.03em;
+    color: var(--ink); font-variant-numeric: tabular-nums;
+  }
+  .streak-value .big .unit { font-size: 15px; color: var(--ink-3); font-weight: 400; margin-left: 2px; }
+  .streak-value .lede {
+    font-family: 'Instrument Serif'; font-style: italic;
+    font-size: 14px; color: var(--ink-2); margin-left: auto;
+    font-variation-settings: "opsz" 13;
+  }
+  .streak-value .lede .u { color: var(--amber); font-style: normal; font-weight: 500; }
+
+  .streak-bars { display: flex; gap: 2px; align-items: flex-end; height: 22px; }
+  .streak-bars .b {
+    flex: 1; background: color-mix(in oklch, var(--ok) 60%, transparent);
+    border-radius: 1px; min-width: 4px;
+  }
+  .streak-bars .b.warn { background: color-mix(in oklch, var(--warn) 60%, transparent); }
+  .streak-bars .b.err  { background: color-mix(in oklch, var(--err) 60%, transparent); }
+
+  .health-list { display: flex; flex-direction: column; }
+  .health-row {
+    display: grid; grid-template-columns: 1fr 56px auto; gap: 12px; align-items: center;
+    padding: 8px 2px; font-size: 12.5px;
+    border-bottom: 1px solid var(--glass-edge);
+  }
+  .health-row:last-child { border-bottom: 0; }
+  .health-row .n { display: flex; align-items: center; gap: 8px; color: var(--ink-2); }
+  .health-row .n::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
+    box-shadow: 0 0 4px color-mix(in oklch, var(--ok) 30%, transparent);
+  }
+  .health-row.bad .n::before { background: var(--err); }
+  .health-row .mini-spark {
+    display: flex; gap: 1.5px; align-items: flex-end; height: 14px;
+  }
+  .health-row .mini-spark .s {
+    width: 3px; flex: 1; background: color-mix(in oklch, var(--ok) 45%, transparent);
+    border-radius: 1px;
+  }
+  .health-row.bad .mini-spark .s:last-child { background: color-mix(in oklch, var(--err) 60%, transparent); }
+  .health-row .v { font-family: 'JetBrains Mono'; font-size: 10.5px; color: var(--ink-3); text-align: right; }
+
+  /* ─── ⌘K Command Palette — modal overlay ─────────────────── */
+  .palette-overlay {
+    position: fixed; inset: 0; z-index: 50;
+    display: none;
+    align-items: flex-start; justify-content: center;
+    padding-top: 14vh;
+    background: color-mix(in oklch, var(--bg-a) 50%, transparent);
+    backdrop-filter: blur(8px) saturate(1.2);
+    -webkit-backdrop-filter: blur(8px) saturate(1.2);
+    animation: overlay-fade 200ms ease-out;
+  }
+  html[data-palette="open"] .palette-overlay { display: flex; }
+  @keyframes overlay-fade {
+    from { opacity: 0; backdrop-filter: blur(0); }
+    to   { opacity: 1; }
+  }
+
+  .palette-card {
+    width: 640px; max-width: calc(100vw - 48px);
+    background: var(--glass-3);
+    border: 1px solid var(--glass-edge-strong);
+    border-radius: 16px;
+    backdrop-filter: blur(36px) saturate(1.8);
+    -webkit-backdrop-filter: blur(36px) saturate(1.8);
+    box-shadow:
+      inset 0 1px 0 var(--glass-hl),
+      0 0 0 1px color-mix(in oklch, var(--amber) 25%, transparent),
+      0 32px 80px -24px rgba(0,0,0,0.5),
+      0 0 80px -20px var(--amber-glow);
+    overflow: hidden;
+    animation: palette-in 260ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes palette-in {
+    from { opacity: 0; transform: translateY(-12px) scale(0.98); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .palette-input {
+    display: flex; align-items: center; gap: 12px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--glass-edge);
+    font-size: 16px;
+  }
+  .palette-input > svg { width: 18px; height: 18px; color: var(--amber); flex-shrink: 0; }
+  .palette-input .typed {
+    color: var(--ink); font-weight: 450; letter-spacing: -0.01em;
+  }
+  .palette-input .placeholder {
+    color: var(--ink-4); font-weight: 400;
+  }
+  .palette-input .caret {
+    display: inline-block; width: 1.5px; height: 18px; background: var(--amber);
+    margin: 0 1px; vertical-align: -4px;
+    box-shadow: 0 0 6px var(--amber-glow);
+    animation: caret 1s steps(1, end) infinite;
+  }
+  @keyframes caret { 50% { opacity: 0; } }
+  .palette-input .kbd-esc {
+    margin-left: auto;
+    font-family: 'JetBrains Mono'; font-size: 11px;
+    padding: 2px 8px; border-radius: 5px;
+    background: var(--glass-inner); color: var(--ink-3);
+    border: 1px solid var(--glass-edge);
+  }
+
+  .palette-groups {
+    max-height: 380px; overflow: auto; padding: 6px 6px 6px;
+  }
+  .palette-group { padding: 6px 0; }
+  .palette-group-label {
+    padding: 6px 14px 4px;
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.12em;
+  }
+  .palette-item {
+    display: grid; grid-template-columns: 20px 1fr auto auto; gap: 12px;
+    align-items: center;
+    padding: 9px 14px; border-radius: 8px;
+    margin: 0 8px;
+    font-size: 13.5px; color: var(--ink-2);
+    cursor: pointer;
+  }
+  .palette-item:hover { background: var(--glass-inner); color: var(--ink); }
+  .palette-item.active {
+    background: var(--amber-soft);
+    color: var(--ink);
+    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--amber) 25%, transparent);
+  }
+  .palette-item.active > svg:first-child { color: var(--amber); }
+  .palette-item > svg:first-child { width: 16px; height: 16px; color: var(--ink-3); }
+  .palette-item .meta {
+    font-family: 'JetBrains Mono'; font-size: 10.5px; color: var(--ink-4);
+  }
+  .palette-item .kbd {
+    font-family: 'JetBrains Mono'; font-size: 10.5px;
+    padding: 1px 7px; border-radius: 5px;
+    background: var(--glass-inner); color: var(--ink-3);
+    border: 1px solid var(--glass-edge);
+    letter-spacing: 0.05em;
+  }
+  .palette-item.active .kbd {
+    background: color-mix(in oklch, var(--amber) 20%, var(--glass-inner));
+    color: var(--amber);
+    border-color: color-mix(in oklch, var(--amber) 35%, transparent);
+  }
+  .palette-item .badge-warn {
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    padding: 0 6px; border-radius: 999px;
+    background: var(--amber-soft); color: var(--amber);
+    border: 1px solid color-mix(in oklch, var(--amber) 30%, transparent);
+  }
+
+  .palette-footer {
+    display: flex; align-items: center; gap: 18px;
+    padding: 10px 18px;
+    border-top: 1px solid var(--glass-edge);
+    background: var(--glass-inner);
+    font-size: 11px; color: var(--ink-4);
+  }
+  .palette-footer .tip {
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .palette-footer .tip .kbd {
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    padding: 1px 6px; border-radius: 4px;
+    background: var(--glass-inner-strong); color: var(--ink-3);
+    border: 1px solid var(--glass-edge);
+  }
+  .palette-footer .brand {
+    margin-left: auto; font-family: 'JetBrains Mono'; font-size: 10px;
+  }
+  .palette-footer .brand em { color: var(--amber); font-style: normal; font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div>
+        <div class="brand-name">corlinman</div>
+        <div class="brand-ver">v0.3.0 · batch 1–5</div>
+      </div>
+    </div>
+
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      Search
+      <span class="kbd">⌘K</span>
+    </div>
+
+    <nav>
+      <div class="nav-group">
+        <h4>Overview</h4>
+        <div class="nav-item active">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          Dashboard
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+          Logs<span class="num">1.8k</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="7" r="2"/><circle cx="15" cy="13" r="2"/><circle cx="9" cy="19" r="2"/><path d="M9 9v2M15 15v2"/></svg>
+          Hooks
+          <span class="status-dot" title="Live events streaming"></span>
+        </div>
+      </div>
+      <div class="nav-group">
+        <h4>Agents</h4>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/></svg>
+          Plugins<span class="num">23</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l9 4v5c0 5-4 9-9 11-5-2-9-6-9-11V6l9-4z"/></svg>
+          Skills<span class="num">14</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+          Characters<span class="num">7</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+          Approvals
+          <span class="badge pulse">2</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+          Scheduler
+        </div>
+      </div>
+      <div class="nav-group">
+        <h4>Protocols</h4>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
+          Playground
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="4" cy="12" r="2"/><circle cx="20" cy="12" r="2"/><path d="M6 12h3M15 12h3"/></svg>
+          Nodes<span class="num">3</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 10h8M8 14h4"/></svg>
+          Canvas
+        </div>
+      </div>
+      <div class="nav-group" style="margin-top: auto;">
+        <h4>Data</h4>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>
+          Tag Memo
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          Diary
+        </div>
+      </div>
+    </nav>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <div class="crumb"><b>Dashboard</b></div>
+      <div class="topbar-right">
+        <span class="meta-pill"><span class="d"></span>All systems nominal</span>
+        <div class="theme-toggle" role="tablist" aria-label="Theme">
+          <button data-mode="light" aria-label="Day mode">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+          </button>
+          <button data-mode="dark" aria-label="Night mode">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          </button>
+        </div>
+        <div class="avatar">IA</div>
+      </div>
+    </div>
+
+    <div class="content">
+      <!-- Hero with prose summary + attention-worthy right rail -->
+      <section class="hero">
+        <div class="hero-inner">
+          <div class="hero-left">
+            <div class="hero-lead">
+              <span class="d"></span>
+              v0.3.0 · batch 1–5 shipped 2 days ago
+            </div>
+            <h1 class="greeting">
+              Good afternoon, Ian —<br>your agents are <span class="running">running clear</span>.
+            </h1>
+            <p class="summary">
+              <b>Seven</b> agents active, <b>twenty-three</b> plugins loaded.
+              Served <span class="inline-metric">38,214</span> requests
+              and spent <span class="inline-metric">4.12M</span> tokens in the last 24h.
+              <span class="inline-metric warn">2 approvals</span> wait for your judgment — <em>file_write</em> held 4.3s.
+            </p>
+            <div class="hero-actions">
+              <button class="cta">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+                Search or run a command
+                <span class="kbd">⌘K</span>
+              </button>
+              <button class="cta-secondary highlight">
+                Review 2 approvals
+                <span style="opacity: 0.7">↗</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="hero-right">
+            <div class="hero-right-label">Uptime streak</div>
+            <div class="hero-right-big">11<em>d</em> 04:17</div>
+            <div class="hero-right-sub">
+              <span>94% of 90d</span>
+              <span class="bar"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Stats: first one is primary (highest velocity) -->
+      <section class="stats">
+        <div class="stat-chip primary">
+          <span class="label">
+            Requests · 24h
+            <span class="badge-live">live</span>
+          </span>
+          <div class="row">
+            <span class="value">38,214</span>
+            <span class="delta">↑ 12.4%</span>
+          </div>
+          <span class="foot">p50 124ms · p95 612ms · rps 41.2</span>
+          <svg class="spark" viewBox="0 0 300 36" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="gradAmber" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stop-color="var(--amber)" stop-opacity="0.55"/>
+                <stop offset="100%" stop-color="var(--amber)" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <path d="M0 28 L30 24 L60 26 L90 20 L120 22 L150 16 L180 18 L210 12 L240 14 L270 8 L300 10 L300 36 L0 36 Z" fill="url(#gradAmber)"/>
+            <path d="M0 28 L30 24 L60 26 L90 20 L120 22 L150 16 L180 18 L210 12 L240 14 L270 8 L300 10" fill="none" stroke="var(--amber)" stroke-width="1.5" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="stat-chip">
+          <span class="label">Tokens · 24h</span>
+          <div class="row">
+            <span class="value">4.12M</span>
+            <span class="delta">↑ 8.1%</span>
+          </div>
+          <span class="foot">anthropic · openai · deepseek</span>
+          <svg class="spark" viewBox="0 0 300 36" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="gradEmber" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stop-color="var(--ember)" stop-opacity="0.42"/>
+                <stop offset="100%" stop-color="var(--ember)" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <path d="M0 22 L30 24 L60 18 L90 22 L120 14 L150 18 L180 10 L210 12 L240 8 L270 10 L300 6 L300 36 L0 36 Z" fill="url(#gradEmber)"/>
+          </svg>
+        </div>
+        <div class="stat-chip">
+          <span class="label">Hooks dispatched</span>
+          <div class="row">
+            <span class="value">12,840</span>
+            <span class="delta">↑ 18.4%</span>
+          </div>
+          <span class="foot">8 subscribers · 0 dropped</span>
+          <svg class="spark" viewBox="0 0 300 36" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="gradAmber2" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stop-color="var(--amber)" stop-opacity="0.42"/>
+                <stop offset="100%" stop-color="var(--amber)" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <path d="M0 26 L30 16 L60 22 L90 10 L120 18 L150 8 L180 14 L210 4 L240 10 L270 6 L300 2 L300 36 L0 36 Z" fill="url(#gradAmber2)"/>
+          </svg>
+        </div>
+        <div class="stat-chip">
+          <span class="label">RAG chunks</span>
+          <div class="row">
+            <span class="value">84,291</span>
+            <span class="delta flat">+ 412</span>
+          </div>
+          <span class="foot">1,204 files · schema v6</span>
+          <svg class="spark" viewBox="0 0 300 36" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="gradPeach" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stop-color="var(--peach)" stop-opacity="0.38"/>
+                <stop offset="100%" stop-color="var(--peach)" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <path d="M0 28 L30 26 L60 24 L90 22 L120 20 L150 16 L180 14 L210 10 L240 8 L270 6 L300 4 L300 36 L0 36 Z" fill="url(#gradPeach)"/>
+          </svg>
+        </div>
+      </section>
+
+      <!-- Activity + Health -->
+      <section class="main-grid">
+        <div class="pane">
+          <div class="pane-head">
+            <div class="pane-title"><span class="d"></span>Recent activity</div>
+            <a class="pane-link">View all →</a>
+          </div>
+
+          <div class="filter-chips">
+            <span class="filter-chip active">All <span class="n">12</span></span>
+            <span class="filter-chip dot-ok">ok <span class="n">3</span></span>
+            <span class="filter-chip dot-warn">warn <span class="n">1</span></span>
+            <span class="filter-chip dot-err">err <span class="n">1</span></span>
+            <span class="filter-chip">info <span class="n">7</span></span>
+          </div>
+
+          <div class="activity-list">
+            <div class="activity-row just-now">
+              <span class="ts">14:02:18</span>
+              <span class="sub">channels:telegram</span>
+              <span class="msg">Update <em>9841</em> processed · 142 tokens</span>
+              <span class="tag info">info</span>
+            </div>
+            <div class="activity-row">
+              <span class="ts">14:02:17</span>
+              <span class="sub">hooks</span>
+              <span class="msg"><em>message.preprocessed</em> → 4 subscribers · 2.1 ms</span>
+              <span class="tag ok">ok</span>
+            </div>
+            <div class="activity-row">
+              <span class="ts">14:02:15</span>
+              <span class="sub">plugin · web_search</span>
+              <span class="msg">Invoked · query <em>"claude 4.7 release notes"</em></span>
+              <span class="tag info">info</span>
+            </div>
+            <div class="activity-row">
+              <span class="ts">14:02:14</span>
+              <span class="sub">approval</span>
+              <span class="msg">Tool <em>file_write</em> awaiting operator · 4.3s</span>
+              <span class="tag warn">warn</span>
+            </div>
+            <div class="activity-row">
+              <span class="ts">14:02:11</span>
+              <span class="sub">rag</span>
+              <span class="msg">Hybrid search (k=10) with EPA boost · recall 0.92</span>
+              <span class="tag info">info</span>
+            </div>
+            <div class="activity-row">
+              <span class="ts">14:02:05</span>
+              <span class="sub">plugin · file_fetcher</span>
+              <span class="msg">403 on <em>ws-tool://node-b/read</em> · retry 1/3</span>
+              <span class="tag err">err</span>
+            </div>
+            <div class="activity-row">
+              <span class="ts">14:02:04</span>
+              <span class="sub">gateway</span>
+              <span class="msg">POST <em>/v1/chat/completions</em> · 342 ms</span>
+              <span class="tag ok">ok</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="pane">
+          <div class="pane-head">
+            <div class="pane-title">System health</div>
+            <span class="pane-link">7 / 7</span>
+          </div>
+          <div class="health-body">
+            <div class="streak-card">
+              <span class="streak-card-label">90-day availability</span>
+              <div class="streak-value">
+                <span class="big">99.94<span class="unit">%</span></span>
+                <span class="lede"><span class="u">3 incidents</span> total</span>
+              </div>
+              <div class="streak-bars" aria-hidden>
+                <!-- 30 bars representing last 30 days -->
+                <div class="b" style="height: 92%"></div><div class="b" style="height: 88%"></div><div class="b" style="height: 100%"></div><div class="b" style="height: 95%"></div><div class="b warn" style="height: 62%"></div><div class="b" style="height: 92%"></div><div class="b" style="height: 100%"></div><div class="b" style="height: 92%"></div><div class="b" style="height: 88%"></div><div class="b" style="height: 100%"></div><div class="b" style="height: 95%"></div><div class="b" style="height: 100%"></div><div class="b" style="height: 92%"></div><div class="b" style="height: 88%"></div><div class="b" style="height: 96%"></div><div class="b" style="height: 92%"></div><div class="b err" style="height: 42%"></div><div class="b" style="height: 88%"></div><div class="b" style="height: 92%"></div><div class="b" style="height: 100%"></div><div class="b" style="height: 95%"></div><div class="b" style="height: 100%"></div><div class="b" style="height: 92%"></div><div class="b" style="height: 88%"></div><div class="b" style="height: 100%"></div><div class="b" style="height: 96%"></div><div class="b" style="height: 100%"></div><div class="b" style="height: 98%"></div><div class="b" style="height: 100%"></div><div class="b" style="height: 100%"></div>
+              </div>
+            </div>
+            <div class="health-list">
+              <div class="health-row">
+                <span class="n">gateway</span>
+                <span class="mini-spark"><span class="s" style="height:80%"></span><span class="s" style="height:90%"></span><span class="s" style="height:100%"></span><span class="s" style="height:96%"></span><span class="s" style="height:100%"></span><span class="s" style="height:98%"></span></span>
+                <span class="v">99.98%</span>
+              </div>
+              <div class="health-row">
+                <span class="n">provider · anthropic</span>
+                <span class="mini-spark"><span class="s" style="height:85%"></span><span class="s" style="height:90%"></span><span class="s" style="height:95%"></span><span class="s" style="height:92%"></span><span class="s" style="height:88%"></span><span class="s" style="height:94%"></span></span>
+                <span class="v">184 ms</span>
+              </div>
+              <div class="health-row">
+                <span class="n">rag-store</span>
+                <span class="mini-spark"><span class="s" style="height:100%"></span><span class="s" style="height:100%"></span><span class="s" style="height:98%"></span><span class="s" style="height:100%"></span><span class="s" style="height:100%"></span><span class="s" style="height:100%"></span></span>
+                <span class="v">v6</span>
+              </div>
+              <div class="health-row">
+                <span class="n">plugin-runtime</span>
+                <span class="mini-spark"><span class="s" style="height:90%"></span><span class="s" style="height:92%"></span><span class="s" style="height:88%"></span><span class="s" style="height:94%"></span><span class="s" style="height:90%"></span><span class="s" style="height:92%"></span></span>
+                <span class="v">21 / 23</span>
+              </div>
+              <div class="health-row">
+                <span class="n">scheduler</span>
+                <span class="mini-spark"><span class="s" style="height:100%"></span><span class="s" style="height:100%"></span><span class="s" style="height:100%"></span><span class="s" style="height:100%"></span><span class="s" style="height:100%"></span><span class="s" style="height:100%"></span></span>
+                <span class="v">ok</span>
+              </div>
+              <div class="health-row">
+                <span class="n">approvals</span>
+                <span class="mini-spark"><span class="s" style="height:80%"></span><span class="s" style="height:90%"></span><span class="s" style="height:70%"></span><span class="s" style="height:60%"></span><span class="s" style="height:90%"></span><span class="s" style="height:85%"></span></span>
+                <span class="v">1 q</span>
+              </div>
+              <div class="health-row">
+                <span class="n">channels · qq</span>
+                <span class="mini-spark"><span class="s" style="height:95%"></span><span class="s" style="height:100%"></span><span class="s" style="height:92%"></span><span class="s" style="height:100%"></span><span class="s" style="height:98%"></span><span class="s" style="height:100%"></span></span>
+                <span class="v">ok</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<!-- ⌘K Command Palette — shown via data-palette="open" on <html> -->
+<div class="palette-overlay" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div class="palette-card">
+    <div class="palette-input">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <span class="typed">appr</span><span class="caret"></span>
+      <span class="placeholder">&nbsp;— search actions, jump to pages, invoke commands</span>
+      <span class="kbd-esc">esc</span>
+    </div>
+
+    <div class="palette-groups">
+      <div class="palette-group">
+        <div class="palette-group-label">Actions — matching "appr"</div>
+        <div class="palette-item active">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+          <span>Review pending approvals</span>
+          <span class="badge-warn">2</span>
+          <span class="kbd">↵</span>
+        </div>
+        <div class="palette-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5m7 7-7-7 7-7"/></svg>
+          <span>Approve <em style="color: var(--ink); font-style: normal">file_write</em> — held 4.3s</span>
+          <span class="meta">held</span>
+          <span class="kbd">⌘ ↵</span>
+        </div>
+        <div class="palette-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          <span>Deny <em style="color: var(--ink); font-style: normal">file_write</em></span>
+          <span class="meta">last 24h: 0</span>
+          <span class="kbd">⌘ ⌫</span>
+        </div>
+      </div>
+
+      <div class="palette-group">
+        <div class="palette-group-label">Jump to</div>
+        <div class="palette-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+          <span>Approvals</span>
+          <span class="meta">2 pending</span>
+          <span class="kbd">G A</span>
+        </div>
+        <div class="palette-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+          <span>Logs stream</span>
+          <span class="meta">1,842 today</span>
+          <span class="kbd">G L</span>
+        </div>
+      </div>
+
+      <div class="palette-group">
+        <div class="palette-group-label">Recent</div>
+        <div class="palette-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+          <span>Switch to agent · <em style="color: var(--ink); font-style: normal">researcher</em></span>
+          <span class="meta">5m ago</span>
+          <span class="kbd">G C</span>
+        </div>
+        <div class="palette-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+          <span>Reschedule <em style="color: var(--ink); font-style: normal">rag.backfill</em> cron</span>
+          <span class="meta">22m ago</span>
+          <span class="kbd">G Y</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="palette-footer">
+      <span class="tip"><span class="kbd">↑↓</span> navigate</span>
+      <span class="tip"><span class="kbd">↵</span> select</span>
+      <span class="tip"><span class="kbd">⌘↵</span> execute</span>
+      <span class="tip"><span class="kbd">esc</span> close</span>
+      <span class="brand">corlinman · <em>⌘K</em></span>
+    </div>
+  </div>
+</div>
+
+<script>
+  (function () {
+    const html = document.documentElement;
+    const urlTheme = new URL(location.href).searchParams.get('theme');
+    const stored = localStorage.getItem('corlinman-tidepool-theme');
+    if (urlTheme === 'dark' || urlTheme === 'light') {
+      html.dataset.theme = urlTheme;
+    } else if (stored === 'dark' || stored === 'light') {
+      html.dataset.theme = stored;
+    }
+    document.querySelectorAll('[data-mode]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        html.dataset.theme = btn.dataset.mode;
+        localStorage.setItem('corlinman-tidepool-theme', btn.dataset.mode);
+      });
+    });
+
+    // ⌘K / click-search / ?palette=1 open palette modal
+    const urlPalette = new URL(location.href).searchParams.get('palette');
+    if (urlPalette === '1' || urlPalette === 'open') html.dataset.palette = 'open';
+
+    function togglePalette(open) {
+      html.dataset.palette = open ? 'open' : '';
+    }
+    document.querySelectorAll('.search, .cta').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        if (!el.classList.contains('cta') || el.textContent.includes('⌘K')) {
+          e.preventDefault();
+          togglePalette(true);
+        }
+      });
+    });
+    document.querySelector('.palette-overlay')?.addEventListener('click', (e) => {
+      if (e.target.classList.contains('palette-overlay')) togglePalette(false);
+    });
+    window.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault(); togglePalette(true);
+      } else if (e.key === 'Escape') togglePalette(false);
+    });
+  })();
+</script>
+</body>
+</html>

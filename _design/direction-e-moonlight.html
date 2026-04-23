@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1440" />
+<title>corlinman · Moonlight</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;450;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* ─── DARK (default — night) ─────────────────── */
+  :root {
+    --bg:        #0a0a0b;
+    --bg-2:      #0f0f11;
+    --surface:   #18181b;
+    --surface-2: #1f1f23;
+    --line:      #27272a;
+    --line-2:    #3f3f46;
+    --ink:       #fafafa;
+    --ink-2:     #d4d4d8;
+    --ink-3:     #a1a1aa;
+    --ink-4:     #71717a;
+    --ink-5:     #52525b;
+
+    --violet:      oklch(0.78 0.19 293);
+    --violet-soft: oklch(0.78 0.19 293 / 0.14);
+    --violet-glow: color-mix(in oklch, var(--violet) 30%, transparent);
+
+    --ok:     oklch(0.78 0.16 150);
+    --warn:   oklch(0.82 0.17 82);
+    --err:    oklch(0.72 0.2 25);
+
+    /* Glow primitives — present at night, disabled in day */
+    --accent-glow-sm: drop-shadow(0 0 4px var(--violet-soft));
+    --accent-glow-md: 0 0 6px var(--violet-glow);
+    --palette-aura:   0 0 60px -20px color-mix(in oklch, var(--violet) 25%, transparent);
+    --ok-glow:        0 0 8px color-mix(in oklch, var(--ok) 50%, transparent);
+    --ok-breathe-end: 0 0 8px color-mix(in oklch, var(--ok) 40%, transparent);
+
+    --kbd-bg:    var(--surface);
+    --kbd-bg-2:  var(--surface-2);
+  }
+
+  /* ─── LIGHT (day) ───────────────────────────── */
+  [data-theme="light"] {
+    --bg:        #fbfbfc;
+    --bg-2:      #f4f4f5;
+    --surface:   #ffffff;
+    --surface-2: #fafafa;
+    --line:      #e4e4e7;
+    --line-2:    #d4d4d8;
+    --ink:       #09090b;
+    --ink-2:     #18181b;
+    --ink-3:     #52525b;
+    --ink-4:     #71717a;
+    --ink-5:     #a1a1aa;
+
+    --violet:      oklch(0.52 0.22 293);        /* deeper for contrast on white */
+    --violet-soft: oklch(0.52 0.22 293 / 0.10);
+    --violet-glow: color-mix(in oklch, var(--violet) 20%, transparent);
+
+    --ok:     oklch(0.52 0.16 150);             /* darker green for legibility */
+    --warn:   oklch(0.58 0.16 72);
+    --err:    oklch(0.55 0.22 25);
+
+    /* Glow goes dark — light mode uses color, not luminance */
+    --accent-glow-sm: none;
+    --accent-glow-md: 0 0 0 0 transparent;
+    --palette-aura:   0 1px 2px rgba(0,0,0,0.04), 0 10px 30px -12px rgba(0,0,0,0.08);
+    --ok-glow:        0 0 0 0 transparent;
+    --ok-breathe-end: 0 0 0 3px color-mix(in oklch, var(--ok) 20%, transparent);
+
+    --kbd-bg:    var(--bg-2);
+    --kbd-bg-2:  var(--surface-2);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html { transition: background-color 300ms ease, color 220ms ease; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+    font-family: 'Geist', ui-sans-serif, system-ui, sans-serif;
+    font-size: 13.5px; line-height: 1.55; letter-spacing: -0.005em;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+    font-feature-settings: "ss01", "cv11";
+  }
+  ::selection { background: var(--violet-soft); }
+
+  aside, main, .topbar, .search, .nav-item, .palette, .palette .input,
+  .palette .hint, .theme-toggle, .theme-toggle button, .activity-row,
+  .health-line, .brand-mark, .kbd, .avatar {
+    transition:
+      background-color 300ms ease,
+      color 220ms ease,
+      border-color 260ms ease,
+      box-shadow 320ms ease,
+      filter 280ms ease;
+  }
+
+  .app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+
+  /* ─── Sidebar ──────────────────────────── */
+  aside {
+    padding: 22px 14px; display: flex; flex-direction: column; gap: 24px;
+    background: var(--bg);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 12px; }
+  .brand-mark {
+    width: 26px; height: 26px; border-radius: 7px;
+    background: var(--surface); border: 1px solid var(--line-2);
+    color: var(--ink);
+    display: inline-flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .brand-mark svg { width: 14px; height: 14px; }
+  .brand-mark svg path { fill: currentColor; }
+  .brand-name { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+  .brand-ver { font-family: 'Geist Mono'; font-size: 10.5px; color: var(--ink-4); margin-top: 1px; }
+
+  .search {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 10px; background: transparent;
+    border: 1px solid var(--line); border-radius: 8px;
+    color: var(--ink-4); font-size: 12.5px; cursor: pointer;
+  }
+  .search:hover { border-color: var(--line-2); color: var(--ink-3); background: var(--surface); }
+  .search svg { width: 12px; height: 12px; }
+  .search .kbd {
+    margin-left: auto; font-family: 'Geist Mono'; font-size: 10.5px;
+    padding: 1px 6px; border-radius: 4px; color: var(--ink-3);
+    background: var(--kbd-bg); border: 1px solid var(--line);
+  }
+
+  nav { display: flex; flex-direction: column; gap: 18px; }
+  .nav-group h4 {
+    margin: 0 10px 6px; font-size: 10px; font-weight: 500;
+    color: var(--ink-5); text-transform: uppercase; letter-spacing: 0.1em;
+  }
+  .nav-item {
+    display: grid; grid-template-columns: 14px 1fr auto auto; gap: 10px;
+    align-items: center; padding: 6px 10px; border-radius: 6px;
+    color: var(--ink-3); font-size: 13px; cursor: pointer;
+    font-weight: 450;
+  }
+  .nav-item:hover { color: var(--ink); background: var(--surface); }
+  .nav-item:hover svg { color: var(--violet); filter: var(--accent-glow-sm); }
+  .nav-item.active { color: var(--ink); background: var(--surface); }
+  .nav-item.active svg { color: var(--violet); filter: var(--accent-glow-sm); }
+  .nav-item svg { width: 14px; height: 14px; color: var(--ink-5); }
+  .nav-item .num {
+    font-family: 'Geist Mono'; font-size: 10.5px; color: var(--ink-4);
+    font-variant-numeric: tabular-nums;
+  }
+  .nav-item .kbd {
+    font-family: 'Geist Mono'; font-size: 9.5px; color: var(--ink-5);
+    background: transparent; padding: 1px 5px; border-radius: 3px;
+    border: 1px solid var(--line);
+    opacity: 0;
+  }
+  .nav-item:hover .kbd, .nav-item.active .kbd { opacity: 1; }
+
+  /* ─── Main ───────────────────────────── */
+  main { display: flex; flex-direction: column; min-width: 0; border-left: 1px solid var(--line); }
+
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 40px; border-bottom: 1px solid var(--line);
+  }
+  .crumb { font-size: 13px; color: var(--ink-4); }
+  .crumb b { color: var(--ink); font-weight: 500; }
+  .topbar-right { display: flex; align-items: center; gap: 18px; font-family: 'Geist Mono'; font-size: 11.5px; color: var(--ink-4); }
+  .topbar-right b { color: var(--ink-2); font-weight: 500; margin-left: 4px; }
+
+  /* ─── Theme toggle pill ─────────────── */
+  .theme-toggle {
+    display: inline-flex; gap: 2px; padding: 3px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
+    font-family: 'Geist';
+  }
+  .theme-toggle button {
+    width: 26px; height: 26px; border-radius: 999px;
+    border: 0; background: transparent; color: var(--ink-4);
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; padding: 0;
+  }
+  .theme-toggle button:hover { color: var(--ink-2); }
+  .theme-toggle button svg { width: 13px; height: 13px; }
+  [data-theme="light"] .theme-toggle button[data-mode="light"],
+  [data-theme="dark"]  .theme-toggle button[data-mode="dark"] {
+    background: var(--bg-2);
+    color: var(--violet);
+    box-shadow:
+      0 1px 2px rgba(0,0,0,0.08),
+      inset 0 0 0 1px var(--line);
+  }
+
+  .avatar {
+    width: 26px; height: 26px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--violet), oklch(0.50 0.24 280));
+    font-size: 11px; font-weight: 600; color: white;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+
+  .content {
+    padding: 56px 64px 56px; max-width: 1200px;
+    display: flex; flex-direction: column; gap: 48px;
+  }
+
+  /* ─── Hero: palette-as-hero ─────────────────── */
+  .hero { display: flex; flex-direction: column; gap: 28px; }
+  .greeting {
+    font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2;
+    margin: 0; color: var(--ink);
+  }
+  .lede { font-size: 15px; color: var(--ink-3); max-width: 62ch; margin-top: -10px; line-height: 1.55; }
+  .lede b { color: var(--ink); font-weight: 500; }
+  .lede .accent { color: var(--violet); }
+
+  .palette {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 18px;
+    display: flex; flex-direction: column; gap: 12px;
+    max-width: 620px;
+    box-shadow: 0 0 0 1px transparent, var(--palette-aura);
+  }
+  .palette .input {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; background: var(--bg-2); border-radius: 8px;
+    font-size: 13.5px; color: var(--ink-3); font-family: 'Geist';
+    border: 1px solid transparent;
+  }
+  .palette .input svg { width: 14px; height: 14px; color: var(--ink-4); }
+  .palette .input .caret {
+    display: inline-block; width: 1.5px; height: 14px; background: var(--violet);
+    animation: caret 1s steps(1, end) infinite;
+    box-shadow: var(--accent-glow-md);
+  }
+  @keyframes caret { 50% { opacity: 0; } }
+  .palette .input .typed { color: var(--ink); font-weight: 500; }
+  .palette .input .placeholder { color: var(--ink-4); }
+  .palette .input .kbd {
+    margin-left: auto; font-family: 'Geist Mono'; font-size: 10.5px;
+    padding: 2px 8px; background: var(--kbd-bg-2); border-radius: 5px; border: 1px solid var(--line);
+    color: var(--ink-3);
+  }
+  .palette .hints { display: flex; flex-direction: column; gap: 2px; }
+  .palette .hint {
+    display: grid; grid-template-columns: 14px 1fr auto; gap: 10px;
+    align-items: center; padding: 7px 12px; border-radius: 8px;
+    font-size: 13px; color: var(--ink-3);
+  }
+  .palette .hint.active {
+    background: var(--violet-soft); color: var(--ink);
+  }
+  .palette .hint.active svg { color: var(--violet); }
+  .palette .hint svg { width: 14px; height: 14px; color: var(--ink-4); }
+  .palette .hint .meta { font-family: 'Geist Mono'; font-size: 10.5px; color: var(--ink-4); }
+
+  /* ─── Stats ──────────────────────────── */
+  .stats {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 48px;
+    padding-top: 8px;
+  }
+  .stat { display: flex; flex-direction: column; gap: 6px; }
+  .stat .label {
+    font-size: 10.5px; color: var(--ink-4); text-transform: uppercase;
+    letter-spacing: 0.1em; font-weight: 500;
+  }
+  .stat .value {
+    font-size: 38px; font-weight: 500; letter-spacing: -0.03em; line-height: 1;
+    color: var(--ink); font-variant-numeric: tabular-nums;
+    font-family: 'Geist';
+  }
+  .stat .foot {
+    display: flex; align-items: center; gap: 10px;
+    font-family: 'Geist Mono'; font-size: 11px; color: var(--ink-4); margin-top: 4px;
+  }
+  .stat .foot .delta { color: var(--ok); }
+  .stat .foot .delta.flat { color: var(--ink-4); }
+  .stat .spark { height: 18px; width: 56px; transition: filter 300ms ease; }
+
+  /* Signature: spark picks up violet on hover — grayscale at rest */
+  .spark path.fg { stroke: var(--ink-4); transition: stroke .3s, filter .3s; }
+  .stat:hover .spark path.fg {
+    stroke: var(--violet);
+    filter: var(--accent-glow-sm);
+  }
+
+  /* ─── Activity + rail ──────────────────── */
+  .section-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .section-title {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-size: 14px; font-weight: 600; color: var(--ink);
+  }
+  .section-title .dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
+    box-shadow: var(--ok-glow);
+    animation: breathe 2.2s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 60%, transparent); }
+    50%      { box-shadow: var(--ok-breathe-end); }
+  }
+  .section-link { font-size: 12.5px; color: var(--ink-4); font-family: 'Geist'; }
+  .section-link:hover { color: var(--ink-2); }
+
+  .two-col { display: grid; grid-template-columns: 1fr 320px; gap: 56px; }
+
+  .activity-list { display: flex; flex-direction: column; }
+  .activity-row {
+    display: grid; grid-template-columns: 64px 140px 1fr auto;
+    gap: 20px; align-items: center;
+    padding: 11px 0; font-size: 13px;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
+  }
+  .activity-row:hover { color: var(--ink); }
+  .activity-row:hover .sub { color: var(--violet); }
+  .activity-row .ts { font-family: 'Geist Mono'; font-size: 11px; color: var(--ink-5); }
+  .activity-row .sub { font-family: 'Geist Mono'; font-size: 11.5px; color: var(--ink-4); transition: color .18s; }
+  .activity-row .msg { color: var(--ink-2); font-weight: 450; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .activity-row .msg em { color: var(--ink-3); font-style: italic; }
+  .activity-row .status {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--ink-5);
+  }
+  .activity-row .status.ok { background: var(--ok); }
+  .activity-row .status.warn { background: var(--warn); }
+  .activity-row .status.err { background: var(--err); }
+
+  .rail { display: flex; flex-direction: column; gap: 16px; }
+  .rail h3 {
+    margin: 0 0 0; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink);
+  }
+  .rail .summary {
+    font-size: 13.5px; line-height: 1.55; color: var(--ink-3);
+  }
+  .rail .summary b { color: var(--ink); font-weight: 500; }
+  .rail .summary u { text-decoration: none; color: var(--violet); }
+  .health-grid { display: flex; flex-direction: column; }
+  .health-line {
+    display: grid; grid-template-columns: 1fr auto; gap: 12px;
+    padding: 9px 0; align-items: center;
+    border-bottom: 1px solid var(--line);
+    font-size: 12.5px;
+  }
+  .health-line .n { color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
+  .health-line .n::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: var(--ok); }
+  .health-line.bad .n::before { background: var(--err); }
+  .health-line .v { font-family: 'Geist Mono'; font-size: 10.5px; color: var(--ink-4); }
+
+  footer {
+    padding: 16px 40px; border-top: 1px solid var(--line);
+    display: flex; justify-content: space-between;
+    font-size: 11.5px; color: var(--ink-4); font-family: 'Geist Mono';
+  }
+  footer b { color: var(--ink-2); }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M18 5 A10 10 0 1 0 18 19 A7.5 7.5 0 1 1 18 5 Z"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-name">corlinman</div>
+        <div class="brand-ver">v0.3.0 · batch 1–5</div>
+      </div>
+    </div>
+
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      Search or run command
+      <span class="kbd">⌘K</span>
+    </div>
+
+    <nav>
+      <div class="nav-group">
+        <h4>Overview</h4>
+        <div class="nav-item active">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span>Dashboard</span>
+          <span class="num"></span>
+          <span class="kbd">G D</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+          <span>Logs</span>
+          <span class="num">1.8k</span>
+          <span class="kbd">G L</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="7" r="2"/><circle cx="15" cy="13" r="2"/><circle cx="9" cy="19" r="2"/><path d="M9 9v2M15 15v2"/></svg>
+          <span>Hooks</span>
+          <span class="num"></span>
+          <span class="kbd">G H</span>
+        </div>
+      </div>
+      <div class="nav-group">
+        <h4>Agents</h4>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/></svg>
+          <span>Plugins</span>
+          <span class="num">23</span>
+          <span class="kbd">G P</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l9 4v5c0 5-4 9-9 11-5-2-9-6-9-11V6l9-4z"/></svg>
+          <span>Skills</span>
+          <span class="num">14</span>
+          <span class="kbd">G S</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+          <span>Characters</span>
+          <span class="num">7</span>
+          <span class="kbd">G C</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+          <span>Approvals</span>
+          <span class="num">2</span>
+          <span class="kbd">G A</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+          <span>Scheduler</span>
+          <span class="num"></span>
+          <span class="kbd">G Y</span>
+        </div>
+      </div>
+      <div class="nav-group">
+        <h4>Protocols</h4>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
+          <span>Playground</span>
+          <span class="num"></span>
+          <span class="kbd">G O</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="4" cy="12" r="2"/><circle cx="20" cy="12" r="2"/><path d="M6 12h3M15 12h3"/></svg>
+          <span>Nodes</span>
+          <span class="num">3</span>
+          <span class="kbd">G N</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 10h8M8 14h4"/></svg>
+          <span>Canvas</span>
+          <span class="num"></span>
+          <span class="kbd">G V</span>
+        </div>
+      </div>
+      <div class="nav-group" style="margin-top: auto;">
+        <h4>Data</h4>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>
+          <span>Tag Memo</span>
+          <span class="num"></span>
+          <span class="kbd">G T</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          <span>Diary</span>
+          <span class="num"></span>
+          <span class="kbd">G I</span>
+        </div>
+      </div>
+    </nav>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <div class="crumb">Dashboard</div>
+      <div class="topbar-right">
+        <span>uptime<b>11d 04:17</b></span>
+        <span>rps<b>41.2</b></span>
+        <span>p95<b>612ms</b></span>
+        <div class="theme-toggle" role="tablist" aria-label="Theme">
+          <button data-mode="light" aria-label="Day mode">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+          </button>
+          <button data-mode="dark" aria-label="Night mode">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          </button>
+        </div>
+        <div class="avatar">IA</div>
+      </div>
+    </div>
+
+    <div class="content">
+      <section class="hero">
+        <h1 class="greeting">Good afternoon, Ian.</h1>
+        <p class="lede">
+          Seven agents active. Twenty-three plugins loaded.
+          Two approvals are waiting — <b>file_write</b> held 4.3 seconds.
+          Everything else is <span class="accent">quiet</span>.
+        </p>
+
+        <div class="palette">
+          <div class="input">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+            <span class="typed">review</span>
+            <span class="caret"></span>
+            <span class="placeholder">&nbsp;&nbsp;— jump, search, run a command</span>
+            <span class="kbd">⌘K</span>
+          </div>
+          <div class="hints">
+            <div class="hint active">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+              <span>Review 2 pending approvals</span>
+              <span class="meta">↵</span>
+            </div>
+            <div class="hint">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13"/></svg>
+              <span>Open logs stream</span>
+              <span class="meta">G L</span>
+            </div>
+            <div class="hint">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+              <span>Switch to "researcher" agent</span>
+              <span class="meta">G C</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stats">
+        <div class="stat">
+          <span class="label">Requests · 24h</span>
+          <span class="value">38,214</span>
+          <div class="foot">
+            <svg class="spark" viewBox="0 0 56 18" preserveAspectRatio="none">
+              <path class="fg" d="M0 12 L8 10 L16 11 L24 8 L32 9 L40 6 L48 7 L56 3" fill="none" stroke-width="1.5"/>
+            </svg>
+            <span class="delta">↑ 12.4%</span>
+          </div>
+        </div>
+        <div class="stat">
+          <span class="label">Tokens · 24h</span>
+          <span class="value">4.12M</span>
+          <div class="foot">
+            <svg class="spark" viewBox="0 0 56 18" preserveAspectRatio="none">
+              <path class="fg" d="M0 10 L8 11 L16 8 L24 9 L32 6 L40 7 L48 4 L56 5" fill="none" stroke-width="1.5"/>
+            </svg>
+            <span class="delta">↑ 8.1%</span>
+          </div>
+        </div>
+        <div class="stat">
+          <span class="label">Hooks dispatched</span>
+          <span class="value">12,840</span>
+          <div class="foot">
+            <svg class="spark" viewBox="0 0 56 18" preserveAspectRatio="none">
+              <path class="fg" d="M0 14 L8 10 L16 12 L24 6 L32 8 L40 4 L48 6 L56 2" fill="none" stroke-width="1.5"/>
+            </svg>
+            <span class="delta">↑ 18.4%</span>
+          </div>
+        </div>
+        <div class="stat">
+          <span class="label">RAG chunks</span>
+          <span class="value">84,291</span>
+          <div class="foot">
+            <svg class="spark" viewBox="0 0 56 18" preserveAspectRatio="none">
+              <path class="fg" d="M0 14 L8 13 L16 12 L24 10 L32 8 L40 6 L48 4 L56 2" fill="none" stroke-width="1.5"/>
+            </svg>
+            <span class="delta flat">+ 412</span>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="two-col">
+          <div>
+            <div class="section-head">
+              <div class="section-title"><span class="dot"></span>Activity</div>
+              <a class="section-link">View all →</a>
+            </div>
+            <div class="activity-list">
+              <div class="activity-row">
+                <span class="ts">14:02:18</span>
+                <span class="sub">channels:telegram</span>
+                <span class="msg">Update 9841 processed · <em>142 tokens</em></span>
+                <span class="status ok"></span>
+              </div>
+              <div class="activity-row">
+                <span class="ts">14:02:17</span>
+                <span class="sub">hooks</span>
+                <span class="msg"><em>message.preprocessed</em> → 4 subscribers in 2.1 ms</span>
+                <span class="status ok"></span>
+              </div>
+              <div class="activity-row">
+                <span class="ts">14:02:15</span>
+                <span class="sub">plugin · web_search</span>
+                <span class="msg">Invoked · query <em>"claude 4.7 release notes"</em></span>
+                <span class="status"></span>
+              </div>
+              <div class="activity-row">
+                <span class="ts">14:02:14</span>
+                <span class="sub">approval</span>
+                <span class="msg">Tool <em>file_write</em> awaiting operator · 4.3s</span>
+                <span class="status warn"></span>
+              </div>
+              <div class="activity-row">
+                <span class="ts">14:02:11</span>
+                <span class="sub">rag</span>
+                <span class="msg">Hybrid search (k=10) with EPA boost · recall 0.92</span>
+                <span class="status"></span>
+              </div>
+              <div class="activity-row">
+                <span class="ts">14:02:05</span>
+                <span class="sub">plugin · file_fetcher</span>
+                <span class="msg">403 on <em>ws-tool://node-b/read</em> · retry 1/3</span>
+                <span class="status err"></span>
+              </div>
+              <div class="activity-row">
+                <span class="ts">14:02:04</span>
+                <span class="sub">gateway</span>
+                <span class="msg">POST <em>/v1/chat/completions</em> · 342 ms</span>
+                <span class="status ok"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="rail">
+            <h3>Health</h3>
+            <p class="summary">
+              <b>All nominal.</b> Approval queue carries
+              <u>one item</u> — a tool write awaiting your judgment.
+            </p>
+            <div class="health-grid">
+              <div class="health-line"><span class="n">gateway</span><span class="v">99.98%</span></div>
+              <div class="health-line"><span class="n">anthropic</span><span class="v">184ms</span></div>
+              <div class="health-line"><span class="n">rag-store</span><span class="v">v6</span></div>
+              <div class="health-line"><span class="n">plugin-runtime</span><span class="v">21/23</span></div>
+              <div class="health-line"><span class="n">scheduler</span><span class="v">ok</span></div>
+              <div class="health-line"><span class="n">approvals</span><span class="v">1 q</span></div>
+              <div class="health-line"><span class="n">channels · qq</span><span class="v">ok</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <footer>
+      <span>corlinman · ready</span>
+      <span>press <b>⌘K</b> to act</span>
+    </footer>
+  </main>
+</div>
+
+<script>
+  (function () {
+    const html = document.documentElement;
+    const urlTheme = new URL(location.href).searchParams.get('theme');
+    const stored = localStorage.getItem('corlinman-moonlight-theme');
+    if (urlTheme === 'dark' || urlTheme === 'light') {
+      html.dataset.theme = urlTheme;
+    } else if (stored === 'dark' || stored === 'light') {
+      html.dataset.theme = stored;
+    }
+    document.querySelectorAll('[data-mode]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        html.dataset.theme = btn.dataset.mode;
+        localStorage.setItem('corlinman-moonlight-theme', btn.dataset.mode);
+      });
+    });
+  })();
+</script>
+</body>
+</html>

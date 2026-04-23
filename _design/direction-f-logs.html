@@ -1,0 +1,951 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1440" />
+<title>corlinman · Logs · Tidepool</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* ─── Shared tokens: DARK (warm dusk) ──────────────── */
+  :root {
+    --bg-a:    #1a120d;
+    --bg-b:    #25170f;
+    --bg-c:    #1e1410;
+    --aurora-1: oklch(0.55 0.18 55 / 0.28);
+    --aurora-2: oklch(0.52 0.18 32 / 0.24);
+    --aurora-3: oklch(0.48 0.15 15 / 0.20);
+
+    --glass:       oklch(0.22 0.02 55 / 0.5);
+    --glass-2:     oklch(0.25 0.025 55 / 0.65);
+    --glass-3:     oklch(0.27 0.03 55 / 0.72);
+    --glass-edge:  oklch(1 0 0 / 0.08);
+    --glass-edge-strong: oklch(1 0 0 / 0.14);
+    --glass-hl:    oklch(1 0 0 / 0.16);
+    --glass-inner: rgba(255,255,255,0.04);
+    --glass-inner-hover: rgba(255,255,255,0.08);
+    --glass-inner-strong: rgba(255,255,255,0.06);
+    --row-alt:     rgba(255,255,255,0.015);
+
+    --ink:     #f8f1e5;
+    --ink-2:   #ccbfa8;
+    --ink-3:   #938774;
+    --ink-4:   #685c49;
+    --ink-5:   #4a4035;
+
+    --amber:      oklch(0.80 0.17 58);
+    --amber-soft: oklch(0.80 0.17 58 / 0.14);
+    --amber-glow: oklch(0.80 0.17 58 / 0.38);
+    --ember:      oklch(0.70 0.19 32);
+    --ok:         oklch(0.80 0.14 145);
+    --ok-soft:    oklch(0.80 0.14 145 / 0.16);
+    --warn:       oklch(0.82 0.17 85);
+    --warn-soft:  oklch(0.82 0.17 85 / 0.16);
+    --err:        oklch(0.70 0.22 20);
+    --err-soft:   oklch(0.70 0.22 20 / 0.16);
+
+    --shadow-panel: 0 8px 24px -10px rgba(15, 8, 2, 0.4);
+  }
+  [data-theme="light"] {
+    --bg-a:    #fbf4e8;
+    --bg-b:    #f7ecde;
+    --bg-c:    #fbf1e0;
+    --aurora-1: oklch(0.82 0.13 58 / 0.30);
+    --aurora-2: oklch(0.80 0.12 30 / 0.25);
+    --aurora-3: oklch(0.84 0.09 15 / 0.20);
+    --glass:       rgba(255, 255, 255, 0.58);
+    --glass-2:     rgba(255, 255, 255, 0.78);
+    --glass-3:     rgba(255, 255, 255, 0.9);
+    --glass-edge:  rgba(255, 255, 255, 0.92);
+    --glass-edge-strong: rgba(255, 255, 255, 1);
+    --glass-hl:    rgba(255, 255, 255, 1);
+    --glass-inner: rgba(255, 255, 255, 0.48);
+    --glass-inner-hover: rgba(255, 255, 255, 0.78);
+    --glass-inner-strong: rgba(255, 255, 255, 0.58);
+    --row-alt: rgba(255, 255, 255, 0.4);
+    --ink:   #271810;
+    --ink-2: #513e2d;
+    --ink-3: #7c6850;
+    --ink-4: #a89580;
+    --ink-5: #c4b4a0;
+    --amber:   oklch(0.56 0.19 50);
+    --amber-soft: oklch(0.56 0.19 50 / 0.12);
+    --amber-glow: oklch(0.56 0.19 50 / 0.28);
+    --ember:   oklch(0.48 0.19 30);
+    --ok:      oklch(0.52 0.14 145);
+    --ok-soft: oklch(0.52 0.14 145 / 0.14);
+    --warn:    oklch(0.58 0.16 78);
+    --warn-soft: oklch(0.58 0.16 78 / 0.14);
+    --err:     oklch(0.55 0.22 20);
+    --err-soft: oklch(0.55 0.22 20 / 0.12);
+    --shadow-panel: 0 6px 18px -8px rgba(80, 45, 20, 0.12);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html { transition: background-color 320ms ease, color 240ms ease; }
+  html, body {
+    margin: 0; padding: 0;
+    background:
+      radial-gradient(900px 500px at 15% 10%, var(--aurora-1), transparent 60%),
+      radial-gradient(700px 500px at 85% 20%, var(--aurora-2), transparent 60%),
+      radial-gradient(600px 400px at 50% 95%, var(--aurora-3), transparent 60%),
+      linear-gradient(135deg, var(--bg-a), var(--bg-b) 60%, var(--bg-c));
+    background-attachment: fixed;
+    color: var(--ink);
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    font-size: 13.5px; line-height: 1.55; letter-spacing: -0.005em;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+    font-feature-settings: "ss01", "cv11";
+    min-height: 100vh;
+  }
+  ::selection { background: color-mix(in oklch, var(--amber) 32%, transparent); }
+
+  .app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+
+  /* ─── Sidebar (same as Dashboard) ─────────────── */
+  aside {
+    margin: 16px 0 16px 16px;
+    padding: 22px 14px;
+    background: var(--glass);
+    border: 1px solid var(--glass-edge);
+    border-radius: 18px;
+    backdrop-filter: blur(24px) saturate(1.5);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    display: flex; flex-direction: column; gap: 22px;
+    box-shadow: inset 0 1px 0 var(--glass-hl), var(--shadow-panel);
+    position: sticky; top: 16px; align-self: flex-start;
+    max-height: calc(100vh - 32px); overflow: auto;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 10px; border-bottom: 1px solid var(--glass-edge); }
+  .brand-mark {
+    width: 30px; height: 30px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--amber), var(--ember) 70%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.4), 0 0 16px -4px var(--amber-glow);
+    position: relative; flex-shrink: 0;
+  }
+  .brand-mark::after {
+    content: ''; position: absolute; inset: 4px; border-radius: 6px;
+    background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.8), transparent 50%), rgba(255,255,255,0.12);
+  }
+  .brand-name { font-size: 14.5px; font-weight: 600; letter-spacing: -0.015em; color: var(--ink); }
+  .brand-ver { font-family: 'JetBrains Mono'; font-size: 10.5px; color: var(--ink-3); margin-top: 1px; }
+
+  .search {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-radius: 10px;
+    background: var(--glass-inner);
+    border: 1px solid var(--glass-edge);
+    color: var(--ink-3); font-size: 12.5px; cursor: pointer;
+  }
+  .search:hover { background: var(--glass-inner-hover); color: var(--ink-2); }
+  .search svg { width: 13px; height: 13px; }
+  .search .kbd {
+    margin-left: auto; font-family: 'JetBrains Mono'; font-size: 10.5px;
+    padding: 1px 6px; border-radius: 4px;
+    background: var(--glass-inner-strong); color: var(--ink-2); border: 1px solid var(--glass-edge);
+  }
+
+  nav { display: flex; flex-direction: column; gap: 18px; }
+  .nav-group h4 {
+    margin: 0 10px 4px; font-size: 10px; font-weight: 500;
+    color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.1em;
+  }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 8px;
+    color: var(--ink-2); font-size: 13px; cursor: pointer; position: relative;
+  }
+  .nav-item:hover { background: var(--glass-inner); color: var(--ink); }
+  .nav-item.active {
+    background: var(--glass-inner-hover); color: var(--ink);
+    box-shadow: inset 0 1px 0 var(--glass-hl);
+  }
+  .nav-item.active::before {
+    content: ''; width: 3px; height: 14px; margin-left: -6px; margin-right: -1px;
+    background: linear-gradient(to bottom, var(--amber), var(--ember));
+    border-radius: 2px; box-shadow: 0 0 8px var(--amber-glow);
+  }
+  .nav-item svg { width: 14px; height: 14px; opacity: 0.8; }
+  .nav-item .num {
+    margin-left: auto; font-family: 'JetBrains Mono'; font-size: 10.5px;
+    color: var(--ink-4); font-variant-numeric: tabular-nums;
+  }
+  .nav-item .badge {
+    margin-left: auto; min-width: 18px; height: 18px; padding: 0 6px; border-radius: 999px;
+    font-family: 'JetBrains Mono'; font-size: 10.5px; font-weight: 500;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--amber-soft); color: var(--amber); font-variant-numeric: tabular-nums;
+    border: 1px solid color-mix(in oklch, var(--amber) 30%, transparent);
+  }
+  .nav-item .status-dot {
+    margin-left: auto;
+    width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
+    box-shadow: 0 0 6px color-mix(in oklch, var(--ok) 45%, transparent);
+  }
+
+  /* ─── Main ───────────────────────────── */
+  main {
+    display: flex; flex-direction: column; min-width: 0;
+    padding: 16px 16px 16px 0;
+    gap: 14px;
+  }
+
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 22px;
+    background: var(--glass);
+    border: 1px solid var(--glass-edge);
+    backdrop-filter: blur(24px) saturate(1.5);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    border-radius: 14px;
+    box-shadow: inset 0 1px 0 var(--glass-hl);
+  }
+  .crumb { font-size: 13px; color: var(--ink-3); }
+  .crumb b { color: var(--ink); font-weight: 500; }
+  .crumb .slash { color: var(--ink-4); margin: 0 8px; }
+  .topbar-right { display: flex; align-items: center; gap: 14px; }
+  .theme-toggle {
+    display: inline-flex; gap: 2px; padding: 3px;
+    background: var(--glass-inner);
+    border: 1px solid var(--glass-edge);
+    border-radius: 999px;
+  }
+  .theme-toggle button {
+    width: 26px; height: 26px; border-radius: 999px;
+    border: 0; background: transparent; color: var(--ink-3);
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; padding: 0;
+  }
+  .theme-toggle button:hover { color: var(--ink-2); }
+  .theme-toggle button svg { width: 13px; height: 13px; }
+  [data-theme="light"] .theme-toggle button[data-mode="light"],
+  [data-theme="dark"]  .theme-toggle button[data-mode="dark"] {
+    background: var(--glass-inner-hover); color: var(--amber);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.1), inset 0 0 0 1px var(--glass-edge);
+  }
+  .avatar {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--amber), var(--ember));
+    font-size: 11px; font-weight: 600; color: white;
+    display: inline-flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 12px -4px var(--amber-glow);
+    cursor: pointer;
+  }
+
+  /* ─── Control bar ──────────────────────── */
+  .controls {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 14px;
+    background: var(--glass);
+    border: 1px solid var(--glass-edge);
+    backdrop-filter: blur(24px) saturate(1.5);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    border-radius: 14px;
+    box-shadow: inset 0 1px 0 var(--glass-hl);
+  }
+
+  .stream-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 5px 12px 5px 10px;
+    border-radius: 999px;
+    background: var(--ok-soft);
+    border: 1px solid color-mix(in oklch, var(--ok) 25%, transparent);
+    font-family: 'JetBrains Mono'; font-size: 11.5px; color: var(--ok);
+    cursor: pointer;
+  }
+  .stream-pill .d {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
+    animation: breathe 2.2s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 50%, transparent); }
+    50%      { box-shadow: 0 0 10px color-mix(in oklch, var(--ok) 40%, transparent); }
+  }
+  .stream-pill .rate { color: color-mix(in oklch, var(--ok) 80%, var(--ink-3)); }
+  .stream-pill svg { width: 11px; height: 11px; }
+
+  .control-group { display: inline-flex; gap: 2px; padding: 3px;
+    background: var(--glass-inner); border: 1px solid var(--glass-edge);
+    border-radius: 8px; }
+  .control-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 5px; border: 0; background: transparent;
+    color: var(--ink-3); font-family: inherit; font-size: 12px; cursor: pointer;
+  }
+  .control-btn:hover { color: var(--ink-2); background: var(--glass-inner); }
+  .control-btn.active { background: var(--glass-inner-hover); color: var(--ink); }
+  .control-btn svg { width: 11px; height: 11px; }
+
+  .select-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 5px 12px 5px 10px; border-radius: 8px;
+    background: var(--glass-inner);
+    border: 1px solid var(--glass-edge);
+    color: var(--ink-2); font-size: 12.5px; cursor: pointer;
+  }
+  .select-pill:hover { background: var(--glass-inner-hover); color: var(--ink); }
+  .select-pill .lbl { color: var(--ink-4); font-family: 'JetBrains Mono'; font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: 0.08em; }
+  .select-pill .val { color: var(--ink); font-weight: 500; }
+  .select-pill svg { width: 10px; height: 10px; color: var(--ink-4); }
+
+  .search-input {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 5px 10px; border-radius: 8px;
+    background: var(--glass-inner);
+    border: 1px solid var(--glass-edge);
+    flex: 1; min-width: 240px;
+    color: var(--ink-3); font-size: 12.5px;
+  }
+  .search-input:focus-within { border-color: color-mix(in oklch, var(--amber) 40%, var(--glass-edge)); }
+  .search-input svg { width: 12px; height: 12px; color: var(--ink-4); }
+  .search-input input {
+    flex: 1; border: 0; background: transparent; color: var(--ink);
+    font-family: inherit; font-size: 12.5px; outline: 0;
+  }
+  .search-input input::placeholder { color: var(--ink-4); }
+  .search-input .kbd {
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    padding: 1px 5px; border-radius: 4px;
+    background: var(--glass-inner-strong); color: var(--ink-3);
+    border: 1px solid var(--glass-edge);
+  }
+
+  .controls-right { margin-left: auto; display: inline-flex; gap: 8px; }
+  .icon-btn {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: var(--glass-inner); border: 1px solid var(--glass-edge);
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--ink-3); cursor: pointer;
+  }
+  .icon-btn:hover { background: var(--glass-inner-hover); color: var(--ink-2); }
+  .icon-btn svg { width: 13px; height: 13px; }
+
+  /* ─── Stats strip ─────────────────────── */
+  .stats-strip {
+    display: flex; gap: 24px; align-items: center;
+    padding: 8px 16px;
+    font-size: 12.5px; color: var(--ink-3);
+  }
+  .stats-strip b { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .stats-strip .sep { color: var(--ink-5); }
+  .stats-strip .sev {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 2px 10px 2px 8px; border-radius: 999px;
+    font-family: 'JetBrains Mono'; font-size: 11px;
+    background: var(--glass-inner); border: 1px solid var(--glass-edge);
+  }
+  .stats-strip .sev::before { content: ''; width: 5px; height: 5px; border-radius: 50%; }
+  .stats-strip .sev.ok::before { background: var(--ok); }
+  .stats-strip .sev.warn::before { background: var(--warn); }
+  .stats-strip .sev.err::before { background: var(--err); }
+  .stats-strip .sev.info::before { background: var(--ink-4); }
+
+  /* ─── Main grid: log stream + detail drawer ─── */
+  .log-grid {
+    display: grid; grid-template-columns: 1fr 380px; gap: 14px;
+    min-height: 720px;
+  }
+
+  .log-pane, .detail-pane {
+    background: var(--glass);
+    border: 1px solid var(--glass-edge);
+    border-radius: 14px;
+    backdrop-filter: blur(24px) saturate(1.5);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    box-shadow: inset 0 1px 0 var(--glass-hl), var(--shadow-panel);
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+
+  /* column header */
+  .log-pane-head {
+    display: grid; grid-template-columns: 70px 60px 140px 1fr auto;
+    gap: 14px; align-items: center;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--glass-edge);
+    font-family: 'JetBrains Mono'; font-size: 10.5px;
+    color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.08em;
+  }
+
+  .log-rows { overflow-y: auto; flex: 1; }
+  .log-row {
+    display: grid; grid-template-columns: 70px 60px 140px 1fr auto;
+    gap: 14px; align-items: center;
+    padding: 8px 16px; font-size: 12.5px;
+    border-bottom: 1px solid var(--glass-edge);
+    cursor: pointer; position: relative;
+  }
+  .log-row:nth-child(even) { background: var(--row-alt); }
+  .log-row:hover { background: var(--glass-inner-hover); }
+  .log-row.selected {
+    background: var(--amber-soft);
+    box-shadow: inset 2px 0 0 var(--amber), inset 0 0 0 1px color-mix(in oklch, var(--amber) 20%, transparent);
+  }
+  .log-row .ts { font-family: 'JetBrains Mono'; font-size: 11px; color: var(--ink-4); }
+  .log-row .sev {
+    display: inline-flex; justify-self: flex-start; align-items: center;
+    font-family: 'JetBrains Mono'; font-size: 9.5px; font-weight: 500;
+    padding: 1px 7px; border-radius: 4px;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .log-row .sev.info { background: var(--glass-inner-strong); color: var(--ink-3); }
+  .log-row .sev.ok   { background: var(--ok-soft); color: var(--ok); }
+  .log-row .sev.warn { background: var(--warn-soft); color: var(--warn); }
+  .log-row .sev.err  { background: var(--err-soft); color: var(--err); }
+  .log-row .sub { font-family: 'JetBrains Mono'; font-size: 11px; color: var(--ink-3); }
+  .log-row .msg {
+    color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: 'Inter';
+  }
+  .log-row .msg em { color: var(--ink); font-style: normal; font-weight: 500; }
+  .log-row .msg code {
+    font-family: 'JetBrains Mono'; font-size: 11px;
+    padding: 1px 5px; border-radius: 3px;
+    background: var(--glass-inner-strong); color: var(--ink);
+    border: 1px solid var(--glass-edge);
+  }
+  .log-row .dur {
+    font-family: 'JetBrains Mono'; font-size: 10.5px; color: var(--ink-4);
+    font-variant-numeric: tabular-nums;
+  }
+  .log-row.just-now::before {
+    content: ''; position: absolute; left: 0; top: 6px; bottom: 6px;
+    width: 2px; border-radius: 2px;
+    background: var(--amber);
+    box-shadow: 0 0 8px var(--amber-glow);
+  }
+
+  /* Day-boundary / group separator */
+  .log-divider {
+    padding: 6px 16px 4px;
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.1em;
+    background: var(--glass-inner);
+    border-bottom: 1px solid var(--glass-edge);
+    border-top: 1px solid var(--glass-edge);
+  }
+
+  /* ─── Detail drawer ────────────────────── */
+  .detail-pane { padding: 0; }
+  .detail-head {
+    padding: 16px 18px 14px;
+    border-bottom: 1px solid var(--glass-edge);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .detail-head .row {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .detail-head .sev {
+    font-family: 'JetBrains Mono'; font-size: 10px; font-weight: 500;
+    padding: 2px 9px; border-radius: 5px;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .detail-head .sev.err { background: var(--err-soft); color: var(--err); border: 1px solid color-mix(in oklch, var(--err) 25%, transparent); }
+  .detail-head .ts-big {
+    font-family: 'JetBrains Mono'; font-size: 13px;
+    color: var(--ink); font-variant-numeric: tabular-nums;
+  }
+  .detail-head .ago { color: var(--ink-4); font-family: 'JetBrains Mono'; font-size: 11px; }
+  .detail-head .sub {
+    font-family: 'JetBrains Mono'; font-size: 12px; color: var(--amber);
+  }
+  .detail-head h2 {
+    margin: 0; font-size: 16px; font-weight: 500; color: var(--ink); letter-spacing: -0.01em;
+    line-height: 1.4;
+  }
+  .detail-head h2 code {
+    font-family: 'JetBrains Mono'; font-size: 13.5px;
+    padding: 1px 5px; border-radius: 3px;
+    background: var(--glass-inner-strong); color: var(--ink);
+    border: 1px solid var(--glass-edge);
+  }
+  .detail-head .trace-row {
+    display: flex; align-items: center; gap: 8px;
+    font-family: 'JetBrains Mono'; font-size: 11px; color: var(--ink-3);
+  }
+  .detail-head .trace-row .trace-id {
+    color: var(--ink); font-weight: 500;
+  }
+  .detail-head .copy-btn {
+    margin-left: auto;
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    padding: 2px 8px; border-radius: 5px;
+    background: var(--glass-inner); color: var(--ink-3);
+    border: 1px solid var(--glass-edge); cursor: pointer;
+  }
+  .detail-head .copy-btn:hover { color: var(--ink); background: var(--glass-inner-hover); }
+
+  .detail-body {
+    flex: 1; overflow-y: auto;
+    display: flex; flex-direction: column;
+  }
+  .detail-section { padding: 14px 18px; border-bottom: 1px solid var(--glass-edge); }
+  .detail-section:last-child { border-bottom: 0; }
+  .detail-section-label {
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    color: var(--ink-4); text-transform: uppercase; letter-spacing: 0.1em;
+    margin-bottom: 8px;
+  }
+
+  /* JSON block */
+  .json {
+    font-family: 'JetBrains Mono'; font-size: 11.5px;
+    background: var(--glass-inner); border: 1px solid var(--glass-edge);
+    border-radius: 8px;
+    padding: 12px 14px;
+    line-height: 1.65;
+    color: var(--ink-2);
+    white-space: pre; overflow-x: auto;
+  }
+  .json .k { color: var(--amber); }
+  .json .s { color: var(--ok); }
+  .json .n { color: oklch(0.78 0.14 280); }
+  .json .b { color: var(--ember); }
+  .json .c { color: var(--ink-4); font-style: italic; }
+  [data-theme="light"] .json .n { color: oklch(0.45 0.2 280); }
+
+  /* Related logs */
+  .related { display: flex; flex-direction: column; gap: 6px; }
+  .related-row {
+    display: grid; grid-template-columns: 60px 1fr auto; gap: 10px;
+    align-items: center;
+    padding: 6px 10px; border-radius: 6px;
+    font-size: 11.5px; color: var(--ink-3);
+    cursor: pointer;
+  }
+  .related-row:hover { background: var(--glass-inner); color: var(--ink-2); }
+  .related-row .ts { font-family: 'JetBrains Mono'; font-size: 10.5px; color: var(--ink-4); }
+  .related-row .sev {
+    font-family: 'JetBrains Mono'; font-size: 9px; font-weight: 500;
+    padding: 1px 5px; border-radius: 3px; justify-self: flex-start;
+    text-transform: uppercase;
+  }
+  .related-row .sev.ok   { background: var(--ok-soft); color: var(--ok); }
+  .related-row .sev.warn { background: var(--warn-soft); color: var(--warn); }
+  .related-row .sev.err  { background: var(--err-soft); color: var(--err); }
+  .related-row .sev.info { background: var(--glass-inner-strong); color: var(--ink-3); }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div>
+        <div class="brand-name">corlinman</div>
+        <div class="brand-ver">v0.3.0 · batch 1–5</div>
+      </div>
+    </div>
+
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      Search
+      <span class="kbd">⌘K</span>
+    </div>
+
+    <nav>
+      <div class="nav-group">
+        <h4>Overview</h4>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          Dashboard
+        </div>
+        <div class="nav-item active">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+          Logs<span class="num">1.8k</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="7" r="2"/><circle cx="15" cy="13" r="2"/><circle cx="9" cy="19" r="2"/><path d="M9 9v2M15 15v2"/></svg>
+          Hooks<span class="status-dot"></span>
+        </div>
+      </div>
+      <div class="nav-group">
+        <h4>Agents</h4>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/></svg>
+          Plugins<span class="num">23</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l9 4v5c0 5-4 9-9 11-5-2-9-6-9-11V6l9-4z"/></svg>
+          Skills<span class="num">14</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+          Characters<span class="num">7</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+          Approvals<span class="badge">2</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+          Scheduler
+        </div>
+      </div>
+      <div class="nav-group">
+        <h4>Protocols</h4>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
+          Playground
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="4" cy="12" r="2"/><circle cx="20" cy="12" r="2"/><path d="M6 12h3M15 12h3"/></svg>
+          Nodes<span class="num">3</span>
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 10h8M8 14h4"/></svg>
+          Canvas
+        </div>
+      </div>
+      <div class="nav-group" style="margin-top: auto;">
+        <h4>Data</h4>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>
+          Tag Memo
+        </div>
+        <div class="nav-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M4 10h16M10 4v16"/></svg>
+          Diary
+        </div>
+      </div>
+    </nav>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <div class="crumb"><span style="color: var(--ink-4)">Dashboard</span><span class="slash">/</span><b>Logs</b></div>
+      <div class="topbar-right">
+        <div class="theme-toggle" role="tablist" aria-label="Theme">
+          <button data-mode="light" aria-label="Day mode">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+          </button>
+          <button data-mode="dark" aria-label="Night mode">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          </button>
+        </div>
+        <div class="avatar">IA</div>
+      </div>
+    </div>
+
+    <!-- Control bar -->
+    <div class="controls">
+      <div class="stream-pill">
+        <span class="d"></span>
+        <span>Live</span>
+        <span class="rate">· 41.2/s</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
+      </div>
+
+      <div class="control-group">
+        <button class="control-btn">15m</button>
+        <button class="control-btn">1h</button>
+        <button class="control-btn active">24h</button>
+        <button class="control-btn">7d</button>
+        <button class="control-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+          custom
+        </button>
+      </div>
+
+      <div class="select-pill">
+        <span class="lbl">severity</span>
+        <span class="val">all</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+      </div>
+
+      <div class="select-pill">
+        <span class="lbl">subsystem</span>
+        <span class="val">9 selected</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+      </div>
+
+      <div class="search-input">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input type="text" placeholder="filter logs · text, trace_id, regex with /…/" value="ws-tool" />
+        <span class="kbd">⌘F</span>
+      </div>
+
+      <div class="controls-right">
+        <button class="icon-btn" title="Export">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        </button>
+        <button class="icon-btn" title="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Stats strip -->
+    <div class="stats-strip">
+      <span><b>1,842</b> events</span><span class="sep">·</span>
+      <span class="sev ok">1,412 ok</span>
+      <span class="sev info">378 info</span>
+      <span class="sev warn">38 warn</span>
+      <span class="sev err">14 err</span>
+      <span class="sep">·</span>
+      <span>across <b>9</b> subsystems</span><span class="sep">·</span>
+      <span><b>3</b> unique trace_ids in view</span>
+    </div>
+
+    <!-- Log stream + detail -->
+    <div class="log-grid">
+      <div class="log-pane">
+        <div class="log-pane-head">
+          <span>time</span>
+          <span>sev</span>
+          <span>subsystem</span>
+          <span>message</span>
+          <span>dur</span>
+        </div>
+
+        <div class="log-rows">
+          <div class="log-divider">Today · 14:02</div>
+
+          <div class="log-row just-now">
+            <span class="ts">14:02:18.412</span>
+            <span class="sev info">info</span>
+            <span class="sub">channels:telegram</span>
+            <span class="msg">Update <em>9841</em> processed · chat=-100221, user=ivan, 142 tokens</span>
+            <span class="dur">128ms</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:02:17.918</span>
+            <span class="sev ok">ok</span>
+            <span class="sub">hooks</span>
+            <span class="msg"><em>message.preprocessed</em> → 4 subscribers</span>
+            <span class="dur">2.1ms</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:02:15.004</span>
+            <span class="sev info">info</span>
+            <span class="sub">plugin:web_search</span>
+            <span class="msg">Invoked · query=<em>"claude 4.7 release notes"</em>, runtime=stdio</span>
+            <span class="dur">—</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:02:14.601</span>
+            <span class="sev warn">warn</span>
+            <span class="sub">approval</span>
+            <span class="msg">Tool <code>file_write</code> awaiting operator · gateway_held=4.3s</span>
+            <span class="dur">—</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:02:11.327</span>
+            <span class="sev info">info</span>
+            <span class="sub">rag</span>
+            <span class="msg">hybrid_search k=10, epa_boost=on, recall=<em>0.92</em></span>
+            <span class="dur">84ms</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:02:08.004</span>
+            <span class="sev info">info</span>
+            <span class="sub">channels:qq</span>
+            <span class="msg">napcat credential refreshed · exp=+3600s</span>
+            <span class="dur">—</span>
+          </div>
+
+          <div class="log-row selected">
+            <span class="ts">14:02:05.873</span>
+            <span class="sev err">err</span>
+            <span class="sub">plugin:file_fetcher</span>
+            <span class="msg">403 on <code>ws-tool://node-b/read</code> · retry 1/3</span>
+            <span class="dur">612ms</span>
+          </div>
+
+          <div class="log-row">
+            <span class="ts">14:02:04.210</span>
+            <span class="sev ok">ok</span>
+            <span class="sub">gateway</span>
+            <span class="msg">POST <code>/v1/chat/completions</code> · 201 tokens · anthropic</span>
+            <span class="dur">342ms</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:02:02.008</span>
+            <span class="sev info">info</span>
+            <span class="sub">hooks</span>
+            <span class="msg"><em>config.changed</em> · reloaded 3 sections</span>
+            <span class="dur">11ms</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:01:58.412</span>
+            <span class="sev info">info</span>
+            <span class="sub">skills</span>
+            <span class="msg">web_search bound to agent=<em>researcher</em>, allowed_tools=2</span>
+            <span class="dur">—</span>
+          </div>
+
+          <div class="log-divider">Today · 14:01</div>
+
+          <div class="log-row">
+            <span class="ts">14:01:54.201</span>
+            <span class="sev info">info</span>
+            <span class="sub">nodebridge</span>
+            <span class="msg">node-b heartbeat · caps=[camera, file_io] · latency=42ms</span>
+            <span class="dur">—</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:01:50.883</span>
+            <span class="sev ok">ok</span>
+            <span class="sub">scheduler</span>
+            <span class="msg">cron job <em>rag.backfill</em> completed · 318 chunks inserted</span>
+            <span class="dur">14.2s</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:01:45.109</span>
+            <span class="sev info">info</span>
+            <span class="sub">gateway</span>
+            <span class="msg">admin session created · user=ian · ip=192.168.1.8</span>
+            <span class="dur">—</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:01:42.002</span>
+            <span class="sev err">err</span>
+            <span class="sub">plugin:file_fetcher</span>
+            <span class="msg">403 on <code>ws-tool://node-b/read</code> · retry 2/3 · exp backoff 1.2s</span>
+            <span class="dur">604ms</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:01:37.821</span>
+            <span class="sev warn">warn</span>
+            <span class="sub">rate-limit</span>
+            <span class="msg">bucket <em>chat:-100221</em> → throttled · wait 2.1s</span>
+            <span class="dur">—</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:01:29.440</span>
+            <span class="sev info">info</span>
+            <span class="sub">channels:telegram</span>
+            <span class="msg">Update <em>9840</em> processed · chat=-100221, media=voice+128kb</span>
+            <span class="dur">2.4s</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:01:22.103</span>
+            <span class="sev info">info</span>
+            <span class="sub">plugin:tts</span>
+            <span class="msg">Synthesized 312 tokens · voice=nova · anthropic-tts</span>
+            <span class="dur">1.8s</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:01:15.802</span>
+            <span class="sev ok">ok</span>
+            <span class="sub">hooks</span>
+            <span class="msg"><em>message.transcribed</em> → 3 subscribers</span>
+            <span class="dur">1.6ms</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:01:09.312</span>
+            <span class="sev info">info</span>
+            <span class="sub">approval</span>
+            <span class="msg">Tool <code>web_browse</code> approved by <em>ian</em> · runtime=45ms</span>
+            <span class="dur">—</span>
+          </div>
+          <div class="log-row">
+            <span class="ts">14:01:02.108</span>
+            <span class="sev info">info</span>
+            <span class="sub">plugin:web_browse</span>
+            <span class="msg">Invoked · url=<em>github.com/anthropics/claude-code</em></span>
+            <span class="dur">612ms</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ─── Detail drawer ───────── -->
+      <div class="detail-pane">
+        <div class="detail-head">
+          <div class="row">
+            <span class="sev err">error</span>
+            <span class="ts-big">14:02:05.873</span>
+            <span class="ago">2m ago</span>
+          </div>
+          <div class="sub">plugin:file_fetcher</div>
+          <h2>403 on <code>ws-tool://node-b/read</code></h2>
+          <div class="trace-row">
+            trace_id: <span class="trace-id">b0f3c8a9-7e42</span>
+            <button class="copy-btn">copy</button>
+          </div>
+        </div>
+        <div class="detail-body">
+          <div class="detail-section">
+            <div class="detail-section-label">Payload</div>
+<pre class="json"><span class="c">// request</span>
+{
+  <span class="k">"tool"</span>: <span class="s">"__file_fetcher__/read"</span>,
+  <span class="k">"runtime"</span>: <span class="s">"wstool"</span>,
+  <span class="k">"node_id"</span>: <span class="s">"node-b"</span>,
+  <span class="k">"uri"</span>:     <span class="s">"ws-tool://node-b/read"</span>,
+  <span class="k">"args"</span>: {
+    <span class="k">"path"</span>:   <span class="s">"/Users/.../corpus.jsonl"</span>,
+    <span class="k">"chunks"</span>: <span class="n">32</span>
+  }
+}
+
+<span class="c">// response</span>
+{
+  <span class="k">"status"</span>:  <span class="n">403</span>,
+  <span class="k">"error"</span>:   <span class="s">"forbidden"</span>,
+  <span class="k">"detail"</span>:  <span class="s">"node-b denied · no-cap file_io"</span>,
+  <span class="k">"retry_in"</span>: <span class="s">"1.2s"</span>,
+  <span class="k">"retry"</span>:    { <span class="k">"attempt"</span>: <span class="n">1</span>, <span class="k">"of"</span>: <span class="n">3</span> },
+  <span class="k">"ok"</span>:       <span class="b">false</span>
+}</pre>
+          </div>
+
+          <div class="detail-section">
+            <div class="detail-section-label">Related · same trace</div>
+            <div class="related">
+              <div class="related-row">
+                <span class="ts">14:01:42</span>
+                <span class="sev err">err</span>
+                <span>403 on <code>ws-tool://node-b/read</code> · retry 2/3</span>
+              </div>
+              <div class="related-row">
+                <span class="ts">14:01:40</span>
+                <span class="sev err">err</span>
+                <span>403 on <code>ws-tool://node-b/read</code> · retry 3/3</span>
+              </div>
+              <div class="related-row">
+                <span class="ts">14:01:36</span>
+                <span class="sev warn">warn</span>
+                <span>fallback → local cache · stale 8m</span>
+              </div>
+              <div class="related-row">
+                <span class="ts">14:01:22</span>
+                <span class="sev info">info</span>
+                <span>plugin · file_fetcher · invoke start</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="detail-section">
+            <div class="detail-section-label">Likely cause</div>
+            <div style="font-size: 13px; color: var(--ink-2); line-height: 1.55;">
+              <em style="color: var(--amber); font-style: normal; font-weight: 500">node-b</em>'s capability advertisement no longer includes <code style="font-family: 'JetBrains Mono'; font-size: 12px; padding: 1px 5px; background: var(--glass-inner-strong); border-radius: 3px; border: 1px solid var(--glass-edge);">file_io</code>. This typically means the NodeBridge handshake re-registered under a reduced capability set after a reconnect.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+  (function () {
+    const html = document.documentElement;
+    const urlTheme = new URL(location.href).searchParams.get('theme');
+    const stored = localStorage.getItem('corlinman-tidepool-theme');
+    if (urlTheme === 'dark' || urlTheme === 'light') {
+      html.dataset.theme = urlTheme;
+    } else if (stored === 'dark' || stored === 'light') {
+      html.dataset.theme = stored;
+    }
+    document.querySelectorAll('[data-mode]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        html.dataset.theme = btn.dataset.mode;
+        localStorage.setItem('corlinman-tidepool-theme', btn.dataset.mode);
+      });
+    });
+  })();
+</script>
+</body>
+</html>

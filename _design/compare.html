@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>corlinman · Design direction comparison</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #0a0a0b; color: #f4f4f5; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .bar {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 24px; background: rgba(10,10,11,0.92); backdrop-filter: blur(12px);
+    border-bottom: 1px solid #26262a;
+  }
+  .bar h1 { margin: 0; font-size: 14px; font-weight: 500; letter-spacing: 0.02em; }
+  .bar .hint { font-size: 12px; color: #9a9aa3; font-family: ui-monospace, monospace; }
+  .tabs { display: flex; gap: 2px; background: #18181b; border: 1px solid #26262a; border-radius: 8px; padding: 3px; }
+  .tabs button {
+    background: transparent; color: #c4c4ca; border: 0; padding: 6px 14px;
+    border-radius: 5px; font-family: inherit; font-size: 12px; cursor: pointer; font-weight: 500;
+  }
+  .tabs button.active { background: #27272a; color: #fff; }
+  .tabs button.era { color: #71717a; font-style: italic; }
+  .split { display: grid; grid-template-columns: repeat(3, 1fr); min-height: calc(100vh - 140px); }
+  .split iframe { width: 100%; height: calc(100vh - 140px); border: 0; border-left: 1px solid #26262a; display: block; background: white; }
+  .split iframe:first-child { border-left: 0; }
+  .single { min-height: calc(100vh - 57px); }
+  .single iframe { width: 100%; height: calc(100vh - 57px); border: 0; }
+  .caption-row {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    border-top: 1px solid #26262a; background: #0f0f11;
+  }
+  .cap {
+    padding: 14px 20px; border-left: 1px solid #26262a;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .cap:first-child { border-left: 0; }
+  .cap .name { font-weight: 600; font-size: 13px; color: #fff; }
+  .cap .school { font-size: 11px; color: #7c7c86; font-family: ui-monospace, monospace; letter-spacing: 0.04em; }
+  .cap .desc { font-size: 12px; color: #b4b4ba; line-height: 1.45; margin-top: 2px; }
+  .cap .desc b { color: #fff; font-weight: 500; }
+  .hide { display: none !important; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1>corlinman · simple + designful + usable + lively</h1>
+  <div class="tabs" id="tabs">
+    <button data-mode="all" class="active">All three</button>
+    <button data-mode="d">D · Breeze</button>
+    <button data-mode="e">E · Moonlight</button>
+    <button data-mode="f">F · Tidepool</button>
+    <button data-mode="a" class="era">A · v1</button>
+    <button data-mode="b" class="era">B · v1</button>
+    <button data-mode="c" class="era">C · v1</button>
+  </div>
+  <div class="hint">1440w demos · keys 1/2/3 · 0 for all</div>
+</div>
+
+<div class="caption-row" id="captions">
+  <div class="cap">
+    <div class="name">D · Breeze</div>
+    <div class="school">arc / notion calendar · light &amp; playful</div>
+    <div class="desc">Soft paper, coral accent, no card chrome. <b>Active-nav pill slides</b> between items with a trailing echo. Editorial italic hero with a draw-in underline.</div>
+  </div>
+  <div class="cap">
+    <div class="name">E · Moonlight</div>
+    <div class="school">linear 2026 / raycast · dark &amp; sophisticated</div>
+    <div class="desc">Near-black, zero borders. Accent color <b>only</b> appears on hover &amp; active — grayscale at rest. Keyboard shortcuts (G D, G L, …) visible on every nav.</div>
+  </div>
+  <div class="cap">
+    <div class="name">F · Tidepool</div>
+    <div class="school">apple liquid glass · translucent &amp; lively</div>
+    <div class="desc">Dusk gradient with aurora radials. Panels are <b>translucent glass</b> with backdrop-blur. Aqua→lilac gradient type on the hero verb.</div>
+  </div>
+</div>
+
+<div class="split" id="split">
+  <iframe src="direction-d-breeze.html"></iframe>
+  <iframe src="direction-e-moonlight.html"></iframe>
+  <iframe src="direction-f-tidepool.html"></iframe>
+</div>
+
+<div class="single hide" id="single"><iframe id="single-frame"></iframe></div>
+
+<script>
+  const srcMap = {
+    d: 'direction-d-breeze.html',
+    e: 'direction-e-moonlight.html',
+    f: 'direction-f-tidepool.html',
+    a: 'direction-a-linear120.html',
+    b: 'direction-b-control-room.html',
+    c: 'direction-c-field-notebook.html',
+  };
+  const tabs = document.getElementById('tabs');
+  const split = document.getElementById('split');
+  const captions = document.getElementById('captions');
+  const single = document.getElementById('single');
+  const singleFrame = document.getElementById('single-frame');
+
+  function setMode(mode) {
+    for (const b of tabs.querySelectorAll('button')) {
+      b.classList.toggle('active', b.dataset.mode === mode);
+    }
+    if (mode === 'all') {
+      split.classList.remove('hide');
+      single.classList.add('hide');
+      captions.classList.remove('hide');
+    } else {
+      split.classList.add('hide');
+      single.classList.remove('hide');
+      captions.classList.add('hide');
+      singleFrame.src = srcMap[mode];
+    }
+  }
+  tabs.addEventListener('click', (e) => {
+    if (e.target.tagName === 'BUTTON') setMode(e.target.dataset.mode);
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === '1') setMode('d');
+    else if (e.key === '2') setMode('e');
+    else if (e.key === '3') setMode('f');
+    else if (e.key === '0') setMode('all');
+  });
+</script>
+</body>
+</html>

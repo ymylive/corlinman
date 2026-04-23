@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>corlinman · D &amp; F · day/night</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #0a0a0b; color: #f4f4f5; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .bar {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 22px; background: rgba(10,10,11,0.92); backdrop-filter: blur(12px);
+    border-bottom: 1px solid #26262a;
+  }
+  .bar h1 { margin: 0; font-size: 13px; font-weight: 500; }
+  .bar .hint { font-size: 11px; color: #7c7c86; font-family: ui-monospace, monospace; }
+
+  .grid {
+    display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr auto 1fr;
+    height: calc(100vh - 48px);
+  }
+  .cell-label {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 20px; background: #0f0f11; border-bottom: 1px solid #26262a; border-right: 1px solid #26262a;
+    font-size: 12px; font-weight: 500;
+  }
+  .cell-label:nth-last-child(-n+1), .cell-label.last-col { border-right: 0; }
+  .cell-label .name { color: #fff; }
+  .cell-label .tag {
+    font-family: ui-monospace, monospace; font-size: 10.5px;
+    padding: 2px 9px; border-radius: 999px;
+    letter-spacing: 0.04em; color: #d4d4d8; background: #27272a;
+  }
+  .cell-label .tag.day { background: #fef3c7; color: #92400e; }
+  .cell-label .tag.night { background: #1e293b; color: #a5b4fc; border: 1px solid #334155; }
+  iframe {
+    width: 100%; height: 100%; border: 0;
+    border-right: 1px solid #26262a;
+    background: white; display: block;
+  }
+  iframe.last-col { border-right: 0; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1>corlinman · D (Breeze) &amp; F (Tidepool) · day/night toggle study</h1>
+  <div class="hint">each cell has its own day/night toggle in the topbar</div>
+</div>
+
+<div class="grid">
+  <div class="cell-label"><span class="name">D · Breeze</span><span class="tag day">Day</span></div>
+  <div class="cell-label last-col"><span class="name">D · Breeze</span><span class="tag night">Night</span></div>
+
+  <iframe src="direction-d-breeze.html?theme=light"></iframe>
+  <iframe class="last-col" src="direction-d-breeze.html?theme=dark"></iframe>
+
+  <div class="cell-label"><span class="name">F · Tidepool</span><span class="tag day">Day</span></div>
+  <div class="cell-label last-col"><span class="name">F · Tidepool</span><span class="tag night">Night</span></div>
+
+  <iframe src="direction-f-tidepool.html?theme=light"></iframe>
+  <iframe class="last-col" src="direction-f-tidepool.html?theme=dark"></iframe>
+</div>
+</body>
+</html>

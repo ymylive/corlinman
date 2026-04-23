@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1440" />
+<title>corlinman · Direction B — Control Room</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Identity: Tektronix scope meets Linear. Near-black, phosphor cyan, single-accent discipline. */
+    --bg:        oklch(0.115 0.008 230);
+    --bg-2:      oklch(0.14 0.01 230);
+    --panel:     oklch(0.155 0.01 230);
+    --panel-2:   oklch(0.185 0.012 230);
+    --border:    oklch(0.26 0.012 220);
+    --border-2:  oklch(0.38 0.03 200);
+    --ink:       oklch(0.95 0.01 200);
+    --ink-2:     oklch(0.75 0.02 200);
+    --ink-3:     oklch(0.50 0.015 220);
+    --phosphor:  oklch(0.88 0.17 190);              /* #4FF8E0 region, phosphor cyan */
+    --phosphor-glow: oklch(0.88 0.17 190 / 0.45);
+    --amber:     oklch(0.82 0.17 82);
+    --ok:        oklch(0.84 0.16 155);
+    --warn:      oklch(0.82 0.17 82);
+    --err:       oklch(0.72 0.22 25);
+
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 13px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    /* Subtle scanline — very low opacity so it never competes */
+    background-image:
+      repeating-linear-gradient(
+        0deg,
+        transparent 0px,
+        transparent 3px,
+        oklch(0.95 0 0 / 0.015) 3px,
+        oklch(0.95 0 0 / 0.015) 4px
+      );
+  }
+
+  .app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+
+  /* ─── Sidebar ─────────────────────────────────────────── */
+  aside {
+    border-right: 1px solid var(--border);
+    padding: 14px; display: flex; flex-direction: column; gap: 24px;
+    background: color-mix(in oklch, var(--bg-2) 60%, transparent);
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    padding: 4px 2px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .brand-mark { width: 30px; height: 30px; }
+  .brand-name {
+    font-weight: 600; font-size: 13px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--ink);
+  }
+  .brand-ver { font-size: 9.5px; color: var(--phosphor); letter-spacing: 0.1em; text-transform: uppercase; }
+  .brand-ver::before { content: "// "; color: var(--ink-3); }
+
+  .nav-group { display: flex; flex-direction: column; gap: 2px; }
+  .nav-group h4 {
+    margin: 0 0 4px; padding: 2px 6px;
+    font-size: 9.5px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 500;
+  }
+  .nav-group h4::before { content: "[ "; }
+  .nav-group h4::after  { content: " ]"; }
+  .nav { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 2px; color: var(--ink-2); font-size: 12px; cursor: pointer; border-left: 2px solid transparent; }
+  .nav:hover { background: var(--panel); color: var(--ink); border-left-color: var(--border-2); }
+  .nav.active {
+    background: color-mix(in oklch, var(--phosphor) 10%, var(--panel));
+    color: var(--phosphor);
+    border-left-color: var(--phosphor);
+    text-shadow: 0 0 8px color-mix(in oklch, var(--phosphor) 50%, transparent);
+  }
+  .nav-key { color: var(--ink-3); font-size: 10px; margin-left: auto; }
+
+  /* ─── Main ─────────────────────────────────────────────── */
+  main { display: flex; flex-direction: column; min-width: 0; }
+
+  .header {
+    display: grid; grid-template-columns: auto 1fr auto;
+    align-items: center; gap: 24px;
+    padding: 12px 24px; border-bottom: 1px solid var(--border);
+  }
+  .header .path { color: var(--ink-3); font-size: 11px; letter-spacing: 0.05em; }
+  .header .path b { color: var(--phosphor); font-weight: 500; }
+  .header .live-meta { display: flex; gap: 16px; justify-content: flex-end; font-size: 10.5px; }
+  .header .live-meta span { color: var(--ink-3); }
+  .header .live-meta b { color: var(--ink); font-weight: 500; margin-left: 4px; }
+  .header .live-meta .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--ok);
+    display: inline-block; margin-right: 6px;
+    box-shadow: 0 0 8px color-mix(in oklch, var(--ok) 70%, transparent);
+  }
+
+  /* ─── Oscilloscope hero (SIGNATURE DETAIL) ──────────────── */
+  .scope {
+    position: relative; height: 200px; margin: 16px 24px 0;
+    border: 1px solid var(--border); background:
+      radial-gradient(400px 150px at 20% 50%, color-mix(in oklch, var(--phosphor) 8%, transparent), transparent 70%),
+      var(--panel);
+    overflow: hidden;
+  }
+  .scope-grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(to right, color-mix(in oklch, var(--phosphor) 8%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklch, var(--phosphor) 8%, transparent) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .scope-label {
+    position: absolute; top: 10px; left: 14px;
+    font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .scope-label b { color: var(--phosphor); font-weight: 500; }
+  .scope-header {
+    position: absolute; top: 10px; right: 14px;
+    display: flex; gap: 18px; font-size: 10.5px;
+  }
+  .scope-header .m { color: var(--ink-3); }
+  .scope-header .m b { color: var(--ink); font-weight: 500; }
+
+  /* Three superimposed traces: requests, hooks, tokens */
+  .scope svg.trace { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .trace-1 { stroke: var(--phosphor); filter: drop-shadow(0 0 4px var(--phosphor-glow)); }
+  .trace-2 { stroke: var(--amber); opacity: 0.8; }
+  .trace-3 { stroke: oklch(0.75 0.16 320); opacity: 0.6; }
+  .scope-legend {
+    position: absolute; bottom: 10px; left: 14px;
+    display: flex; gap: 16px; font-size: 10.5px;
+  }
+  .lg { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
+  .lg::before { content: ''; width: 14px; height: 2px; }
+  .lg.l1::before { background: var(--phosphor); box-shadow: 0 0 6px var(--phosphor-glow); }
+  .lg.l2::before { background: var(--amber); }
+  .lg.l3::before { background: oklch(0.75 0.16 320); }
+  .scope-readout {
+    position: absolute; bottom: 10px; right: 14px;
+    font-size: 10.5px; color: var(--ink-3); letter-spacing: 0.04em;
+  }
+  .scope-readout b { color: var(--phosphor); text-shadow: 0 0 8px var(--phosphor-glow); }
+
+  /* ─── Content ──────────────────────────────────────────── */
+  .content { padding: 16px 24px 24px; display: flex; flex-direction: column; gap: 16px; }
+
+  /* Instruments row (stat cards) */
+  .instruments { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .inst {
+    border: 1px solid var(--border); background: var(--panel);
+    padding: 14px; position: relative;
+    display: flex; flex-direction: column; gap: 10px;
+    min-height: 150px;
+  }
+  .inst::before, .inst::after {
+    content: ''; position: absolute; width: 8px; height: 8px;
+    border: 1px solid var(--border-2);
+  }
+  .inst::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
+  .inst::after  { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
+  .inst-label {
+    font-size: 9.5px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .inst-value {
+    display: flex; align-items: baseline; gap: 10px;
+    font-size: 28px; font-weight: 500; letter-spacing: -0.02em;
+    color: var(--phosphor);
+    text-shadow: 0 0 12px color-mix(in oklch, var(--phosphor) 30%, transparent);
+    font-variant-numeric: tabular-nums;
+  }
+  .inst-value .unit { font-size: 12px; color: var(--ink-3); text-shadow: none; font-weight: 400; }
+  .inst-meter { height: 4px; background: var(--bg-2); position: relative; }
+  .inst-meter > span {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    background: var(--phosphor);
+    box-shadow: 0 0 8px var(--phosphor-glow);
+  }
+  .inst-foot { display: flex; justify-content: space-between; font-size: 10px; color: var(--ink-3); }
+  .inst-foot .delta { color: var(--ok); }
+  .inst-foot .delta.down { color: var(--err); }
+
+  /* Gauge variant */
+  .gauge { display: flex; align-items: center; gap: 14px; }
+  .gauge svg { width: 64px; height: 64px; }
+  .gauge .ring-bg { stroke: var(--bg-2); }
+  .gauge .ring-fg { stroke: var(--phosphor); filter: drop-shadow(0 0 3px var(--phosphor-glow)); transform: rotate(-90deg); transform-origin: center; }
+  .gauge text { text-anchor: middle; fill: var(--ink); font-family: var(--font-mono); }
+
+  /* ─── Main grid ────────────────────────────────────────── */
+  .main-grid { display: grid; grid-template-columns: 1.45fr 1fr; gap: 14px; }
+  .card {
+    border: 1px solid var(--border); background: var(--panel);
+    position: relative;
+  }
+  .card::before, .card::after {
+    content: ''; position: absolute; width: 10px; height: 10px;
+    border: 1px solid var(--border-2);
+  }
+  .card::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
+  .card::after  { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
+
+  .card-head {
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-2);
+  }
+  .card-head .live { color: var(--phosphor); font-size: 10.5px; letter-spacing: 0.18em; }
+  .card-head .live::before { content: '●'; margin-right: 6px; text-shadow: 0 0 6px var(--phosphor-glow); }
+
+  .log-rows { max-height: 380px; overflow: auto; }
+  .log {
+    display: grid; grid-template-columns: 68px 42px 130px 1fr;
+    gap: 10px; padding: 6px 14px; font-size: 11px;
+    border-bottom: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+  }
+  .log:hover { background: var(--panel-2); }
+  .log .ts { color: var(--ink-3); }
+  .log .lv {
+    display: inline-block; padding: 0 5px; font-size: 9.5px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase;
+  }
+  .log .lv.info { color: var(--phosphor); }
+  .log .lv.warn { color: var(--amber); }
+  .log .lv.err  { color: var(--err); }
+  .log .lv.ok   { color: var(--ok); }
+  .log .sub { color: var(--ink-2); }
+  .log .msg { color: var(--ink); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+  .health-body { padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+  .hrow { display: flex; justify-content: space-between; font-size: 11px; padding: 4px 2px; border-bottom: 1px dashed color-mix(in oklch, var(--border) 80%, transparent); }
+  .hrow .n { color: var(--ink); }
+  .hrow .n::before { content: '▸ '; color: var(--phosphor); text-shadow: 0 0 4px var(--phosphor-glow); }
+  .hrow .d { color: var(--ink-3); }
+  .hrow.bad .n::before { content: '! '; color: var(--err); }
+
+  .bar-chart { display: flex; flex-direction: column; gap: 8px; padding: 4px; }
+  .bar { display: grid; grid-template-columns: 70px 1fr 36px; gap: 8px; align-items: center; font-size: 10.5px; }
+  .bar .lab { color: var(--ink-2); }
+  .bar .tr { height: 6px; background: var(--bg-2); position: relative; }
+  .bar .tr > span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--phosphor); box-shadow: 0 0 6px var(--phosphor-glow); }
+  .bar .val { text-align: right; color: var(--phosphor); font-variant-numeric: tabular-nums; }
+
+  /* Subtle sweep across the scope to suggest live */
+  .sweep {
+    position: absolute; inset: 0;
+    background: linear-gradient(90deg,
+      transparent 0%,
+      color-mix(in oklch, var(--phosphor) 6%, transparent) 50%,
+      transparent 100%);
+    animation: sweep 6s linear infinite;
+    pointer-events: none;
+  }
+  @keyframes sweep {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- Sidebar -->
+  <aside>
+    <div class="brand">
+      <!-- Brand mark: oscilloscope glyph. A phosphor circle pierced by a trace. -->
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden>
+        <rect x="2" y="2" width="28" height="28" rx="2" fill="oklch(0.14 0.01 230)" stroke="oklch(0.38 0.03 200)"/>
+        <circle cx="16" cy="16" r="9" fill="none" stroke="oklch(0.88 0.17 190)" stroke-width="1.2" opacity="0.4"/>
+        <path d="M4 16 L10 16 L12 10 L14 22 L17 12 L20 20 L22 16 L28 16" fill="none" stroke="oklch(0.88 0.17 190)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>
+      <div>
+        <div class="brand-name">Corlinman</div>
+        <div class="brand-ver">v0.3.0 / batch 1—5</div>
+      </div>
+    </div>
+
+    <div class="nav-group">
+      <h4>overview</h4>
+      <div class="nav active">dashboard<span class="nav-key">⌘1</span></div>
+      <div class="nav">logs<span class="nav-key">⌘2</span></div>
+      <div class="nav">hooks<span class="nav-key">⌘3</span></div>
+    </div>
+
+    <div class="nav-group">
+      <h4>agents</h4>
+      <div class="nav">plugins</div>
+      <div class="nav">skills</div>
+      <div class="nav">characters</div>
+      <div class="nav">approvals</div>
+      <div class="nav">scheduler</div>
+    </div>
+
+    <div class="nav-group">
+      <h4>protocols</h4>
+      <div class="nav">playground</div>
+      <div class="nav">nodes</div>
+      <div class="nav">canvas</div>
+    </div>
+
+    <div class="nav-group">
+      <h4>data</h4>
+      <div class="nav">tag memo</div>
+      <div class="nav">diary</div>
+    </div>
+
+    <div class="nav-group" style="margin-top: auto;">
+      <h4>system</h4>
+      <div class="nav">channels</div>
+      <div class="nav">config</div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main>
+    <div class="header">
+      <div class="path">[ <b>dashboard</b> ]</div>
+      <div class="live-meta">
+        <span><span class="dot"></span>gateway <b>nominal</b></span>
+        <span>uptime <b>11d 04:17</b></span>
+        <span>rps <b>41.2</b></span>
+        <span>tokens/s <b>48.3</b></span>
+        <span>mem <b>214 MiB</b></span>
+      </div>
+      <div style="font-size: 10.5px; color: var(--ink-3); letter-spacing: 0.08em;">2026-04-23 · 14:02:18 UTC</div>
+    </div>
+
+    <!-- SIGNATURE: Oscilloscope -->
+    <section class="scope">
+      <div class="scope-grid"></div>
+      <div class="sweep"></div>
+      <div class="scope-label">SCOPE · <b>event bus</b> · last 12s · 1000 hz</div>
+      <div class="scope-header">
+        <span class="m">ch 1 <b>requests</b></span>
+        <span class="m">ch 2 <b>hook emits</b></span>
+        <span class="m">ch 3 <b>tokens/s</b></span>
+      </div>
+
+      <!-- Three overlapping traces. Hand-built paths that feel like real telemetry. -->
+      <svg class="trace" viewBox="0 0 1000 200" preserveAspectRatio="none">
+        <path class="trace-1" fill="none" stroke-width="1.6"
+          d="M0 120 L40 118 L60 110 L80 112 L110 105 L140 95 L150 60 L155 110 L180 114 L210 108 L240 80 L245 140 L260 110 L290 105 L320 98 L350 92 L360 60 L370 100 L400 105 L440 102 L470 95 L500 82 L530 88 L560 70 L590 75 L620 62 L650 70 L680 55 L710 62 L740 45 L770 52 L800 38 L830 48 L860 30 L890 42 L920 28 L950 38 L980 22 L1000 30"/>
+        <path class="trace-2" fill="none" stroke-width="1.2"
+          d="M0 150 L50 148 L100 145 L150 142 L200 138 L250 140 L300 132 L350 130 L400 125 L450 118 L500 122 L550 115 L600 108 L650 112 L700 102 L750 98 L800 90 L850 92 L900 85 L950 78 L1000 80"/>
+        <path class="trace-3" fill="none" stroke-width="1.0"
+          d="M0 172 L80 168 L160 170 L240 160 L320 162 L400 155 L480 158 L560 148 L640 150 L720 140 L800 142 L880 130 L960 134 L1000 128"/>
+      </svg>
+
+      <div class="scope-legend">
+        <span class="lg l1">requests · 41.2 rps</span>
+        <span class="lg l2">hooks · 12.8k / 24h</span>
+        <span class="lg l3">tokens · 4.12M / 24h</span>
+      </div>
+      <div class="scope-readout">Δ p50 <b>124 ms</b> &nbsp; Δ p95 <b>612 ms</b> &nbsp; trig <b>rising</b></div>
+    </section>
+
+    <div class="content">
+      <!-- Instruments -->
+      <section class="instruments">
+        <div class="inst">
+          <div class="inst-label">plugins [loaded / total]</div>
+          <div class="inst-value">21<span class="unit">/ 23</span></div>
+          <div class="inst-meter"><span style="width: 91%"></span></div>
+          <div class="inst-foot"><span>sandbox · 2</span><span class="delta">Δ +2 / 7d</span></div>
+        </div>
+        <div class="inst">
+          <div class="inst-label">agents [active]</div>
+          <div class="gauge">
+            <svg viewBox="0 0 64 64">
+              <circle class="ring-bg" cx="32" cy="32" r="26" stroke-width="4" fill="none"/>
+              <circle class="ring-fg" cx="32" cy="32" r="26" stroke-width="4" fill="none"
+                      stroke-dasharray="163" stroke-dashoffset="23" stroke-linecap="round"/>
+              <text x="32" y="35" font-size="17" font-weight="500" fill="var(--phosphor)">7</text>
+            </svg>
+            <div style="display:flex;flex-direction:column;gap:4px;font-size:10px;color:var(--ink-3)">
+              <div>mentor · editor</div>
+              <div>researcher +4</div>
+            </div>
+          </div>
+          <div class="inst-foot"><span>all nominal</span><span class="delta">Δ 0 / 7d</span></div>
+        </div>
+        <div class="inst">
+          <div class="inst-label">rag chunks</div>
+          <div class="inst-value">84,291</div>
+          <div class="inst-meter"><span style="width: 64%"></span></div>
+          <div class="inst-foot"><span>1.2k files · schema v6</span><span class="delta">Δ +412 / 24h</span></div>
+        </div>
+        <div class="inst">
+          <div class="inst-label">hooks [dispatched / 24h]</div>
+          <div class="inst-value">12,840</div>
+          <div class="inst-meter"><span style="width: 76%"></span></div>
+          <div class="inst-foot"><span>8 subs · 0 dropped</span><span class="delta">Δ +18.4% / 24h</span></div>
+        </div>
+      </section>
+
+      <!-- Grid -->
+      <section class="main-grid">
+        <div class="card">
+          <div class="card-head">
+            event_stream · /admin/logs/stream
+            <span class="live">live · 0 ms lag</span>
+          </div>
+          <div class="log-rows">
+            <div class="log"><span class="ts">14:02:18</span><span class="lv info">info</span><span class="sub">channels:telegram</span><span class="msg">update 9841 processed · chat=−100221, user=ivan, 142 tokens</span></div>
+            <div class="log"><span class="ts">14:02:17</span><span class="lv ok">ok</span><span class="sub">hooks</span><span class="msg">message.preprocessed → 4 subs · 2.1 ms</span></div>
+            <div class="log"><span class="ts">14:02:15</span><span class="lv info">info</span><span class="sub">plugin:web_search</span><span class="msg">invoke · query="claude 4.7 release notes" · stdio</span></div>
+            <div class="log"><span class="ts">14:02:14</span><span class="lv warn">warn</span><span class="sub">approval</span><span class="msg">file_write held · gateway=4.3s · decider=?</span></div>
+            <div class="log"><span class="ts">14:02:11</span><span class="lv info">info</span><span class="sub">rag</span><span class="msg">hybrid k=10 · epa_boost=on · recall=0.92</span></div>
+            <div class="log"><span class="ts">14:02:08</span><span class="lv info">info</span><span class="sub">channels:qq</span><span class="msg">napcat credential refreshed · exp=+3600s</span></div>
+            <div class="log"><span class="ts">14:02:05</span><span class="lv err">err</span><span class="sub">plugin:file_fetcher</span><span class="msg">403 · ws-tool://node-b/read · retry 1/3</span></div>
+            <div class="log"><span class="ts">14:02:04</span><span class="lv ok">ok</span><span class="sub">gateway</span><span class="msg">POST /v1/chat/completions · 342 ms · 201 tok · anthropic</span></div>
+            <div class="log"><span class="ts">14:02:02</span><span class="lv info">info</span><span class="sub">hooks</span><span class="msg">config.changed · 3 sections reconciled</span></div>
+            <div class="log"><span class="ts">14:01:58</span><span class="lv info">info</span><span class="sub">skills</span><span class="msg">web_search → agent=researcher · allowed=2</span></div>
+            <div class="log"><span class="ts">14:01:54</span><span class="lv info">info</span><span class="sub">nodebridge</span><span class="msg">node-b heartbeat · caps=[camera, file]</span></div>
+            <div class="log"><span class="ts">14:01:50</span><span class="lv ok">ok</span><span class="sub">scheduler</span><span class="msg">cron job rag.backfill completed · 318 chunks</span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">health matrix <span class="live">all nominal</span></div>
+          <div class="health-body">
+            <div class="bar-chart">
+              <div class="bar"><span class="lab">gateway</span><span class="tr"><span style="width:99%"></span></span><span class="val">99.98</span></div>
+              <div class="bar"><span class="lab">provider</span><span class="tr"><span style="width:96%"></span></span><span class="val">184ms</span></div>
+              <div class="bar"><span class="lab">rag-store</span><span class="tr"><span style="width:94%"></span></span><span class="val">v6 ok</span></div>
+              <div class="bar"><span class="lab">plugin-rt</span><span class="tr"><span style="width:91%"></span></span><span class="val">21/23</span></div>
+              <div class="bar"><span class="lab">scheduler</span><span class="tr"><span style="width:88%"></span></span><span class="val">ok</span></div>
+              <div class="bar"><span class="lab">approvals</span><span class="tr"><span style="width:82%"></span></span><span class="val">1 q</span></div>
+              <div class="bar"><span class="lab">qq / napcat</span><span class="tr"><span style="width:79%"></span></span><span class="val">ok</span></div>
+            </div>
+            <div style="border-top: 1px dashed var(--border); padding-top: 10px; font-size: 10.5px; letter-spacing: 0.1em; color: var(--ink-3); text-transform: uppercase;">load · last sample</div>
+            <div class="hrow"><span class="n">cpu</span><span class="d">21.4% · 8 cores</span></div>
+            <div class="hrow"><span class="n">mem</span><span class="d">214 MiB / 4 GiB</span></div>
+            <div class="hrow"><span class="n">fd</span><span class="d">132 / 4096</span></div>
+            <div class="hrow"><span class="n">hook q</span><span class="d">0 / 64</span></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+</body>
+</html>
