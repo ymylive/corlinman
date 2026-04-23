@@ -1105,6 +1105,37 @@ export const zhCN = {
       modelPickerLabel: "选择模型",
     },
   },
+
+  tagmemo: {
+    tp: {
+      heroTitle: "Tag Memo",
+      heroLead: "{{n}} 个 chunk · 平均熵 {{entropy}} · 平均 logic_depth {{depth}}",
+      heroSub:
+        "EPA 投影 · logic depth · 残差金字塔 —— corlinman-tagmemo 的逐 chunk 遥测。悬停任一标记，另外两个面板会同步高亮对应 chunk。",
+      statChunks: "chunks",
+      statAvgEntropy: "avg entropy",
+      statAvgLogicDepth: "avg logic_depth",
+      statUniqueAxes: "unique axes",
+      statChunksFoot: "来自 corlinman-tagmemo 的采样批次",
+      statAvgEntropyFoot: "Shannon H，按 log(K) 归一化",
+      statAvgLogicDepthFoot: "logic_depth 在 [0, 1] 的均值",
+      statUniqueAxesFoot: "dominant axes 去重数",
+      panelScatterTitle: "EPA 3 轴散点",
+      panelScatterMeta: "proj[0] × proj[1] · 深度映射到色相，能量映射到半径",
+      panelDualLineTitle: "熵 · logic_depth",
+      panelDualLineMeta: "双折线 · 首屏 1.2s 描入",
+      panelPyramidTitle: "残差金字塔",
+      panelPyramidMeta: "每行一个 chunk · 金字塔层逐段堆叠",
+      legendDepth: "logic_depth",
+      legendEntropy: "entropy",
+      legendLogicDepth: "logic_depth",
+      a11yTableSummary: "Tag memo 数据表（辅助功能回退）",
+      a11yColChunk: "chunk_id",
+      a11yColEntropy: "entropy",
+      a11yColLogicDepth: "logic_depth",
+      a11yColTopAxis: "top axis",
+    },
+  },
 };
 
 /**

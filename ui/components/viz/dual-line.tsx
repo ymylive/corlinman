@@ -1,11 +1,11 @@
 /**
- * Entropy / logic_depth dual-line chart (B5-FE1).
+ * Entropy / logic_depth dual-line chart — Tidepool (Phase 5e) retoken.
  *
- * Two lines drawn with `@visx/shape LinePath`: entropy (red-ish `--err`) and
- * logic_depth (green `--ok`). Both share a 0..1 y-axis. On mount each path
+ * Two lines drawn with `@visx/shape LinePath`: entropy (amber) and
+ * logic_depth (ember, dashed). Both share a 0..1 y-axis. On mount each path
  * animates its `pathLength` from 0 → 1 over 1200 ms; `prefers-reduced-motion`
- * snaps to 1 instantly. Hover draws a vertical guideline and shows a
- * tooltip with both values.
+ * snaps to 1 instantly. Hover draws a vertical guideline and shows a warm
+ * glass tooltip with both values.
  */
 "use client";
 
@@ -39,7 +39,7 @@ interface TipData {
   chunk: TagMemoChunk;
 }
 
-const MARGIN = { top: 12, right: 16, bottom: 32, left: 40 };
+const MARGIN = { top: 14, right: 18, bottom: 32, left: 40 };
 
 export function DualLine({ chunks, className }: DualLineProps) {
   return (
@@ -92,6 +92,8 @@ function DualLineInner({ chunks, width, height }: InnerProps) {
     scroll: true,
   });
 
+  // pathLength animation — the existing test gates this on `reduced` so the
+  // path's `d` attr is rendered immediately rather than drawn in.
   const lineAnim = reduced
     ? { initial: { pathLength: 1 }, animate: { pathLength: 1 } }
     : {
@@ -126,6 +128,11 @@ function DualLineInner({ chunks, width, height }: InnerProps) {
     return chunks.findIndex((c) => c.chunk_id === hoveredId);
   }, [hoveredId, chunks]);
 
+  // Quiet hairlines: the panel already reads as the figure frame; the axes
+  // fade into ink-4 so the warm strokes dominate the composition.
+  const axisStroke = "var(--tp-glass-edge)";
+  const tickLabelFill = "var(--tp-ink-3)";
+
   return (
     <div ref={containerRef} className="relative h-full w-full">
       <svg
@@ -139,10 +146,10 @@ function DualLineInner({ chunks, width, height }: InnerProps) {
             top={innerH}
             scale={xScale}
             numTicks={6}
-            stroke="hsl(var(--border))"
-            tickStroke="hsl(var(--border))"
+            stroke={axisStroke}
+            tickStroke={axisStroke}
             tickLabelProps={{
-              fill: "hsl(var(--muted-foreground))",
+              fill: tickLabelFill,
               fontSize: 10,
               textAnchor: "middle",
             }}
@@ -150,10 +157,10 @@ function DualLineInner({ chunks, width, height }: InnerProps) {
           <AxisLeft
             scale={yScale}
             numTicks={5}
-            stroke="hsl(var(--border))"
-            tickStroke="hsl(var(--border))"
+            stroke={axisStroke}
+            tickStroke={axisStroke}
             tickLabelProps={{
-              fill: "hsl(var(--muted-foreground))",
+              fill: tickLabelFill,
               fontSize: 10,
               textAnchor: "end",
               dx: -4,
@@ -172,9 +179,14 @@ function DualLineInner({ chunks, width, height }: InnerProps) {
                 <motion.path
                   d={d}
                   fill="none"
-                  stroke="hsl(var(--err))"
-                  strokeWidth={1.5}
+                  stroke="var(--tp-amber)"
+                  strokeWidth={1.75}
                   strokeLinecap="round"
+                  strokeLinejoin="round"
+                  style={{
+                    filter:
+                      "drop-shadow(0 0 4px color-mix(in oklch, var(--tp-amber) 30%, transparent))",
+                  }}
                   {...lineAnim}
                   data-testid="line-entropy"
                 />
@@ -192,10 +204,11 @@ function DualLineInner({ chunks, width, height }: InnerProps) {
                 <motion.path
                   d={d}
                   fill="none"
-                  stroke="hsl(var(--ok))"
-                  strokeWidth={1.5}
+                  stroke="var(--tp-ember)"
+                  strokeWidth={1.75}
                   strokeDasharray="4 3"
                   strokeLinecap="round"
+                  strokeLinejoin="round"
                   {...lineAnim}
                   data-testid="line-logic-depth"
                 />
@@ -209,9 +222,9 @@ function DualLineInner({ chunks, width, height }: InnerProps) {
               x2={xScale(hoveredIdx)}
               y1={0}
               y2={innerH}
-              stroke="hsl(var(--foreground))"
+              stroke="var(--tp-amber)"
+              strokeOpacity={0.45}
               strokeDasharray="3 3"
-              strokeOpacity={0.5}
             />
           ) : null}
 
@@ -227,11 +240,20 @@ function DualLineInner({ chunks, width, height }: InnerProps) {
           />
         </g>
 
-        {/* Legend — pair colour with a dash pattern so the chart is readable
-            under deuteranopia (both lines are distinguishable by stroke). */}
+        {/* Legend — amber solid = entropy; ember dashed = logic_depth. The
+            dash pattern keeps the two lines distinguishable under monochrome
+            or deuteranopic viewing. */}
         <g transform={`translate(${MARGIN.left + 4}, ${MARGIN.top + 4})`}>
-          <line x1={0} x2={18} y1={4} y2={4} stroke="hsl(var(--err))" strokeWidth={1.5} />
-          <text x={22} y={7} fontSize={10} fill="hsl(var(--muted-foreground))">
+          <line
+            x1={0}
+            x2={18}
+            y1={4}
+            y2={4}
+            stroke="var(--tp-amber)"
+            strokeWidth={1.75}
+            strokeLinecap="round"
+          />
+          <text x={22} y={7} fontSize={10} fill="var(--tp-ink-3)">
             entropy
           </text>
           <line
@@ -239,11 +261,12 @@ function DualLineInner({ chunks, width, height }: InnerProps) {
             x2={98}
             y1={4}
             y2={4}
-            stroke="hsl(var(--ok))"
-            strokeWidth={1.5}
+            stroke="var(--tp-ember)"
+            strokeWidth={1.75}
             strokeDasharray="4 3"
+            strokeLinecap="round"
           />
-          <text x={102} y={7} fontSize={10} fill="hsl(var(--muted-foreground))">
+          <text x={102} y={7} fontSize={10} fill="var(--tp-ink-3)">
             logic_depth
           </text>
         </g>
@@ -254,19 +277,35 @@ function DualLineInner({ chunks, width, height }: InnerProps) {
           left={tooltipLeft}
           style={{
             ...defaultStyles,
-            background: "hsl(var(--popover))",
-            color: "hsl(var(--popover-foreground))",
-            border: "1px solid hsl(var(--border))",
+            background: "var(--tp-glass-2)",
+            color: "var(--tp-ink)",
+            border: "1px solid var(--tp-glass-edge)",
+            borderRadius: 8,
+            backdropFilter: "blur(12px) saturate(1.5)",
+            WebkitBackdropFilter: "blur(12px) saturate(1.5)",
+            boxShadow: "var(--tp-shadow-panel)",
             fontSize: 11,
             padding: "6px 8px",
           }}
         >
           <div className="font-mono text-[11px] leading-4">
-            <div className="font-semibold">
+            <div className="font-semibold text-tp-ink">
               chunk #{tooltipData.chunk.chunk_id}
             </div>
-            <div>entropy: {tooltipData.chunk.entropy.toFixed(3)}</div>
-            <div>
+            <div className="flex items-center gap-1.5 text-tp-ink-2">
+              <span
+                aria-hidden
+                className="inline-block h-2 w-2 rounded-full"
+                style={{ background: "var(--tp-amber)" }}
+              />
+              entropy: {tooltipData.chunk.entropy.toFixed(3)}
+            </div>
+            <div className="flex items-center gap-1.5 text-tp-ink-2">
+              <span
+                aria-hidden
+                className="inline-block h-2 w-2 rounded-full"
+                style={{ background: "var(--tp-ember)" }}
+              />
               logic_depth: {tooltipData.chunk.logic_depth.toFixed(3)}
             </div>
           </div>
