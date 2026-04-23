@@ -39,10 +39,15 @@ export function SchedulerOfflineBlock({ message }: { message?: string }) {
     ?.split(/\r?\n/)
     .find((ln) => ln.trim().length > 0)
     ?.trim();
+  // Raw HTML dumps (the gateway returning a 404 page) add no signal and
+  // look broken. Suppress them outright; keep plain-text diagnostics.
+  const isHtmlDump = firstLine?.startsWith("<");
   const short =
-    firstLine && firstLine.length > 180
+    !isHtmlDump && firstLine && firstLine.length > 180
       ? firstLine.slice(0, 180) + "…"
-      : firstLine;
+      : !isHtmlDump
+        ? firstLine
+        : undefined;
   return (
     <GlassPanel
       variant="soft"

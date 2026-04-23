@@ -275,11 +275,13 @@ function CardGridSkeleton() {
 
 function OfflineBlock({ message }: { message?: string }) {
   const { t } = useTranslation();
-  // Truncate diagnostic messages — a raw fetch error can be the gateway's
-  // full 404 HTML body, which blows up the layout. Cap to a single line.
+  // Raw HTML dumps (a 404 page body) add no signal and look broken. Only
+  // show plain-text diagnostics; suppress anything that starts with `<`.
   const firstLine = message?.split(/\r?\n/).find((ln) => ln.trim().length > 0)?.trim();
-  const short =
-    firstLine && firstLine.length > 180
+  const isHtmlDump = firstLine?.startsWith("<");
+  const short = isHtmlDump
+    ? undefined
+    : firstLine && firstLine.length > 180
       ? firstLine.slice(0, 180) + "…"
       : firstLine;
   return (
