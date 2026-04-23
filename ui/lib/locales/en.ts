@@ -353,6 +353,57 @@ export const en = {
         quickLogin: "Previously logged-in accounts",
         quickLoginFailed: "Quick-login failed",
       },
+      // Tidepool (Phase 5e): QQ channel page.
+      tp: {
+        title: "QQ Channel",
+        leadPill: "{{state}} · {{chats}} chats",
+        proseConnected:
+          "NapCat bridge connected at `{{endpoint}}`.",
+        proseChats: "{{n}} allowed chats configured.",
+        proseLastInbound: "Last inbound {{age}} ago.",
+        proseNoRecent: "No inbound messages yet.",
+        proseUnknownEndpoint: "unknown endpoint",
+        proseDisconnected:
+          "NapCat bridge is disconnected. Try reconnecting or re-scanning the login QR to bring the bot back online.",
+        proseDisabled:
+          "QQ channel is disabled in configuration. Enable it from the Config page to start routing messages.",
+        proseOffline:
+          "QQ channel is not configured. Add a `[channels.qq]` block under Config, then scan-login to attach an account.",
+        proseUnknown:
+          "Runtime state is unknown — the gateway may still be handshaking with NapCat.",
+        pillRate: {
+          live: "routing",
+          paused: "idle",
+          throttled: "reconnecting",
+        },
+        state: {
+          connected: "Connected",
+          disconnected: "Disconnected",
+          disabled: "Disabled",
+          offline: "Not configured",
+          unknown: "Unknown",
+        },
+        runtimeLabel: "runtime",
+        accountTitle: "Account",
+        addChatPlaceholder: "QQ group id…",
+        removeChatAria: "Remove chat {{id}}",
+        statInbound: "Inbound · recent",
+        statFootInbound: "cap 50 · server snapshot",
+        statChats: "Allowed chats",
+        statFootChats: "distinct group_keyword rows",
+        statKeywords: "Keywords",
+        statFootKeywords: "across all groups",
+        statThrottled: "Throttled",
+        statFootThrottled: "1 when reconnecting · 0 otherwise",
+        statOfflineFoot: "channel offline",
+        caughtUp: "caught up",
+        needsAttention: "needs attention",
+        messagesOffline: "Gateway offline — feed paused.",
+        messagesUnknownSender: "unknown sender",
+        offlineTitle: "QQ channel offline",
+        offlineHint:
+          "The panels below will populate once `/admin/channels/qq/status` responds.",
+      },
     },
   },
 

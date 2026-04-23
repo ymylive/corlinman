@@ -5,6 +5,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
+import { cn } from "@/lib/utils";
+import { CountdownRing } from "@/components/ui/countdown-ring";
 import {
   Dialog,
   DialogContent,
@@ -24,19 +26,23 @@ import {
 } from "@/lib/api";
 
 const POLL_INTERVAL_MS = 2_000;
+// Ring total is derived from the first QR's TTL (expires_at - now at open)
+// and reused for subsequent displays. Falls back to 120s if absent.
+const DEFAULT_TTL_MS = 120_000;
 
 /**
- * QQ scan-login dialog.
+ * QQ scan-login dialog (Tidepool retoken).
  *
- * Flow:
- *   1. Open → POST /admin/channels/qq/qrcode → render image (base64 or URL).
+ * Flow unchanged from pre-cutover:
+ *   1. Open → POST /admin/channels/qq/qrcode → render image.
  *   2. Every 2s GET /admin/channels/qq/qrcode/status → update status line.
  *   3. On `confirmed` → show avatar/nick, invalidate ["admin","channels","qq"],
  *      auto-close after 1.5s.
  *   4. Previously-used accounts render beneath the QR; tap → /quick-login.
  *
- * We keep all poll state in this component so the parent page can stay
- * focused on the connection + keyword editor.
+ * Visual surface retoked to warm-amber glass: QR panel gets a warm amber
+ * halo when fresh, a red overlay when expired; status line uses tp-ink
+ * tones; quick-login chips read as soft glass.
  */
 export function ScanLoginDialog({
   open,
@@ -104,7 +110,9 @@ export function ScanLoginDialog({
         setStatus(next);
         if (next.status === "confirmed") {
           qc.invalidateQueries({ queryKey: ["admin", "channels", "qq"] });
-          qc.invalidateQueries({ queryKey: ["admin", "channels", "qq", "accounts"] });
+          qc.invalidateQueries({
+            queryKey: ["admin", "channels", "qq", "accounts"],
+          });
           toast.success(t("channels.qq.scanLogin.confirmed"));
           // Give the user a beat to see the avatar, then close.
           setTimeout(() => onOpenChange(false), 1_500);
@@ -119,17 +127,18 @@ export function ScanLoginDialog({
     return () => clearInterval(id);
   }, [open, qr, status.status, qc, t, onOpenChange]);
 
-  const secondsLeft = qr
-    ? Math.max(0, Math.ceil((qr.expires_at - now) / 1_000))
-    : 0;
-  const expired = qr ? secondsLeft <= 0 || status.status === "expired" : false;
+  const remainingMs = qr ? Math.max(0, qr.expires_at - now) : 0;
+  const secondsLeft = Math.ceil(remainingMs / 1_000);
+  const expired = qr ? remainingMs <= 0 || status.status === "expired" : false;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
+      <DialogContent className="max-w-sm border-tp-glass-edge bg-tp-glass-2 backdrop-blur-glass-strong backdrop-saturate-glass-strong">
         <DialogHeader>
-          <DialogTitle>{t("channels.qq.scanLogin.title")}</DialogTitle>
-          <DialogDescription>
+          <DialogTitle className="text-tp-ink">
+            {t("channels.qq.scanLogin.title")}
+          </DialogTitle>
+          <DialogDescription className="text-tp-ink-3">
             {t("channels.qq.scanLogin.subtitle")}
           </DialogDescription>
         </DialogHeader>
@@ -137,13 +146,13 @@ export function ScanLoginDialog({
         <div className="flex flex-col items-center gap-3">
           {qrError ? (
             <div
-              className="rounded-md border border-destructive/40 bg-destructive/10 p-4 text-center text-sm text-destructive"
+              className="rounded-xl border border-tp-err/35 bg-tp-err-soft p-4 text-center text-[13px] text-tp-err"
               data-testid="qq-login-error"
             >
               {qrError}
             </div>
           ) : !qr ? (
-            <Skeleton className="h-56 w-56 rounded-md" />
+            <Skeleton className="h-56 w-56 rounded-xl" />
           ) : status.status === "confirmed" && status.account ? (
             <AccountCard account={status.account} />
           ) : (
@@ -151,10 +160,20 @@ export function ScanLoginDialog({
           )}
 
           <div
-            className="text-sm"
+            className="flex items-center gap-2.5 text-[13px]"
             data-testid="qq-login-status"
             aria-live="polite"
           >
+            {qr && !expired && status.status !== "confirmed" ? (
+              <CountdownRing
+                remainingMs={remainingMs}
+                totalMs={qr ? Math.max(qr.expires_at - (qr.expires_at - DEFAULT_TTL_MS), DEFAULT_TTL_MS) : DEFAULT_TTL_MS}
+                size={18}
+                strokeWidth={2}
+                label={t("channels.qq.scanLogin.statusWaiting")}
+                className="[&>span]:hidden"
+              />
+            ) : null}
             <StatusLine status={status.status} secondsLeft={secondsLeft} />
           </div>
         </div>
@@ -194,12 +213,17 @@ function QrImage({ qr, expired }: { qr: QqQrcode; expired: boolean }) {
   // Two cases: NapCat returned a base64 PNG (preferred) or a URL. For the
   // URL case we don't bundle a client-side QR generator (no new deps), so
   // we render a short instruction block — the user can still copy/paste the
-  // URL into their phone's QQ app. This is a known trade-off documented in
-  // the release notes. When NapCat ships base64 (v2.x default) the image
-  // works directly.
+  // URL into their phone's QQ app. When NapCat ships base64 (v2.x default)
+  // the image works directly.
   if (qr.image_base64) {
     return (
-      <div className="relative h-56 w-56 overflow-hidden rounded-md bg-white">
+      <div
+        className={cn(
+          "relative h-56 w-56 overflow-hidden rounded-xl border bg-white p-2",
+          "border-tp-amber/35",
+          "shadow-[0_0_24px_-6px_var(--tp-amber-glow)]",
+        )}
+      >
         {/* Base64 data URL — next/image would require remote loader config
             for data: URLs and offers no real perf win for a one-shot QR. */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -210,7 +234,8 @@ function QrImage({ qr, expired }: { qr: QqQrcode; expired: boolean }) {
           className="h-full w-full object-contain"
         />
         {expired ? (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/60 text-xs text-white">
+          <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/60 font-mono text-[11px] uppercase tracking-[0.1em] text-white">
+            {/* Keep English token — matches integration expectation. */}
             expired
           </div>
         ) : null}
@@ -221,12 +246,12 @@ function QrImage({ qr, expired }: { qr: QqQrcode; expired: boolean }) {
     return (
       <div
         data-testid="qq-qrcode"
-        className="flex h-56 w-56 flex-col items-center justify-center gap-2 rounded-md border border-dashed border-border bg-muted p-3 text-center text-xs"
+        className="flex h-56 w-56 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-tp-glass-edge bg-tp-glass-inner p-3 text-center text-[11.5px]"
       >
-        <span className="text-muted-foreground">
+        <span className="text-tp-ink-3">
           QR URL (copy into QQ mobile):
         </span>
-        <code className="break-all px-2 font-mono text-[10px]">
+        <code className="break-all px-2 font-mono text-[10px] text-tp-ink-2">
           {qr.qrcode_url}
         </code>
       </div>
@@ -238,7 +263,7 @@ function QrImage({ qr, expired }: { qr: QqQrcode; expired: boolean }) {
 function AccountCard({ account }: { account: QqAccount }) {
   return (
     <div
-      className="flex flex-col items-center gap-2 rounded-md border border-ok/40 bg-ok/10 p-4 text-center"
+      className="flex flex-col items-center gap-2 rounded-xl border border-tp-ok/35 bg-tp-ok-soft p-4 text-center"
       data-testid="qq-login-account"
     >
       {account.avatar_url ? (
@@ -249,12 +274,14 @@ function AccountCard({ account }: { account: QqAccount }) {
           className="h-16 w-16 rounded-full"
         />
       ) : (
-        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-ok/20 font-mono text-lg text-ok">
+        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-tp-ok-soft font-mono text-[18px] text-tp-ok">
           {account.uin.slice(0, 2)}
         </div>
       )}
-      <div className="text-sm font-semibold">{account.nickname ?? account.uin}</div>
-      <div className="font-mono text-[11px] text-muted-foreground">
+      <div className="text-[14px] font-semibold text-tp-ink">
+        {account.nickname ?? account.uin}
+      </div>
+      <div className="font-mono text-[11px] text-tp-ink-3">
         QQ: {account.uin}
       </div>
     </div>
@@ -272,34 +299,34 @@ function StatusLine({
   switch (status) {
     case "waiting":
       return (
-        <span className="text-muted-foreground">
-          {t("channels.qq.scanLogin.statusWaiting")}{" "}
+        <span className="text-tp-ink-3">
+          {t("channels.qq.scanLogin.statusWaiting")}
           {secondsLeft > 0
-            ? `(${t("channels.qq.scanLogin.secondsLeft", { s: secondsLeft })})`
+            ? ` (${t("channels.qq.scanLogin.secondsLeft", { s: secondsLeft })})`
             : null}
         </span>
       );
     case "scanned":
       return (
-        <span className="text-primary">
+        <span className="text-tp-amber">
           {t("channels.qq.scanLogin.statusScanned")}
         </span>
       );
     case "confirmed":
       return (
-        <span className="text-ok">
+        <span className="text-tp-ok">
           {t("channels.qq.scanLogin.statusConfirmed")}
         </span>
       );
     case "expired":
       return (
-        <span className="text-warn">
+        <span className="text-tp-warn">
           {t("channels.qq.scanLogin.statusExpired")}
         </span>
       );
     case "error":
       return (
-        <span className="text-destructive">
+        <span className="text-tp-err">
           {t("channels.qq.scanLogin.statusError")}
         </span>
       );
@@ -328,8 +355,8 @@ function QuickLoginList({
     return null;
   }
   return (
-    <section className="mt-2 border-t border-border pt-3">
-      <h3 className="mb-2 text-xs font-semibold text-muted-foreground">
+    <section className="mt-2 border-t border-tp-glass-edge pt-3">
+      <h3 className="mb-2 font-mono text-[10.5px] uppercase tracking-[0.12em] text-tp-ink-4">
         {t("channels.qq.scanLogin.quickLogin")}
       </h3>
       <ul className="flex flex-wrap gap-2">
@@ -340,7 +367,13 @@ function QuickLoginList({
               disabled={disabled}
               onClick={() => onSelect(a.uin)}
               data-testid={`qq-quick-login-${a.uin}`}
-              className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-2 py-1 text-xs hover:bg-accent/40 disabled:cursor-not-allowed disabled:opacity-50"
+              className={cn(
+                "inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[12px]",
+                "border-tp-glass-edge bg-tp-glass-inner text-tp-ink-2",
+                "transition-colors hover:bg-tp-glass-inner-hover hover:text-tp-ink",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+                "disabled:cursor-not-allowed disabled:opacity-50",
+              )}
             >
               {a.avatar_url ? (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -351,7 +384,7 @@ function QuickLoginList({
                 />
               ) : null}
               <span className="font-medium">{a.nickname ?? a.uin}</span>
-              <span className="font-mono text-[10px] text-muted-foreground">
+              <span className="font-mono text-[10px] text-tp-ink-4">
                 {a.uin}
               </span>
             </button>

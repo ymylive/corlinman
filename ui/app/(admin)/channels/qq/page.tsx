@@ -3,37 +3,75 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { motion } from "framer-motion";
 import { toast } from "sonner";
-import { Wifi, WifiOff } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
-import { cn } from "@/lib/utils";
-import { ChannelShell } from "@/components/channels/channel-shell";
+import { useMotionVariants } from "@/lib/motion";
 import {
   fetchQqStatus,
   reconnectQq,
   updateQqKeywords,
   type QqStatus,
 } from "@/lib/api";
+import { ChannelShell } from "@/components/channels/channel-shell";
+import { QqHero } from "@/components/channels/qq/qq-hero";
+import { QqStatsRow } from "@/components/channels/qq/qq-stats-row";
+import { QqAccountPanel } from "@/components/channels/qq/qq-account-panel";
+import { QqFiltersPanel } from "@/components/channels/qq/qq-filters-panel";
+import { QqMessagesPanel } from "@/components/channels/qq/qq-messages-panel";
+import {
+  QqHeroSkeleton,
+  QqOfflineBlock,
+} from "@/components/channels/qq/qq-list-states";
+import {
+  deriveConnection,
+  formatRelativeAgo,
+  normaliseRecent,
+} from "@/components/channels/qq/qq-util";
 import { ScanLoginDialog } from "./ScanLoginDialog";
 
 /**
- * QQ channel admin. /admin/channels/qq/status · /keywords · /reconnect.
+ * QQ channel admin — Phase 5e Tidepool cutover.
  *
- * Top: status card with the big connection light + last-seen.
- * Middle: per-group keyword chip editor (Enter adds, × removes).
- * Bottom: recent messages transcript.
+ * Layout:
+ *   [ ChannelShell (title + LiveDot + actions) ]
+ *     [ QqHero (glass strong, prose + reconnect + scan-login) ]
+ *     [ QqStatsRow — Inbound · Chats · Keywords · Throttled ]
+ *     [ QqAccountPanel │ QqFiltersPanel ]  (lg: 2-col)
+ *     [ QqMessagesPanel (LogRow dense feed) ]
+ *
+ * Data flow preserved from pre-cutover:
+ *   - /admin/channels/qq/status          (10s poll)
+ *   - /admin/channels/qq/keywords        (POST on save)
+ *   - /admin/channels/qq/reconnect       (POST button)
+ *   - Scan-login flow lives in <ScanLoginDialog>.
+ *
+ * Keywords state uses a local draft initialised once from the server
+ * snapshot so in-flight edits don't flash back to server values on each
+ * 10s refetch. The save button is disabled until the draft diverges.
+ *
+ * Tidepool primitives in use: `ChannelShell` (shared with Telegram),
+ * `GlassPanel`, `StatChip`, `StreamPill`, `LogRow`.
  */
+
 export default function QqChannelPage() {
   const { t } = useTranslation();
+  const variants = useMotionVariants();
   const qc = useQueryClient();
+
   const status = useQuery<QqStatus>({
     queryKey: ["admin", "channels", "qq"],
     queryFn: fetchQqStatus,
     refetchInterval: 10_000,
+    retry: false,
   });
+
+  // 1-Hz tick for the "last inbound N seconds ago" hero prose.
+  const [now, setNow] = React.useState<number>(() => Date.now());
+  React.useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const [draft, setDraft] = React.useState<Record<string, string[]>>({});
   const [draftInit, setDraftInit] = React.useState(false);
@@ -65,306 +103,128 @@ export default function QqChannelPage() {
       toast.warning(err instanceof Error ? err.message : String(err)),
   });
 
-  const addGroup = () => {
-    const id = window.prompt(t("channels.addGroupPrompt"));
-    if (!id) return;
-    if (draft[id]) return;
-    setDraft({ ...draft, [id]: [] });
-  };
-  const removeGroup = (id: string) => {
-    const next = { ...draft };
-    delete next[id];
-    setDraft(next);
-  };
-
   const [scanLoginOpen, setScanLoginOpen] = React.useState(false);
 
-  const connected = status.data?.runtime === "connected";
-  const connectionLabel = !status.data
-    ? undefined
-    : !status.data.configured
-      ? t("channels.connectionNotConfigured")
-      : !status.data.enabled
-        ? t("channels.connectionDisabled")
-        : status.data.runtime === "connected"
-          ? t("channels.connectionConnected")
-          : status.data.runtime === "disconnected"
-            ? t("channels.connectionDisconnected")
-            : t("channels.connectionUnknown");
+  // ─── derived ─────────────────────────────────────────────────────────
+
+  const offline = status.isError;
+  const connection = deriveConnection(status.data);
+  const connected = connection === "connected";
+  const connectionLabel = t(`channels.qq.tp.state.${connection}`);
+
+  const recentMessages = React.useMemo(() => {
+    const raw = (status.data?.recent_messages ?? []) as Array<
+      Record<string, unknown>
+    >;
+    return raw.map((m) => normaliseRecent(m));
+  }, [status.data]);
+
+  const chatCount = React.useMemo(
+    () => Object.keys(status.data?.group_keywords ?? {}).length,
+    [status.data],
+  );
+
+  const keywordCount = React.useMemo(() => {
+    const groups = status.data?.group_keywords ?? {};
+    let n = 0;
+    for (const kws of Object.values(groups)) n += kws.length;
+    return n;
+  }, [status.data]);
+
+  const lastInboundAgo = React.useMemo(() => {
+    if (recentMessages.length === 0) return null;
+    return formatRelativeAgo(recentMessages[0]!.ts, now);
+  }, [recentMessages, now]);
+
+  const dirty = React.useMemo(() => {
+    if (!status.data) return false;
+    return !keywordsEqual(status.data.group_keywords ?? {}, draft);
+  }, [draft, status.data]);
 
   return (
-    <ChannelShell
-      channelId="qq"
-      title={t("channels.title")}
-      subtitle={t("channels.subtitle")}
-      connected={connected}
-      connectionLabel={connectionLabel}
-      actions={
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => setScanLoginOpen(true)}
-          data-testid="qq-scan-login-btn"
-        >
-          {t("channels.qq.scanLogin.openButton")}
-        </Button>
-      }
+    <motion.div
+      className="flex flex-col gap-4"
+      variants={variants.fadeUp}
+      initial="hidden"
+      animate="visible"
     >
-      <ScanLoginDialog open={scanLoginOpen} onOpenChange={setScanLoginOpen} />
-
-      {status.isPending ? (
-        <Skeleton className="h-28 w-full" />
-      ) : status.isError ? (
-        <p className="text-sm text-destructive">
-          {t("common.loadFailed")}: {(status.error as Error).message}
-        </p>
-      ) : status.data ? (
-        <ConnectionCard
-          status={status.data}
-          onReconnect={() => reconnectMutation.mutate()}
-          reconnecting={reconnectMutation.isPending}
-        />
-      ) : null}
-
-      {/* keyword editor */}
-      <section className="space-y-3 rounded-lg border border-border bg-panel p-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-sm font-semibold">
-              {t("channels.groupKeywords")}
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              {t("channels.groupKeywordsHint")}
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={addGroup}>
-              {t("channels.addGroup")}
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => saveMutation.mutate(draft)}
-              disabled={saveMutation.isPending}
-              data-testid="qq-save-keywords-btn"
-            >
-              {saveMutation.isPending
-                ? t("channels.saving")
-                : t("channels.save")}
-            </Button>
-          </div>
-        </div>
-        {Object.keys(draft).length === 0 ? (
-          <p className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-            {t("channels.noOverrides")}
-          </p>
-        ) : (
-          <ul className="space-y-2">
-            {Object.entries(draft)
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([id, kws]) => (
-                <GroupRow
-                  key={id}
-                  gid={id}
-                  keywords={kws}
-                  onChange={(next) => setDraft({ ...draft, [id]: next })}
-                  onRemove={() => removeGroup(id)}
-                />
-              ))}
-          </ul>
-        )}
-      </section>
-
-      {/* recent messages */}
-      <section className="rounded-lg border border-border bg-panel">
-        <div className="border-b border-border px-4 py-3 text-sm font-semibold">
-          {t("channels.recentMessages")}
-        </div>
-        <div className="max-h-[360px] overflow-auto p-4">
-          {!status.data || status.data.recent_messages.length === 0 ? (
-            <p className="text-center text-sm text-muted-foreground">
-              {t("channels.noMessages")}
-            </p>
-          ) : (
-            <ul className="space-y-2">
-              {(status.data.recent_messages as Array<Record<string, unknown>>)
-                .slice(0, 10)
-                .map((m, i) => (
-                  <MessageBubble key={i} msg={m} />
-                ))}
-            </ul>
-          )}
-        </div>
-      </section>
-    </ChannelShell>
-  );
-}
-
-function ConnectionCard({
-  status,
-  onReconnect,
-  reconnecting,
-}: {
-  status: QqStatus;
-  onReconnect: () => void;
-  reconnecting: boolean;
-}) {
-  const { t } = useTranslation();
-  const tone = !status.configured
-    ? "muted"
-    : !status.enabled
-      ? "muted"
-      : status.runtime === "connected"
-        ? "ok"
-        : status.runtime === "disconnected"
-          ? "err"
-          : "warn";
-  const label = !status.configured
-    ? t("channels.connectionNotConfigured")
-    : !status.enabled
-      ? t("channels.connectionDisabled")
-      : status.runtime === "connected"
-        ? t("channels.connectionConnected")
-        : status.runtime === "disconnected"
-          ? t("channels.connectionDisconnected")
-          : t("channels.connectionUnknown");
-  return (
-    <section className="grid grid-cols-1 gap-4 rounded-lg border border-border bg-panel p-4 md:grid-cols-[auto_1fr_auto]">
-      <div className="flex items-center gap-3">
-        <div
-          className={cn(
-            "relative flex h-12 w-12 items-center justify-center rounded-full",
-            tone === "ok" && "bg-ok/15 text-ok",
-            tone === "warn" && "bg-warn/15 text-warn",
-            tone === "err" && "bg-err/15 text-err",
-            tone === "muted" && "bg-muted text-muted-foreground",
-          )}
-        >
-          {tone === "ok" ? (
-            <>
-              <Wifi className="h-5 w-5" />
-              <span className="absolute right-0.5 top-0.5 h-2 w-2 animate-pulse rounded-full bg-ok" />
-            </>
-          ) : (
-            <WifiOff className="h-5 w-5" />
-          )}
-        </div>
-      </div>
-      <div className="space-y-1">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold">{label}</span>
-          <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-            runtime={status.runtime}
-          </span>
-        </div>
-        <div className="space-y-0.5 text-xs">
-          <div className="flex items-center gap-2">
-            <span className="text-muted-foreground">ws_url</span>
-            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
-              {status.ws_url ?? "(none)"}
-            </code>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-muted-foreground">self_ids</span>
-            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
-              [{status.self_ids.join(", ")}]
-            </code>
-          </div>
-        </div>
-      </div>
-      <Button
-        size="sm"
-        variant="outline"
-        onClick={onReconnect}
-        disabled={!status.configured || reconnecting}
-        data-testid="qq-reconnect-btn"
+      <ChannelShell
+        channelId="qq"
+        title={t("channels.title")}
+        subtitle={t("channels.subtitle")}
+        connected={connected}
+        connectionLabel={connectionLabel}
       >
-        {reconnecting ? t("channels.reconnecting") : t("channels.reconnect")}
-      </Button>
-    </section>
-  );
-}
-
-function GroupRow({
-  gid,
-  keywords,
-  onChange,
-  onRemove,
-}: {
-  gid: string;
-  keywords: string[];
-  onChange: (next: string[]) => void;
-  onRemove: () => void;
-}) {
-  const { t } = useTranslation();
-  const [draft, setDraft] = React.useState("");
-  const add = (raw: string) => {
-    const kw = raw.trim();
-    if (!kw) return;
-    if (keywords.includes(kw)) return;
-    onChange([...keywords, kw]);
-    setDraft("");
-  };
-  const remove = (kw: string) => onChange(keywords.filter((x) => x !== kw));
-  return (
-    <li className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface p-2">
-      <code className="rounded bg-muted px-2 py-1 font-mono text-xs">{gid}</code>
-      <div className="flex min-h-[28px] flex-1 flex-wrap items-center gap-1.5">
-        {keywords.map((kw) => (
-          <button
-            key={kw}
-            type="button"
-            onClick={() => remove(kw)}
-            className="inline-flex items-center gap-1 rounded-md border border-border bg-accent/40 px-2 py-0.5 font-mono text-[10px] text-accent-foreground hover:bg-accent"
-            aria-label={t("channels.removeKeywordAria", { kw })}
-          >
-            {kw} <span aria-hidden>×</span>
-          </button>
-        ))}
-        <Input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              add(draft);
-            } else if (e.key === "Backspace" && !draft && keywords.length > 0) {
-              e.preventDefault();
-              remove(keywords[keywords.length - 1]!);
-            }
-          }}
-          placeholder={t("channels.addKeywordPlaceholder")}
-          className="h-7 max-w-[180px] border-0 bg-transparent px-1 text-xs shadow-none focus-visible:ring-0"
+        <ScanLoginDialog
+          open={scanLoginOpen}
+          onOpenChange={setScanLoginOpen}
         />
-      </div>
-      <Button size="sm" variant="ghost" onClick={onRemove}>
-        {t("channels.remove")}
-      </Button>
-    </li>
+
+        {status.isPending ? (
+          <QqHeroSkeleton />
+        ) : offline ? (
+          <QqOfflineBlock message={(status.error as Error | undefined)?.message} />
+        ) : (
+          <>
+            <QqHero
+              connection={connection}
+              wsUrl={status.data?.ws_url ?? null}
+              chatCount={chatCount}
+              lastInboundAgo={lastInboundAgo}
+              reconnecting={reconnectMutation.isPending}
+              onReconnect={() => reconnectMutation.mutate()}
+              onScanLogin={() => setScanLoginOpen(true)}
+            />
+
+            <QqStatsRow
+              inbound={recentMessages.length}
+              chats={chatCount}
+              keywords={keywordCount}
+              throttled={connection === "connected" ? 0 : 1}
+              live={connection === "connected"}
+            />
+
+            <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <QqAccountPanel
+                status={status.data}
+                connection={connection}
+                reconnecting={reconnectMutation.isPending}
+                onReconnect={() => reconnectMutation.mutate()}
+              />
+              <QqFiltersPanel
+                draft={draft}
+                saving={saveMutation.isPending}
+                dirty={dirty}
+                onChange={setDraft}
+                onSave={() => saveMutation.mutate(draft)}
+              />
+            </section>
+
+            <QqMessagesPanel
+              messages={recentMessages}
+              offline={!status.data}
+            />
+          </>
+        )}
+      </ChannelShell>
+    </motion.div>
   );
 }
 
-function MessageBubble({ msg }: { msg: Record<string, unknown> }) {
-  const text =
-    (msg.text as string | undefined) ??
-    (msg.content as string | undefined) ??
-    JSON.stringify(msg);
-  const from =
-    (msg.from as string | undefined) ??
-    (msg.user_id as string | undefined) ??
-    "unknown";
-  const ts = (msg.ts as string | undefined) ?? (msg.time as string | undefined);
-  return (
-    <li className="flex items-start gap-3 rounded-md border border-border bg-surface p-3">
-      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/15 font-mono text-[10px] font-semibold text-primary">
-        {from.slice(0, 2).toUpperCase()}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 text-xs">
-          <span className="font-mono">{from}</span>
-          {ts ? <span className="text-muted-foreground">{ts}</span> : null}
-        </div>
-        <p className="mt-1 whitespace-pre-wrap break-words text-xs">{text}</p>
-      </div>
-    </li>
-  );
+function keywordsEqual(
+  a: Record<string, string[]>,
+  b: Record<string, string[]>,
+): boolean {
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const k of keysA) {
+    const bk = b[k];
+    const ak = a[k];
+    if (!bk || bk.length !== ak!.length) return false;
+    for (let i = 0; i < ak!.length; i++) {
+      if (ak![i] !== bk[i]) return false;
+    }
+  }
+  return true;
 }
