@@ -38,10 +38,16 @@ export function Providers({ children }: ProvidersProps) {
 
   return (
     <ThemeProvider
-      attribute="class"
+      // Dual-write the theme onto both `.dark` class (for Tailwind dark:
+      // variants still used by legacy pages) and `data-theme` attribute
+      // (Tidepool scope selector). Using the Tidepool storage key so the
+      // inline boot script in app/layout.tsx and next-themes agree on
+      // their source of truth — no FOUC and no race.
+      attribute={["class", "data-theme"]}
       defaultTheme="dark"
       enableSystem={false}
       disableTransitionOnChange
+      storageKey="corlinman-theme"
     >
       <QueryClientProvider client={queryClient}>
         <I18nextProvider i18n={i18next}>

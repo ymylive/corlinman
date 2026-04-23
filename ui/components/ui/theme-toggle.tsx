@@ -20,6 +20,10 @@ import { cn } from "@/lib/utils";
  * TopNav and add the boot-script hydration.
  */
 
+// Storage key + attribute keep in sync with the <ThemeProvider> config in
+// components/providers.tsx (which uses attribute=["class","data-theme"]
+// and storageKey=STORAGE_KEY). Exporting so the inline boot script can
+// pick up the same constant by reading the globals file at build time.
 const STORAGE_KEY = "corlinman-theme";
 
 export type Theme = "light" | "dark";

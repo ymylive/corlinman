@@ -9,6 +9,7 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { PageTransition } from "@/components/layout/page-transition";
 import { RouteScrollRestore } from "@/components/layout/route-scroll-restore";
 import { PageErrorBoundary } from "@/components/layout/error-boundary";
+import { AuroraBackground } from "@/components/ui/aurora-background";
 
 /**
  * Admin route group layout — Linear-style two-column shell.
@@ -71,13 +72,16 @@ export default function AdminLayout({
   }
 
   return (
-    <div className="flex min-h-dvh">
+    <div className="relative flex min-h-dvh gap-4 p-4">
+      {/* Tidepool aurora — fixed behind all admin content. Reads
+          --tp-aurora-* / --tp-bg-* so it retints on theme flip. */}
+      <AuroraBackground />
       <RouteScrollRestore />
       <Sidebar user={state.session.user} />
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
         <TopNav />
         <main className="relative flex flex-1 flex-col">
-          <div className="mx-auto w-full max-w-[1440px] flex-1 space-y-6 px-6 py-6">
+          <div className="mx-auto w-full max-w-[1440px] flex-1 space-y-6">
             <PageTransition>
               <PageErrorBoundary>{children}</PageErrorBoundary>
             </PageTransition>

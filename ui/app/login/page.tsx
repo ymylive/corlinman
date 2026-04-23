@@ -26,9 +26,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
+// The root body no longer paints bg-background (so the admin aurora can
+// show through). Login needs to paint its own background explicitly.
+
 export default function LoginPage() {
   return (
-    <div className="relative grid min-h-dvh grid-cols-1 md:grid-cols-[40%_60%]">
+    <div className="relative grid min-h-dvh grid-cols-1 bg-background md:grid-cols-[40%_60%]">
       {/* theme + language toggles in top-right regardless of column */}
       <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
         <LanguageToggle />

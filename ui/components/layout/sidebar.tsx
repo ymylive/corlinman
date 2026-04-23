@@ -158,18 +158,27 @@ export function Sidebar({ user }: SidebarProps) {
     }
   }
 
-  const width = collapsed && hydrated ? "w-[56px]" : "w-[240px]";
+  const width = collapsed && hydrated ? "w-[72px]" : "w-[240px]";
 
   return (
     <aside
       className={cn(
-        "flex shrink-0 flex-col border-r border-border bg-surface/60 transition-[width] duration-200 ease-out",
+        // Tidepool: floating glass panel. The admin layout wrapper handles
+        // the 16px gutter via `p-4 gap-4`, so this component no longer sets
+        // its own margins. Sticky to the viewport top at the gutter offset
+        // so long pages don't scroll the sidebar out of view.
+        "relative flex shrink-0 flex-col overflow-hidden rounded-2xl border",
+        "bg-tp-glass border-tp-glass-edge",
+        "backdrop-blur-glass backdrop-saturate-glass",
+        "shadow-[inset_0_1px_0_var(--tp-glass-hl)] shadow-tp-panel",
+        "sticky top-4 self-start max-h-[calc(100dvh-2rem)]",
+        "transition-[width] duration-200 ease-out",
         width,
       )}
       aria-label={t("nav.dashboard")}
     >
       {/* brand + collapse */}
-      <div className="flex h-14 items-center justify-between border-b border-border px-3">
+      <div className="flex items-center justify-between gap-2 border-b border-tp-glass-edge px-3.5 py-3.5">
         <Link href="/" className="flex items-center gap-2 overflow-hidden">
           <BrandMarkNudge>
             <BrandMark compact={collapsed && hydrated} />
@@ -181,7 +190,7 @@ export function Sidebar({ user }: SidebarProps) {
           aria-label={
             collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")
           }
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-tp-ink-3 transition-colors hover:bg-tp-glass-inner hover:text-tp-ink"
         >
           {collapsed ? (
             <ChevronsRight className="h-4 w-4" />
@@ -191,7 +200,7 @@ export function Sidebar({ user }: SidebarProps) {
         </button>
       </div>
 
-      <nav className="flex flex-1 flex-col gap-0.5 p-2">
+      <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto p-2">
         {ITEMS.map((entry) => {
           if (entry.kind === "group") {
             return (
@@ -215,32 +224,38 @@ export function Sidebar({ user }: SidebarProps) {
       </nav>
 
       {/* user chip + footer */}
-      <div className="border-t border-border p-3">
+      <div className="border-t border-tp-glass-edge p-3">
         {collapsed && hydrated ? (
           <button
             type="button"
             onClick={onLogout}
             aria-label={t("auth.logoutLabel")}
             disabled={loggingOut}
-            className="flex h-8 w-full items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            className="flex h-8 w-full items-center justify-center rounded-md text-tp-ink-3 transition-colors hover:bg-tp-glass-inner hover:text-tp-ink disabled:opacity-50"
             data-testid="logout-button"
           >
             <LogOut className="h-4 w-4" />
           </button>
         ) : (
           <div className="flex items-center gap-2">
-            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[11px] font-semibold text-primary">
+            <div
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold text-white"
+              style={{
+                background: "linear-gradient(135deg, var(--tp-amber), var(--tp-ember))",
+                boxShadow: "0 0 10px -3px var(--tp-amber-glow)",
+              }}
+            >
               {(user ?? "a").slice(0, 1).toUpperCase()}
             </div>
             <div className="min-w-0 flex-1 leading-tight">
               <div
-                className="truncate text-xs font-medium text-foreground"
+                className="truncate text-xs font-medium text-tp-ink"
                 data-testid="nav-user"
               >
                 {user ?? "admin"}
               </div>
-              <div className="truncate font-mono text-[10px] text-muted-foreground">
-                v0.1.1
+              <div className="truncate font-mono text-[10px] text-tp-ink-3">
+                v0.3.0
               </div>
             </div>
             <button
@@ -248,7 +263,7 @@ export function Sidebar({ user }: SidebarProps) {
               onClick={onLogout}
               disabled={loggingOut}
               aria-label={t("auth.logoutLabel")}
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-tp-ink-3 transition-colors hover:bg-tp-glass-inner hover:text-tp-ink disabled:opacity-50"
               data-testid="logout-button"
             >
               <LogOut className="h-3.5 w-3.5" />
@@ -289,10 +304,10 @@ function SidebarItem({
       href={item.href as never}
       onKeyDown={onKeyDown}
       className={cn(
-        "relative flex items-center gap-3 rounded-md px-2.5 py-2 text-sm transition-colors",
+        "relative flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors",
         active
-          ? "bg-accent/70 text-accent-foreground"
-          : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
+          ? "bg-tp-glass-inner-hover text-tp-ink shadow-[inset_0_1px_0_var(--tp-glass-hl)]"
+          : "text-tp-ink-2 hover:bg-tp-glass-inner hover:text-tp-ink",
         collapsed && "justify-center px-0",
         nested && !collapsed && "pl-8",
       )}
@@ -302,7 +317,12 @@ function SidebarItem({
       {active ? (
         <motion.span
           layoutId="sidebar-indicator"
-          className="absolute left-0 top-1 bottom-1 w-[2px] rounded-full bg-primary"
+          aria-hidden
+          className="absolute left-[-6px] top-1/2 h-3.5 w-[3px] -translate-y-1/2 rounded-[2px]"
+          style={{
+            background: "linear-gradient(to bottom, var(--tp-amber), var(--tp-ember))",
+            boxShadow: "0 0 8px var(--tp-amber-glow)",
+          }}
           transition={{
             type: "spring",
             stiffness: 500,
@@ -311,7 +331,7 @@ function SidebarItem({
           }}
         />
       ) : null}
-      <Icon className="h-4 w-4 shrink-0" />
+      <Icon className="h-[14px] w-[14px] shrink-0 opacity-80" />
       {collapsed ? null : <span className="truncate">{label}</span>}
     </Link>
   );
@@ -415,13 +435,13 @@ function SidebarGroup({
         aria-label={label}
         data-testid={`sidebar-group-toggle-${group.id}`}
         className={cn(
-          "relative flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-sm transition-colors",
+          "relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors",
           hasActiveChild
-            ? "font-semibold text-foreground"
-            : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
+            ? "font-medium text-tp-ink"
+            : "text-tp-ink-2 hover:bg-tp-glass-inner hover:text-tp-ink",
         )}
       >
-        <Icon className="h-4 w-4 shrink-0" />
+        <Icon className="h-[14px] w-[14px] shrink-0 opacity-80" />
         <span className="truncate">{label}</span>
         <motion.span
           aria-hidden
@@ -429,7 +449,7 @@ function SidebarGroup({
           animate={{ rotate: expanded ? 90 : 0 }}
           transition={{ duration: 0.15, ease: "easeOut" }}
         >
-          <ChevronRight className="h-3.5 w-3.5" />
+          <ChevronRight className="h-3 w-3 text-tp-ink-3" />
         </motion.span>
       </button>
       {expanded ? (

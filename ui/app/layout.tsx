@@ -24,13 +24,30 @@ export const metadata: Metadata = {
 
 // Inline boot script. Runs before React hydrates so <html lang> matches
 // the persisted i18n choice (or the browser hint) — no FOUC when the user
-// previously picked English.
-const LANG_BOOT = `
+// previously picked English. Also hydrates the Tidepool theme (light/dark)
+// from localStorage so theme-sensitive surfaces (aurora, glass, palette
+// outline) paint in the correct mode on first paint, not after React.
+const BOOT = `
 (function(){try{
+  var el = document.documentElement;
+  // Language
   var k="corlinman_lang";
   var s=localStorage.getItem(k);
   var l=(s==="zh-CN"||s==="en")?s:((navigator.language||"").toLowerCase().indexOf("zh")===0?"zh-CN":"en");
-  document.documentElement.setAttribute("lang",l);
+  el.setAttribute("lang",l);
+  // Theme (Tidepool). URL ?theme=light|dark wins over storage (handy for
+  // demos / screenshot testing) — and is persisted to localStorage so that
+  // next-themes (initialised later inside React) sees the same value and
+  // doesn't override our choice. Otherwise falls back to stored value,
+  // then the legacy next-themes key, then dark as the default.
+  var tk="corlinman-theme";
+  var qs=(location.search||"").match(/[?&]theme=(light|dark)/);
+  var t = qs ? qs[1] : localStorage.getItem(tk);
+  if (!t) { var ts=localStorage.getItem("theme"); if (ts==="light"||ts==="dark") t=ts; }
+  if (t!=="light" && t!=="dark") t="dark";
+  if (qs) { try { localStorage.setItem(tk, t); } catch(_){} }
+  el.setAttribute("data-theme", t);
+  if (t==="dark") el.classList.add("dark"); else el.classList.remove("dark");
 }catch(e){}})();
 `;
 
@@ -44,12 +61,17 @@ export default function RootLayout({
     <html
       lang="zh-CN"
       suppressHydrationWarning
-      className={`${GeistSans.variable} ${GeistMono.variable} ${instrumentSerif.variable} dark`}
+      className={`${GeistSans.variable} ${GeistMono.variable} ${instrumentSerif.variable}`}
     >
       <head>
-        <script dangerouslySetInnerHTML={{ __html: LANG_BOOT }} />
+        <script dangerouslySetInnerHTML={{ __html: BOOT }} />
       </head>
-      <body className="min-h-dvh bg-background font-sans text-foreground antialiased">
+      {/* Body does NOT paint a background. Admin routes mount their own
+          <AuroraBackground />, login provides a dot-grid layer. Route groups
+          that need a solid color set it on their own wrapper. This lets the
+          aurora actually show through — otherwise bg-background sits on top
+          of the fixed -z-10 aurora layer. */}
+      <body className="min-h-dvh font-sans text-foreground antialiased">
         <Providers>{children}</Providers>
       </body>
     </html>

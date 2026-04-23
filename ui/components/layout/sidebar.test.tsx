@@ -109,8 +109,9 @@ describe("Sidebar", () => {
     // Active child's anchor carries aria-current=page.
     const qq = screen.getByRole("link", { name: /^QQ$/ });
     expect(qq).toHaveAttribute("aria-current", "page");
-    // The group label is bolded (class-level assertion).
-    expect(toggle.className).toMatch(/font-semibold/);
+    // The group label gets medium weight when a child is active
+    // (Tidepool uses `font-medium` — lighter than the legacy semibold).
+    expect(toggle.className).toMatch(/font-medium/);
   });
 
   it("auto-expands for the Telegram child route", () => {
