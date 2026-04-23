@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
-import { CharacterCard, tiltForName } from "./character-card";
+import { CharacterCard, tiltForName, deriveTags } from "./character-card";
 import type { AgentCard } from "@/lib/mocks/characters";
 
 function mockMatchMedia(reduceMatches: boolean) {
@@ -35,105 +35,77 @@ afterEach(() => {
 });
 
 describe("CharacterCard", () => {
-  it("renders the agent name and description on the back face", () => {
+  it("renders the agent name and description", () => {
     mockMatchMedia(false);
-    render(
-      <CharacterCard
-        card={SAMPLE}
-        flipped={false}
-        rotateDeg={0}
-        onFlip={() => {}}
-        onEdit={() => {}}
-      />,
-    );
-    // Both faces mount for the 3D flip; the back face carries the primary copy.
-    const back = screen.getByTestId("character-card-back-Mentor");
-    expect(back).toHaveTextContent("Mentor");
-    expect(back).toHaveTextContent("A senior developer who reviews your code.");
-    expect(back).toHaveAttribute("aria-pressed", "false");
+    render(<CharacterCard card={SAMPLE} onOpen={() => {}} />);
+    const card = screen.getByTestId("character-card-back-Mentor");
+    expect(card).toHaveTextContent("Mentor");
+    expect(card).toHaveTextContent("A senior developer who reviews your code.");
   });
 
-  it("toggles aria-pressed when flipped", () => {
+  it("fires onOpen when the card body is clicked", () => {
     mockMatchMedia(false);
-    const onFlip = vi.fn();
-    const { rerender } = render(
-      <CharacterCard
-        card={SAMPLE}
-        flipped={false}
-        rotateDeg={0}
-        onFlip={onFlip}
-        onEdit={() => {}}
-      />,
-    );
-    const back = screen.getByTestId("character-card-back-Mentor");
-    expect(back).toHaveAttribute("aria-pressed", "false");
-    fireEvent.click(back);
-    expect(onFlip).toHaveBeenCalledTimes(1);
-
-    rerender(
-      <CharacterCard
-        card={SAMPLE}
-        flipped
-        rotateDeg={0}
-        onFlip={onFlip}
-        onEdit={() => {}}
-      />,
-    );
-    const front = screen.getByTestId("character-card-front-Mentor");
-    expect(front).toHaveAttribute("aria-pressed", "true");
+    const onOpen = vi.fn();
+    render(<CharacterCard card={SAMPLE} onOpen={onOpen} />);
+    fireEvent.click(screen.getByTestId("character-card-back-Mentor"));
+    expect(onOpen).toHaveBeenCalledTimes(1);
   });
 
-  it("renders the top 3 tools on the front face", () => {
+  it("fires onOpen on Enter / Space when the card has focus", () => {
     mockMatchMedia(false);
-    render(
-      <CharacterCard
-        card={SAMPLE}
-        flipped
-        rotateDeg={0}
-        onFlip={() => {}}
-        onEdit={() => {}}
-      />,
-    );
-    const front = screen.getByTestId("character-card-front-Mentor");
-    expect(front).toHaveTextContent("read_file");
-    expect(front).toHaveTextContent("search_code");
-    expect(front).toHaveTextContent("run_tests");
+    const onOpen = vi.fn();
+    render(<CharacterCard card={SAMPLE} onOpen={onOpen} />);
+    const card = screen.getByTestId("character-card-back-Mentor");
+    fireEvent.keyDown(card, { key: "Enter" });
+    fireEvent.keyDown(card, { key: " " });
+    expect(onOpen).toHaveBeenCalledTimes(2);
   });
 
-  it("fires onEdit without re-flipping the card", () => {
+  it("renders the first 3 derived tag chips", () => {
     mockMatchMedia(false);
-    const onFlip = vi.fn();
+    render(<CharacterCard card={SAMPLE} onOpen={() => {}} />);
+    expect(
+      screen.getByTestId("character-card-tag-Mentor-read_file"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("character-card-tag-Mentor-search_code"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("character-card-tag-Mentor-run_tests"),
+    ).toBeInTheDocument();
+  });
+
+  it("fires onEdit (not onOpen) when the Edit affordance is clicked", () => {
+    mockMatchMedia(false);
+    const onOpen = vi.fn();
     const onEdit = vi.fn();
-    render(
-      <CharacterCard
-        card={SAMPLE}
-        flipped
-        rotateDeg={0}
-        onFlip={onFlip}
-        onEdit={onEdit}
-      />,
-    );
+    render(<CharacterCard card={SAMPLE} onOpen={onOpen} onEdit={onEdit} />);
     fireEvent.click(screen.getByTestId("character-card-edit-Mentor"));
     expect(onEdit).toHaveBeenCalledTimes(1);
-    expect(onFlip).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
   });
 
-  it("falls back to an instant swap under reduced motion", () => {
-    mockMatchMedia(true);
-    render(
-      <CharacterCard
-        card={SAMPLE}
-        flipped={false}
-        rotateDeg={0}
-        onFlip={() => {}}
-        onEdit={() => {}}
-      />,
-    );
-    // Only the back face mounts when reduced motion swaps instead of flips.
-    expect(screen.getByTestId("character-card-back-Mentor")).toBeInTheDocument();
-    expect(
-      screen.queryByTestId("character-card-front-Mentor"),
-    ).not.toBeInTheDocument();
+  it("falls back to onOpen when onEdit is omitted", () => {
+    mockMatchMedia(false);
+    const onOpen = vi.fn();
+    render(<CharacterCard card={SAMPLE} onOpen={onOpen} />);
+    fireEvent.click(screen.getByTestId("character-card-edit-Mentor"));
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("deriveTags", () => {
+  it("returns at most 3 tools plus a `+N` overflow chip", () => {
+    const many = {
+      ...SAMPLE,
+      tools_allowed: ["a", "b", "c", "d", "e"],
+    };
+    const tags = deriveTags(many);
+    expect(tags).toEqual(["a", "b", "c", "+2"]);
+  });
+
+  it("returns [] for an empty tool list", () => {
+    expect(deriveTags({ ...SAMPLE, tools_allowed: [] })).toEqual([]);
   });
 });
 

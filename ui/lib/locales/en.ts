@@ -248,6 +248,40 @@ export const en = {
     saveFailed: "save failed",
   },
 
+  characters: {
+    title: "Characters",
+    tp: {
+      leadPill: "{{total}} personalities · {{tagged}} with tags",
+      leadPillOffline: "deck unavailable",
+      proseLead: "{{total}} personalities.",
+      proseMiddle: " {{withTools}} wired to tools · {{withSkills}} linked to skills.",
+      proseTail: " The deck is what the router pulls from when a new session lands.",
+      proseOffline:
+        "The character deck failed to load — panels below reflect cached or placeholder data.",
+      proseUpdated: "Last refreshed {{when}}.",
+      ctaNew: "New card",
+      ctaNewAria: "Scaffold a new character",
+      ctaPaletteHint: "⌘K to search commands",
+      statTotal: "Total",
+      statTagged: "With tags",
+      statWithTools: "With tools",
+      statWithSkills: "With skills",
+      statFootTotal: "personalities on file",
+      statFootTagged: "grouped by tool surface",
+      statFootWithTools: "ready to invoke",
+      statFootWithSkills: "reuse skill packs",
+      searchPlaceholder: "Search by name or description…",
+      filterLabel: "tool filter",
+      filterAll: "All",
+      emptyTitle: "No characters match",
+      emptyHint: "Adjust the search or tag filter.",
+      emptyNone: "No characters yet. Use “New card” to scaffold one.",
+      offlineTitle: "Characters unavailable",
+      offlineHint: "The list will populate once the deck responds.",
+      loadFailed: "Could not load characters",
+    },
+  },
+
   rag: {
     title: "RAG",
     subtitle:

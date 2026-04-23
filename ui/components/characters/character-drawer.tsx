@@ -7,16 +7,20 @@ import { Button } from "@/components/ui/button";
 import { Drawer } from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
 import type { AgentCard } from "@/lib/mocks/characters";
 
 /**
- * Right-side edit drawer for a Character card (B2-FE4).
+ * Right-side edit drawer for a Character card — Tidepool retoken.
  *
- * Chrome (slide, overlay, header, footer, close button, focus-trap) comes
- * from the shared `<Drawer>` primitive. This component owns the form body
- * and its validation/token-preview logic.
+ * Chrome (slide, overlay, focus-trap, Esc-to-close, close button) still
+ * comes from the shared Radix-based `<Drawer>` primitive. Only this
+ * component's body was retokened away from the neutral accent-2/muted
+ * palette onto the warm Tidepool glass vocabulary
+ * (`bg-tp-glass-inner`, `text-tp-ink-*`, `border-tp-glass-edge`,
+ * `bg-tp-amber-soft`).
  *
- * MVP scope:
+ * MVP scope (unchanged from B2-FE4):
  *   - Name is read-only; creating new agents lands in B2-BE5.
  *   - Description + system prompt are plain textareas. Monaco syntax
  *     highlight ships later; keeping the surface boring makes the token-
@@ -172,7 +176,11 @@ export function CharacterDrawer({ open, onOpenChange, card }: CharacterDrawerPro
     >
       <div className="px-6 py-5" data-testid="character-drawer">
         <div className="space-y-5">
-          <Field label="Name" htmlFor="char-name" hint="Read-only for MVP — new names come in B2-BE5.">
+          <Field
+            label="Name"
+            htmlFor="char-name"
+            hint="Read-only for MVP — new names come in B2-BE5."
+          >
             <Input
               id="char-name"
               value={draft.name}
@@ -190,7 +198,12 @@ export function CharacterDrawer({ open, onOpenChange, card }: CharacterDrawerPro
                 setDraft((d) => ({ ...d, description: e.target.value }))
               }
               rows={2}
-              className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className={cn(
+                "flex w-full rounded-md border px-3 py-2 text-sm shadow-sm",
+                "border-tp-glass-edge bg-tp-glass-inner text-tp-ink",
+                "placeholder:text-tp-ink-4",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/50",
+              )}
             />
           </Field>
 
@@ -206,7 +219,12 @@ export function CharacterDrawer({ open, onOpenChange, card }: CharacterDrawerPro
                 setDraft((d) => ({ ...d, systemPrompt: e.target.value }))
               }
               rows={8}
-              className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs leading-relaxed shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className={cn(
+                "flex w-full rounded-md border px-3 py-2 font-mono text-xs leading-relaxed shadow-sm",
+                "border-tp-glass-edge bg-tp-glass-inner text-tp-ink-2",
+                "placeholder:text-tp-ink-4",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/50",
+              )}
             />
             <TokenPreview tokens={tokens} />
           </Field>
@@ -214,7 +232,7 @@ export function CharacterDrawer({ open, onOpenChange, card }: CharacterDrawerPro
           <Field label="Variables">
             <div className="space-y-2">
               {draft.variables.length === 0 ? (
-                <p className="text-xs italic text-muted-foreground">
+                <p className="text-xs italic text-tp-ink-4">
                   No variables yet.
                 </p>
               ) : null}
@@ -226,7 +244,7 @@ export function CharacterDrawer({ open, onOpenChange, card }: CharacterDrawerPro
                     onChange={(e) => updateVariable(idx, [e.target.value, v])}
                     className="h-8 w-40 font-mono text-xs"
                   />
-                  <span className="text-xs text-muted-foreground">=</span>
+                  <span className="text-xs text-tp-ink-3">=</span>
                   <Input
                     value={v}
                     placeholder="value"
@@ -237,7 +255,12 @@ export function CharacterDrawer({ open, onOpenChange, card }: CharacterDrawerPro
                     type="button"
                     onClick={() => removeVariable(idx)}
                     aria-label={`Remove variable ${k || "row"}`}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    className={cn(
+                      "inline-flex h-8 w-8 items-center justify-center rounded-md",
+                      "text-tp-ink-3 transition-colors",
+                      "hover:bg-tp-glass-inner-hover hover:text-tp-ink",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+                    )}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -300,11 +323,11 @@ function Field({
   return (
     <div className="space-y-1.5">
       <div className="flex items-baseline justify-between gap-2">
-        <Label htmlFor={htmlFor} className="text-xs font-medium text-foreground">
+        <Label htmlFor={htmlFor} className="text-xs font-medium text-tp-ink">
           {label}
         </Label>
         {hint ? (
-          <span className="text-[10px] text-muted-foreground">{hint}</span>
+          <span className="text-[10px] text-tp-ink-4">{hint}</span>
         ) : null}
       </div>
       {children}
@@ -316,17 +339,23 @@ function TokenPreview({ tokens }: { tokens: string[] }) {
   if (tokens.length === 0) return null;
   return (
     <div className="mt-1.5 space-y-1">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+      <div className="font-mono text-[10px] uppercase tracking-[0.1em] text-tp-ink-4">
         tokens
       </div>
       <pre
         aria-label="Parsed tokens in the system prompt"
-        className="flex flex-wrap gap-1.5 rounded-md border border-dashed border-border bg-background/40 p-2 font-mono text-[10px]"
+        className={cn(
+          "flex flex-wrap gap-1.5 rounded-md border border-dashed p-2 font-mono text-[10px]",
+          "border-tp-glass-edge bg-tp-glass-inner/60",
+        )}
       >
         {tokens.map((t, i) => (
           <span
             key={`${t}-${i}`}
-            className="inline-flex items-center rounded-full bg-accent-2/40 px-2 py-0.5 text-accent-foreground"
+            className={cn(
+              "inline-flex items-center rounded-full px-2 py-0.5",
+              "bg-tp-amber-soft text-tp-amber border border-tp-amber/25",
+            )}
             data-testid={`char-token-${i}`}
           >
             {t}
@@ -358,12 +387,15 @@ function ChipEditor({
     <div className="space-y-2">
       <ul className="flex flex-wrap gap-1.5">
         {items.length === 0 ? (
-          <li className="text-xs italic text-muted-foreground">None yet.</li>
+          <li className="text-xs italic text-tp-ink-4">None yet.</li>
         ) : (
           items.map((item) => (
             <li
               key={item}
-              className="inline-flex items-center gap-1 rounded-full border border-border bg-background/60 px-2 py-0.5 font-mono text-[10px]"
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px]",
+                "border-tp-glass-edge bg-tp-glass-inner text-tp-ink-2",
+              )}
               data-testid={`${testIdPrefix}-chip-${item}`}
             >
               {item}
@@ -371,7 +403,11 @@ function ChipEditor({
                 type="button"
                 onClick={() => onRemove(item)}
                 aria-label={`Remove ${item}`}
-                className="text-muted-foreground transition-colors hover:text-foreground"
+                className={cn(
+                  "text-tp-ink-4 transition-colors",
+                  "hover:text-tp-ink",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40 rounded",
+                )}
               >
                 <X className="h-3 w-3" />
               </button>
