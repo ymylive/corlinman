@@ -1,536 +1,445 @@
 "use client";
 
 import * as React from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { LiveDot } from "@/components/ui/live-dot";
-import { AnimatedNumber } from "@/components/ui/animated-number";
+import { cn } from "@/lib/utils";
+import { GlassPanel } from "@/components/ui/glass-panel";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useMotion } from "@/components/ui/motion-safe";
-import { cn } from "@/lib/utils";
 import {
   useMockHookStream,
-  ALL_HOOK_KINDS,
   kindCategory,
   type HookCategory,
   type HookEvent,
-  type HookEventKind,
 } from "@/lib/hooks/use-mock-hook-stream";
-import { EventRow, eventColor } from "@/components/hooks/event-row";
-import { EventSparkline } from "@/components/hooks/event-sparkline";
+import type { StreamState } from "@/components/ui/stream-pill";
+import { HooksControlBar } from "@/components/hooks/hooks-control-bar";
+import {
+  HookEventRow,
+  deriveHookMetrics,
+} from "@/components/hooks/hook-event-row";
+import { HookDetailDrawer } from "@/components/hooks/hook-detail-drawer";
+import {
+  parseCategory,
+  subscriberPanel,
+} from "@/components/hooks/hooks-util";
 
-const ALL_KINDS: HookEventKind[] = ALL_HOOK_KINDS;
+/**
+ * Hooks — Phase 5c Tidepool cutover.
+ *
+ * Layout:
+ *   [ hero prose (glass strong) ]
+ *   [ StreamPill · rate ]
+ *   [ StatChip × 4: events/min · subscribers · p50 · p95 ]
+ *   [ FilterChipGroup: all · message · session · agent · lifecycle · … ]
+ *   [ event stream (glass soft)   │ HookDetailDrawer (when selected) ]
+ *
+ * Data flow: the page consumes `useMockHookStream()` (the existing mock
+ * emitter) until Batch 5 ships `/admin/hooks/stream`. While *paused*,
+ * incoming events are buffered into a side ring and surfaced as a
+ * resume-to-view pill — we never drop events that arrive during a pause.
+ *
+ * Newest row gets `justNow` for 2.8s (the tp-just-now keyframe window).
+ * Clicking a row selects it; clicking the same row again closes the drawer.
+ * Esc also closes the drawer.
+ */
 
-const CATEGORY_ORDER: HookCategory[] = [
-  "all",
-  "message",
-  "session",
-  "agent",
-  "lifecycle",
-  "approval",
-  "rate_limit",
-  "tool",
-  "config",
-];
+type SelectedKey = string | null;
 
-const CATEGORY_LABELS: Record<HookCategory, string> = {
-  all: "All",
-  message: "Messages",
-  session: "Session",
-  agent: "Agent",
-  lifecycle: "Lifecycle",
-  approval: "Approval",
-  rate_limit: "RateLimit",
-  tool: "Tool",
-  config: "Config",
-};
+// Ring cap — the hook stream already caps at MAX_EVENTS=200 upstream, but we
+// keep a local ceiling mirroring it so the paused-side buffer doesn't grow
+// unbounded during long pauses.
+const RING_MAX = 200;
 
-function kindsForCategory(cat: HookCategory): HookEventKind[] {
-  if (cat === "all") return ALL_KINDS;
-  return ALL_KINDS.filter((k) => kindCategory(k) === cat);
-}
+// Single baked spark for the primary (events/min) chip so we don't recompute
+// on every render. Same geometry as Approvals/Dashboard pending sparks.
+const EVENTS_SPARK_PATH =
+  "M0 30 L30 26 L60 22 L90 24 L120 20 L150 22 L180 14 L210 18 L240 12 L270 16 L300 10 L300 36 L0 36 Z";
 
-function parseExcluded(raw: string | null): Set<string> {
-  if (!raw) return new Set();
-  return new Set(
-    raw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
-}
-
-function serializeExcluded(set: Set<string>): string | null {
-  if (set.size === 0) return null;
-  return Array.from(set).sort().join(",");
-}
-
-function parseCategory(raw: string | null): HookCategory {
-  const valid: HookCategory[] = CATEGORY_ORDER;
-  if (raw && (valid as string[]).includes(raw)) return raw as HookCategory;
-  return "all";
-}
-
-const ALERT_STORAGE_KEY = "corlinman.hooks.alert-approvals.v1";
-
-/** Hooks · Event Stream — admin observability page. */
 export default function HooksPage() {
-  const { events, connected, eps, epsHistory } = useMockHookStream();
-  const { reduced, motionSafe } = useMotion();
+  const { t } = useTranslation();
+  const { reduced } = useMotion();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const excluded = React.useMemo(
-    () => parseExcluded(searchParams?.get("exclude") ?? null),
-    [searchParams],
-  );
+
+  // Live mock firehose — stays the source of truth until B5.
+  const { events: liveEvents, connected, eps } = useMockHookStream();
+
+  // ─── pause-aware buffer ────────────────────────────────
+  const [paused, setPaused] = React.useState(false);
+  const pausedRef = React.useRef(paused);
+  pausedRef.current = paused;
+
+  // Snapshot of events the user *has* seen. When paused we stop updating
+  // this — but we *do* record any newly arrived events in a side ring so
+  // we can drain them on resume.
+  const [frozen, setFrozen] = React.useState<HookEvent[] | null>(null);
+  const sideBufferRef = React.useRef<HookEvent[]>([]);
+  const [pendingCount, setPendingCount] = React.useState(0);
+
+  // Snapshot just once when the user pauses; unfreeze and drain on resume.
+  React.useEffect(() => {
+    if (paused) {
+      setFrozen(liveEvents);
+      sideBufferRef.current = [];
+      setPendingCount(0);
+    } else if (frozen !== null) {
+      setFrozen(null);
+      sideBufferRef.current = [];
+      setPendingCount(0);
+    }
+    // `frozen` is intentionally dep-omitted — we want the snapshot to
+    // freeze *at* the toggle edge, not any time `frozen` changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paused]);
+
+  // While paused, accumulate newly-arrived events into the side ring so the
+  // "N new · resume" pill has an accurate count.
+  React.useEffect(() => {
+    if (!paused || frozen === null) return;
+    const frozenIds = new Set(frozen.map((e) => e.id));
+    const fresh = liveEvents.filter((e) => !frozenIds.has(e.id));
+    if (fresh.length === 0) return;
+    sideBufferRef.current = fresh.slice(0, RING_MAX);
+    setPendingCount(Math.min(fresh.length, RING_MAX));
+    // liveEvents updates frequently; keep the effect cheap.
+  }, [paused, frozen, liveEvents]);
+
+  /** The list the user sees — frozen snapshot while paused, live otherwise. */
+  const events = paused && frozen ? frozen : liveEvents;
+
+  // ─── category (URL-persisted) ───────────────────────────
   const category = React.useMemo(
     () => parseCategory(searchParams?.get("cat") ?? null),
     [searchParams],
   );
-
-  // Persisted "Alert on approval requests" checkbox.
-  const [alertApprovals, setAlertApprovals] = React.useState(false);
-  React.useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = window.localStorage.getItem(ALERT_STORAGE_KEY);
-      if (raw === "1") setAlertApprovals(true);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-  const toggleAlert = React.useCallback(() => {
-    setAlertApprovals((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem(ALERT_STORAGE_KEY, next ? "1" : "0");
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-  }, []);
-
-  const updateQuery = React.useCallback(
-    (mutator: (params: URLSearchParams) => void) => {
+  const setCategory = React.useCallback(
+    (next: HookCategory) => {
       const params = new URLSearchParams(searchParams?.toString() ?? "");
-      mutator(params);
+      if (next === "all") params.delete("cat");
+      else params.set("cat", next);
       const query = params.toString();
       router.replace(`/hooks${query ? `?${query}` : ""}`, { scroll: false });
     },
     [router, searchParams],
   );
 
-  const setExcluded = React.useCallback(
-    (next: Set<string>) => {
-      updateQuery((params) => {
-        const serialized = serializeExcluded(next);
-        if (serialized) params.set("exclude", serialized);
-        else params.delete("exclude");
-      });
-    },
-    [updateQuery],
-  );
+  // ─── selection ──────────────────────────────────────────
+  const [selectedId, setSelectedId] = React.useState<SelectedKey>(null);
 
-  const setCategory = React.useCallback(
-    (next: HookCategory) => {
-      updateQuery((params) => {
-        if (next === "all") params.delete("cat");
-        else params.set("cat", next);
-      });
-    },
-    [updateQuery],
-  );
-
-  const toggleKind = React.useCallback(
-    (kind: HookEventKind) => {
-      const next = new Set(excluded);
-      if (next.has(kind)) next.delete(kind);
-      else next.add(kind);
-      setExcluded(next);
-    },
-    [excluded, setExcluded],
-  );
-
-  const visibleKinds = React.useMemo(
-    () => kindsForCategory(category),
-    [category],
-  );
-  const visibleKindSet = React.useMemo(
-    () => new Set<string>(visibleKinds),
-    [visibleKinds],
-  );
-
-  const visibleEvents = React.useMemo(
-    () =>
-      events.filter(
-        (e) => visibleKindSet.has(e.kind) && !excluded.has(e.kind),
-      ),
-    [events, visibleKindSet, excluded],
-  );
-
-  // Track newly arrived approval.requested event ids for this session, so
-  // <EventRow> only gets the one-shot `alertBoost` flag on the row that just
-  // arrived (not on every re-render).
-  const seenApprovalIdsRef = React.useRef<Set<string>>(new Set());
-  const [boostedIds, setBoostedIds] = React.useState<Set<string>>(new Set());
+  // Close drawer on Esc.
   React.useEffect(() => {
-    if (!alertApprovals) return;
-    let changed = false;
-    const nextBoosted = new Set(boostedIds);
-    for (const evt of events) {
-      if (evt.kind !== "approval.requested") continue;
-      if (seenApprovalIdsRef.current.has(evt.id)) continue;
-      seenApprovalIdsRef.current.add(evt.id);
-      nextBoosted.add(evt.id);
-      changed = true;
-      // Clear boost after 800ms so layout stabilises.
-      setTimeout(() => {
-        setBoostedIds((prev) => {
-          if (!prev.has(evt.id)) return prev;
-          const copy = new Set(prev);
-          copy.delete(evt.id);
-          return copy;
-        });
-      }, 800);
+    function onKey(ev: KeyboardEvent) {
+      if (ev.key === "Escape" && selectedId !== null) setSelectedId(null);
     }
-    if (changed) setBoostedIds(nextBoosted);
-    // `boostedIds` intentionally omitted — we read from ref + functional update.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [events, alertApprovals]);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedId]);
 
-  // Ripple: fire a single-shot animation whenever the connection flips
-  // disconnected → connected.
-  const prevConnectedRef = React.useRef(connected);
-  const [rippleKey, setRippleKey] = React.useState(0);
+  // ─── just-now tracking ──────────────────────────────────
+  // Mark the newest id seen each time the ring grows. The CSS keyframe
+  // (2.8s) handles the visual fade — we only need to know "which id is the
+  // new one" on each tick.
+  const prevTopIdRef = React.useRef<string | null>(null);
+  const [justNowId, setJustNowId] = React.useState<string | null>(null);
   React.useEffect(() => {
-    if (!prevConnectedRef.current && connected) {
-      setRippleKey((k) => k + 1);
+    if (paused) return; // during pause we don't surface new highlights
+    const top = events[0]?.id ?? null;
+    if (top && top !== prevTopIdRef.current) {
+      prevTopIdRef.current = top;
+      if (!reduced) setJustNowId(top);
     }
-    prevConnectedRef.current = connected;
-  }, [connected]);
+  }, [events, paused, reduced]);
+  React.useEffect(() => {
+    if (!justNowId) return;
+    const id = window.setTimeout(() => setJustNowId(null), 2800);
+    return () => window.clearTimeout(id);
+  }, [justNowId]);
 
-  // Aggregate per-kind counts across the full event buffer.
-  const kindCounts = React.useMemo(() => {
-    const counts = new Map<HookEventKind, number>();
-    for (const k of ALL_KINDS) counts.set(k, 0);
+  // ─── per-event metrics (derived, memoised by event id) ──
+  // `deriveHookMetrics` is deterministic per id; memoising an id→metrics
+  // map means we only recompute for ids we haven't seen yet.
+  const metricsCacheRef = React.useRef<
+    Map<string, { subscribers: number; latencyMs: number }>
+  >(new Map());
+  const getMetrics = React.useCallback((evt: HookEvent) => {
+    const cache = metricsCacheRef.current;
+    const hit = cache.get(evt.id);
+    if (hit) return hit;
+    const fresh = deriveHookMetrics(evt);
+    cache.set(evt.id, fresh);
+    return fresh;
+  }, []);
+
+  // ─── visible (post-filter) ──────────────────────────────
+  const visibleEvents = React.useMemo(() => {
+    if (category === "all") return events;
+    return events.filter((e) => kindCategory(e.kind) === category);
+  }, [events, category]);
+
+  // ─── aggregates for the control bar ─────────────────────
+  const categoryCounts = React.useMemo(() => {
+    const out: Partial<Record<HookCategory, number>> = {};
+    out.all = events.length;
     for (const e of events) {
-      counts.set(e.kind, (counts.get(e.kind) ?? 0) + 1);
+      const c = kindCategory(e.kind);
+      out[c] = (out[c] ?? 0) + 1;
     }
-    return counts;
+    return out;
   }, [events]);
 
-  // Pending approvals: approval.requested ids not yet resolved by a matching
-  // approval.decided in the buffer.
-  const pendingApprovalCount = React.useMemo(() => {
-    const decided = new Set<string>();
+  /** Events-per-minute across the ring's 60s window. Falls back to EPS when
+   * the buffer doesn't cover a full minute. */
+  const eventsPerMin = React.useMemo(() => {
+    if (events.length === 0) return 0;
+    const now = Date.now();
+    const cutoff = now - 60_000;
+    const n = events.filter((e) => e.ts >= cutoff).length;
+    if (n > 0) return n;
+    // Fallback — eps*60 so the chip still reflects the firehose rate when
+    // the buffer is young.
+    return eps * 60;
+  }, [events, eps]);
+
+  /** Aggregate subscribers + latencies across the visible ring. */
+  const aggregates = React.useMemo(() => {
+    if (events.length === 0) {
+      return { subscribers: 0, p50: null, p95: null, topKind: null };
+    }
+    let totalSubs = 0;
+    const latencies: number[] = [];
+    const kindCounts = new Map<string, number>();
     for (const e of events) {
-      if (e.kind === "approval.decided" && typeof e.payload?.id === "string") {
-        decided.add(e.payload.id);
+      const m = getMetrics(e);
+      totalSubs += m.subscribers;
+      latencies.push(m.latencyMs);
+      kindCounts.set(e.kind, (kindCounts.get(e.kind) ?? 0) + 1);
+    }
+    latencies.sort((a, b) => a - b);
+    const p = (q: number): number => {
+      if (latencies.length === 0) return 0;
+      const idx = Math.min(
+        latencies.length - 1,
+        Math.max(0, Math.floor(q * (latencies.length - 1))),
+      );
+      return latencies[idx]!;
+    };
+    // Average subscribers across the buffer is the honest summary — the raw
+    // sum conflates time with fan-out.
+    const avgSubs = totalSubs / events.length;
+    let topKind: string | null = null;
+    let topCount = -1;
+    for (const [k, n] of kindCounts) {
+      if (n > topCount) {
+        topKind = k;
+        topCount = n;
       }
     }
-    let pending = 0;
-    for (const e of events) {
-      if (e.kind !== "approval.requested") continue;
-      const id = e.payload?.id;
-      if (typeof id !== "string" || !decided.has(id)) pending += 1;
-    }
-    return pending;
-  }, [events]);
+    return {
+      subscribers: Math.round(avgSubs),
+      p50: p(0.5),
+      p95: p(0.95),
+      topKind,
+    };
+  }, [events, getMetrics]);
 
-  // Rate-limit triggers in last 60s. Recomputed on every render — tiny buffer.
-  const [statsNow, setStatsNow] = React.useState(() => Date.now());
-  React.useEffect(() => {
-    const id = setInterval(() => setStatsNow(Date.now()), 1000);
-    return () => clearInterval(id);
+  // ─── stream state + rate ────────────────────────────────
+  const streamState: StreamState = !connected
+    ? "throttled"
+    : paused
+      ? "paused"
+      : "live";
+  const streamRate = eps >= 1 ? `${eps.toFixed(1)}/s` : `${Math.round(eps * 60)} ev/min`;
+  const onToggleStream = React.useCallback((_current?: StreamState) => {
+    setPaused((p) => !p);
   }, []);
-  const rateLimitLast60s = React.useMemo(() => {
-    const cutoff = statsNow - 60_000;
-    return events.filter(
-      (e) => e.kind === "rate_limit.triggered" && e.ts >= cutoff,
-    ).length;
-  }, [events, statsNow]);
 
-  // Tool call success rate across the last 60 `tool.called` events.
-  const toolSuccessRate = React.useMemo(() => {
-    const recent = events.filter((e) => e.kind === "tool.called").slice(0, 60);
-    if (recent.length === 0) return null;
-    const ok = recent.filter((e) => e.payload?.ok === true).length;
-    return ok / recent.length;
-  }, [events]);
+  // ─── selection helpers ──────────────────────────────────
+  const selectedEvent = React.useMemo(() => {
+    if (selectedId === null) return null;
+    return events.find((e) => e.id === selectedId) ?? null;
+  }, [events, selectedId]);
 
-  // Tablist keyboard arrow navigation.
-  const onCategoryKeyDown = React.useCallback(
-    (e: React.KeyboardEvent<HTMLButtonElement>, idx: number) => {
-      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
-      e.preventDefault();
-      const delta = e.key === "ArrowRight" ? 1 : -1;
-      const nextIdx =
-        (idx + delta + CATEGORY_ORDER.length) % CATEGORY_ORDER.length;
-      const next = CATEGORY_ORDER[nextIdx]!;
-      setCategory(next);
-      // Focus the new tab after the route replace settles.
-      requestAnimationFrame(() => {
-        const el = document.querySelector<HTMLButtonElement>(
-          `[data-category-tab="${next}"]`,
-        );
-        el?.focus();
-      });
-    },
-    [setCategory],
+  const selectedMetrics = selectedEvent ? getMetrics(selectedEvent) : null;
+  const subscriberNames = React.useMemo(
+    () => (selectedEvent ? subscriberPanel(selectedEvent) : []),
+    [selectedEvent],
   );
 
+  // ─── hero prose ─────────────────────────────────────────
+  const heroSubCount = categoryCounts.config ?? 0;
+  const heroEventsPerMin = Math.round(eventsPerMin);
+
   return (
-    <div className="flex flex-col gap-6">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Hooks · Event Stream
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            Live firehose of gateway + agent lifecycle events.
-          </p>
-        </div>
-        <div className="flex items-center gap-4">
-          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={alertApprovals}
-              onChange={toggleAlert}
-              className="h-3.5 w-3.5 accent-warn"
-              data-testid="alert-approvals-toggle"
-            />
-            Alert on approval requests
-          </label>
-          <div className="relative flex items-center gap-2 rounded-md border border-border bg-card/60 px-3 py-1.5">
-            <LiveDot
-              variant={connected ? "ok" : "err"}
-              pulse
-              label={connected ? "Live" : "Reconnecting"}
-            />
-            <span className="text-xs font-medium">
-              {connected ? "Live" : "Reconnecting"}
-            </span>
-            {!reduced ? (
-              <AnimatePresence>
-                <motion.span
-                  key={rippleKey}
-                  aria-hidden="true"
-                  initial={{ scale: 0, opacity: 0.4 }}
-                  animate={{ scale: 8, opacity: 0 }}
-                  transition={{ duration: 0.8, ease: "easeOut" }}
-                  className="pointer-events-none absolute left-3 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full bg-ok"
-                />
-              </AnimatePresence>
-            ) : null}
-          </div>
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <AnimatedNumber
-              value={eps}
-              format="number"
-              formatOptions={{ maximumFractionDigits: 1 }}
-              className="font-mono text-sm text-foreground"
-              data-testid="eps"
-            />
-            <span>events / s</span>
-          </div>
-        </div>
-      </header>
-
-      {/* Category filter row — tablist with arrow-key nav. */}
-      <div
-        role="tablist"
-        aria-label="Event category filter"
-        className="flex flex-wrap gap-1.5"
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
+      {/* Hero — glass strong, prose-quiet (mirrors Approvals hero pattern). */}
+      <GlassPanel
+        as="header"
+        variant="strong"
+        className="flex flex-col gap-3 p-5 sm:p-6"
       >
-        {CATEGORY_ORDER.map((cat, idx) => {
-          const selected = category === cat;
-          return (
-            <button
-              key={cat}
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              tabIndex={selected ? 0 : -1}
-              data-category-tab={cat}
-              data-testid={`category-${cat}`}
-              onClick={() => setCategory(cat)}
-              onKeyDown={(e) => onCategoryKeyDown(e, idx)}
-              className={cn(
-                "rounded-full border px-2.5 py-0.5 font-mono text-[11px] transition-colors",
-                selected
-                  ? "border-accent bg-accent/30 text-foreground"
-                  : "border-border bg-card text-muted-foreground hover:bg-accent/20",
-              )}
-            >
-              {CATEGORY_LABELS[cat]}
-            </button>
-          );
-        })}
-      </div>
+        <h1 className="font-sans text-[28px] font-semibold leading-[1.15] tracking-[-0.025em] text-tp-ink sm:text-[32px]">
+          {t("hooks.tp.heroTitle")}
+        </h1>
+        <p className="max-w-[62ch] text-[14px] leading-[1.6] text-tp-ink-2">
+          <InlineMetric tone="amber">
+            {t("hooks.tp.heroLeadN", { n: heroEventsPerMin })}
+          </InlineMetric>
+          <span className="ml-1">
+            {t("hooks.tp.heroLeadAttend", { n: heroSubCount })}
+          </span>
+          <span className="ml-1 text-tp-ink-3">
+            {t("hooks.tp.heroTier")}
+          </span>
+        </p>
+      </GlassPanel>
 
-      <div className="grid gap-4 lg:grid-cols-[70fr_30fr]">
-        <section
-          aria-label="Hook event stream"
-          className="flex min-h-[480px] flex-col rounded-lg border border-border bg-card/40"
+      {/* Control bar (stream pill · stats · category filter). */}
+      <HooksControlBar
+        streamState={streamState}
+        streamRate={streamRate}
+        onToggleStream={onToggleStream}
+        category={category}
+        onCategoryChange={setCategory}
+        categoryCounts={categoryCounts}
+        eventsPerMin={eventsPerMin}
+        eventsSparkPath={EVENTS_SPARK_PATH}
+        subscribers={aggregates.subscribers}
+        topKindLabel={aggregates.topKind ?? undefined}
+        p50Ms={aggregates.p50}
+        p95Ms={aggregates.p95}
+      />
+
+      {/* Paused + pending banner */}
+      {paused && pendingCount > 0 ? (
+        <button
+          type="button"
+          onClick={() => onToggleStream()}
+          className={cn(
+            "inline-flex w-fit items-center gap-2 self-center rounded-full border px-3 py-1",
+            "bg-tp-amber-soft border-tp-amber/25 text-tp-amber",
+            "font-mono text-[11.5px]",
+            "hover:border-tp-amber/40",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+          )}
+          data-testid="resume-pending-pill"
         >
-          <div className="border-b border-border px-4 py-2 text-xs uppercase tracking-wider text-muted-foreground">
-            Recent events · {visibleEvents.length} shown
+          <span className="tabular-nums">
+            {t("hooks.tp.pendingResume", { n: pendingCount })}
+          </span>
+        </button>
+      ) : null}
+
+      {/* Main grid — stream list + optional detail drawer */}
+      <div
+        className={cn(
+          "grid min-h-0 flex-1 gap-3.5",
+          selectedEvent
+            ? "lg:grid-cols-[minmax(0,1fr)_380px]"
+            : "lg:grid-cols-[minmax(0,1fr)]",
+        )}
+      >
+        <GlassPanel
+          variant="soft"
+          className="flex min-h-[480px] flex-col overflow-hidden"
+        >
+          {/* column header (aria-hidden, decorative labels) */}
+          <div
+            aria-hidden
+            className={cn(
+              "grid items-center gap-3 border-b border-tp-glass-edge px-4 py-2.5",
+              "grid-cols-[82px_170px_64px_minmax(0,1fr)_auto]",
+              "font-mono text-[10.5px] uppercase tracking-[0.08em] text-tp-ink-4",
+            )}
+          >
+            <span>{t("hooks.tp.colTime")}</span>
+            <span>{t("hooks.tp.colKind")}</span>
+            <span>{t("hooks.tp.colSubs")}</span>
+            <span>{t("hooks.tp.colMessage")}</span>
+            <span>{t("hooks.tp.colLatency")}</span>
           </div>
-          <div className="flex-1 overflow-y-auto p-3">
+
+          <div
+            role="log"
+            aria-label={t("hooks.tp.streamAria")}
+            aria-live="polite"
+            className="relative min-h-0 flex-1 overflow-y-auto"
+          >
             {visibleEvents.length === 0 ? (
-              <EmptyState
-                title="No events yet"
-                description="Waiting for the first hook to fire…"
-              />
+              <div className="p-8">
+                <EmptyState
+                  title={
+                    events.length === 0
+                      ? t("hooks.tp.emptyTitle")
+                      : t("hooks.tp.emptyFilterTitle")
+                  }
+                  description={
+                    events.length === 0
+                      ? t("hooks.tp.emptyBody")
+                      : t("hooks.tp.emptyFilterBody")
+                  }
+                />
+              </div>
             ) : (
-              <ol
-                role="log"
-                aria-live="polite"
-                aria-atomic="false"
-                className="flex flex-col gap-2"
-              >
-                <AnimatePresence initial={false}>
-                  {visibleEvents.map((evt: HookEvent) => (
-                    <EventRow
-                      key={evt.id}
-                      event={evt}
-                      alertBoost={
-                        alertApprovals &&
-                        motionSafe &&
-                        boostedIds.has(evt.id) &&
-                        evt.kind === "approval.requested"
-                      }
-                    />
-                  ))}
-                </AnimatePresence>
+              <ol className="flex flex-col">
+                {visibleEvents.map((evt) => {
+                  const metrics = getMetrics(evt);
+                  return (
+                    <li key={evt.id} className="contents">
+                      <HookEventRow
+                        event={evt}
+                        subscribers={metrics.subscribers}
+                        latencyMs={metrics.latencyMs}
+                        justNow={evt.id === justNowId}
+                        selected={evt.id === selectedId}
+                        onClick={() =>
+                          setSelectedId((prev) =>
+                            prev === evt.id ? null : evt.id,
+                          )
+                        }
+                      />
+                    </li>
+                  );
+                })}
               </ol>
             )}
           </div>
-        </section>
+        </GlassPanel>
 
-        <aside className="flex flex-col gap-4">
-          <div className="rounded-lg border border-border bg-card/40 p-4">
-            <div className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">
-              Events / second · last 60s
-            </div>
-            <EventSparkline
-              samples={epsHistory}
-              width={240}
-              height={48}
-              className="w-full"
-              label={`EPS sparkline, current ${eps.toFixed(1)}`}
-            />
-          </div>
-
-          <div className="rounded-lg border border-border bg-card/40 p-4">
-            <div className="mb-3 text-xs uppercase tracking-wider text-muted-foreground">
-              Filter kinds
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {visibleKinds.map((kind) => {
-                const muted = excluded.has(kind);
-                const colour = eventColor(kind);
-                return (
-                  <button
-                    key={kind}
-                    type="button"
-                    role="checkbox"
-                    aria-checked={!muted}
-                    onClick={() => toggleKind(kind)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        toggleKind(kind);
-                      }
-                    }}
-                    className={cn(
-                      "rounded-full border px-2 py-0.5 font-mono text-[10px] transition-colors",
-                      muted
-                        ? "border-border bg-muted text-muted-foreground line-through"
-                        : "border-border bg-card text-foreground hover:bg-accent/40",
-                      !muted && colour === "accent" && "border-accent/60",
-                      !muted && colour === "accent-2" && "border-accent-2/60",
-                      !muted && colour === "accent-3" && "border-accent-3/60",
-                      !muted && colour === "ok" && "border-ok/60",
-                      !muted && colour === "warn" && "border-warn/60",
-                      !muted && colour === "err" && "border-err/60",
-                    )}
-                    data-testid={`filter-${kind}`}
-                  >
-                    {kind}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-border bg-card/40 p-4">
-            <div className="mb-3 text-xs uppercase tracking-wider text-muted-foreground">
-              Stats
-            </div>
-            <dl className="space-y-1.5 text-xs">
-              <div className="flex items-baseline justify-between">
-                <dt className="text-muted-foreground">Total buffered</dt>
-                <dd className="font-mono tabular-nums">{events.length}</dd>
-              </div>
-              <div className="flex items-baseline justify-between">
-                <dt className="text-muted-foreground">Visible</dt>
-                <dd className="font-mono tabular-nums">
-                  {visibleEvents.length}
-                </dd>
-              </div>
-              <div className="flex items-baseline justify-between">
-                <dt className="text-muted-foreground">EPS (5s avg)</dt>
-                <dd className="font-mono tabular-nums">{eps.toFixed(2)}</dd>
-              </div>
-              <div
-                className="flex items-baseline justify-between"
-                data-testid="stat-pending-approvals"
-              >
-                <dt className="text-muted-foreground">Pending approvals</dt>
-                <dd className="font-mono tabular-nums">
-                  {pendingApprovalCount}
-                </dd>
-              </div>
-              <div
-                className="flex items-baseline justify-between"
-                data-testid="stat-rate-limits-60s"
-              >
-                <dt className="text-muted-foreground">Rate-limit · 60s</dt>
-                <dd className="font-mono tabular-nums">{rateLimitLast60s}</dd>
-              </div>
-              <div
-                className="flex items-baseline justify-between"
-                data-testid="stat-tool-success"
-              >
-                <dt className="text-muted-foreground">Tool success · last 60</dt>
-                <dd className="font-mono tabular-nums">
-                  {toolSuccessRate === null
-                    ? "—"
-                    : `${(toolSuccessRate * 100).toFixed(0)}%`}
-                </dd>
-              </div>
-            </dl>
-            <div className="mt-3 max-h-40 space-y-1 overflow-y-auto border-t border-border pt-2">
-              {ALL_KINDS.map((kind) => (
-                <div
-                  key={kind}
-                  className="flex items-baseline justify-between text-[11px]"
-                >
-                  <span className="truncate font-mono text-muted-foreground">
-                    {kind}
-                  </span>
-                  <span className="font-mono tabular-nums">
-                    {kindCounts.get(kind) ?? 0}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </aside>
+        {selectedEvent && selectedMetrics ? (
+          <HookDetailDrawer
+            event={selectedEvent}
+            subscribers={selectedMetrics.subscribers}
+            latencyMs={selectedMetrics.latencyMs}
+            subscriberNames={subscriberNames}
+          />
+        ) : null}
       </div>
     </div>
+  );
+}
+
+// ─── local helpers ────────────────────────────────────────
+
+function InlineMetric({
+  children,
+  tone,
+}: {
+  children: React.ReactNode;
+  tone: "amber" | "neutral";
+}) {
+  return (
+    <span
+      className={cn(
+        "whitespace-nowrap rounded-md border px-1.5 py-px font-mono text-[12.5px] font-medium tabular-nums",
+        tone === "amber"
+          ? "border-tp-amber/30 bg-tp-amber-soft text-tp-amber"
+          : "border-tp-glass-edge bg-tp-glass-inner-strong text-tp-ink",
+      )}
+    >
+      {children}
+    </span>
   );
 }
