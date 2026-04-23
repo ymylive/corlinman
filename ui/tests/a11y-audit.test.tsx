@@ -30,6 +30,7 @@ import * as React from "react";
 import axe, { type Result } from "axe-core";
 
 import { i18next, initI18n } from "@/lib/i18n";
+import { CommandPaletteProvider } from "@/components/cmdk-palette";
 
 // ---------------------------------------------------------------------------
 // Mocks — install *before* page modules are imported.
@@ -254,7 +255,9 @@ function Harness({ children }: { children: React.ReactNode }) {
   );
   return (
     <QueryClientProvider client={client}>
-      <I18nextProvider i18n={i18next}>{children}</I18nextProvider>
+      <I18nextProvider i18n={i18next}>
+        <CommandPaletteProvider>{children}</CommandPaletteProvider>
+      </I18nextProvider>
     </QueryClientProvider>
   );
 }
