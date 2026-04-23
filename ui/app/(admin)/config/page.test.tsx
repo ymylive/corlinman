@@ -17,6 +17,24 @@ import * as React from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { CommandPaletteProvider } from "@/components/cmdk-palette";
+
+// next/navigation — cmdk-palette (used transitively by the retokened hero
+// ⌘K button) calls useRouter + usePathname + useSearchParams at mount.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    refresh: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+  usePathname: () => "/config",
+  useSearchParams: () => new URLSearchParams(),
+  useParams: () => ({}),
+  redirect: vi.fn(),
+}));
 
 // --- module mocks (hoisted above component import) -------------------------
 
@@ -60,7 +78,9 @@ function renderPage() {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <ConfigPage />
+      <CommandPaletteProvider>
+        <ConfigPage />
+      </CommandPaletteProvider>
     </QueryClientProvider>,
   );
 }

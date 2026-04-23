@@ -6,12 +6,15 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useMotion } from "@/components/ui/motion-safe";
 
 /**
- * One-shot success ripple. Keys on `id` so each increment re-mounts and
+ * One-shot save-success ripple. Keys on `id` so each increment re-mounts and
  * re-plays the animation. Absolutely positioned; the parent is expected to
  * set `position: relative` and `overflow: visible`. Skipped entirely under
  * `prefers-reduced-motion`.
  *
- * Timing: opacity 0.4 → 0, scale 0 → 6 over 600ms.
+ * Phase 5e retoken: the default colour is now the Tidepool amber token
+ * (`var(--tp-amber)`), to match the primary save CTA.
+ *
+ * Timing: opacity 0.45 → 0, scale 0 → 6 over 600ms.
  */
 export interface SuccessRippleProps {
   /**
@@ -19,11 +22,11 @@ export interface SuccessRippleProps {
    * unchanged) renders nothing.
    */
   id: number;
-  /** Ripple colour — defaults to the primary token. */
+  /** Ripple colour — defaults to the Tidepool amber token. */
   color?: string;
 }
 
-export function SuccessRipple({ id, color = "currentColor" }: SuccessRippleProps) {
+export function SuccessRipple({ id, color = "var(--tp-amber)" }: SuccessRippleProps) {
   const { reduced } = useMotion();
   if (reduced) return null;
   return (
@@ -32,11 +35,11 @@ export function SuccessRipple({ id, color = "currentColor" }: SuccessRippleProps
         <motion.span
           key={id}
           aria-hidden="true"
-          initial={{ opacity: 0.4, scale: 0 }}
+          initial={{ opacity: 0.45, scale: 0 }}
           animate={{ opacity: 0, scale: 6 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.6, ease: "easeOut" }}
-          className="pointer-events-none absolute inset-0 rounded-md"
+          className="pointer-events-none absolute inset-0 rounded-lg"
           style={{ backgroundColor: color }}
           data-testid="config-save-ripple"
         />
