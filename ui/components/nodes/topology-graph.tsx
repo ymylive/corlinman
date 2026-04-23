@@ -4,28 +4,37 @@ import * as React from "react";
 import { useMotion } from "@/components/ui/motion-safe";
 import { cn } from "@/lib/utils";
 import type { Runner } from "@/lib/mocks/nodes";
+import { capabilityOf } from "./capabilities";
 import { RunnerNode } from "./runner-node";
 
 /**
- * Radial topology SVG: a central "Gateway" rounded rect with runners orbiting
- * on two concentric ellipses. Geometry is computed once per render from the
- * runner list; visuals (health glow, dataflow dash) live in a scoped <style>
- * block so we don't have to touch globals.css or tailwind.config.ts.
+ * Radial topology SVG — Tidepool retoken (Phase 5d).
  *
+ * Visual model:
+ *   - Gateway at centre: amber→ember gradient disc with amber-glow outer halo.
+ *     Pulses via `tp-breathe-amber` (ring-1 opacity lift).
+ *   - Two orbital rings (ellipses) rendered as dashed `var(--tp-ink-4)` guides.
+ *   - Satellites render as coloured circles (ok / warn / muted) plus label.
+ *   - Edges stroke from centre to each node; dash-offset animates the data
+ *     flow hint. A capability filter desaturates non-matching nodes+edges.
+ *
+ * Geometry (preserved from the pre-retoken component):
  *   Ring 0 (inner)  — 6 slots  · rx/ry = 180/150
  *   Ring 1 (outer)  — 12 slots · rx/ry = 320/280
  *
- *   Slot k on a ring with N slots lands at:
- *     angle = -π/2 + 2π · k / N
+ *     angle = -π/2 + 2π · slot / N
  *     x     = cx + rx · cos(angle)
  *     y     = cy + ry · sin(angle)
- *   (-π/2 starts the first slot at the top of the orbit.)
+ *
+ * Reduced motion:
+ *   - Pulse, shake, and dashflow animations all collapse to static state via
+ *     the scoped <style> block below.
  */
 
 const VIEWBOX = 800;
 const CENTER = VIEWBOX / 2;
-const GATEWAY_HALF_W = 72;
-const GATEWAY_HALF_H = 40;
+const GATEWAY_RADIUS = 54;
+const GATEWAY_GLOW_RADIUS = 100;
 
 interface RingSpec {
   slots: number;
@@ -35,7 +44,7 @@ interface RingSpec {
 }
 
 const RINGS: Record<0 | 1, RingSpec> = {
-  0: { slots: 6, rx: 180, ry: 150, nodeRadius: 24 },
+  0: { slots: 6, rx: 180, ry: 150, nodeRadius: 22 },
   1: { slots: 12, rx: 320, ry: 280, nodeRadius: 18 },
 };
 
@@ -54,16 +63,18 @@ function position(runner: Runner): PositionedRunner {
   return { runner, cx, cy, r: ring.nodeRadius };
 }
 
-function strokeForHealth(health: Runner["health"]): string {
-  if (health === "healthy") return "hsl(var(--ok))";
-  if (health === "degraded") return "hsl(var(--warn))";
-  return "hsl(var(--muted-foreground))";
+function edgeStrokeVar(health: Runner["health"]): string {
+  if (health === "healthy") return "var(--tp-amber)";
+  if (health === "degraded") return "var(--tp-warn)";
+  return "var(--tp-ink-4)";
 }
 
 export interface TopologyGraphProps {
   runners: Runner[];
   selectedId: string | null;
   onSelect: (runner: Runner | null) => void;
+  /** When set, runners whose tools don't include this capability are desaturated. */
+  capabilityFilter?: string | null;
   className?: string;
 }
 
@@ -71,6 +82,7 @@ export function TopologyGraph({
   runners,
   selectedId,
   onSelect,
+  capabilityFilter = null,
   className,
 }: TopologyGraphProps) {
   const { reduced } = useMotion();
@@ -80,44 +92,54 @@ export function TopologyGraph({
     [runners],
   );
 
-  // Dataflow keyframes + pulse + shake. Scoped to this component so we don't
-  // pollute the global stylesheet. Reduced-motion disables every animation.
+  // Scoped keyframes — pulse glow, edge dashflow, degraded jitter. Reduced
+  // motion collapses every animation to the static state.
   const styleBlock = React.useMemo(() => {
     if (reduced) {
       return `
         .nodes-halo { animation: none; }
         .nodes-shake { animation: none; }
-        .nodes-dash { animation: none; }
+        .nodes-dash { animation: none; stroke-dashoffset: 0; }
+        .nodes-gate-pulse { animation: none; }
       `;
     }
     return `
       @keyframes nodes-dash-kf {
-        from { stroke-dashoffset: 24; }
+        from { stroke-dashoffset: 28; }
         to   { stroke-dashoffset: 0; }
       }
       @keyframes nodes-halo-kf {
-        0%, 100% { opacity: 0.2; transform-origin: center; }
-        50%      { opacity: 0.6; }
+        0%, 100% { opacity: 0.35; }
+        50%      { opacity: 0.7; }
+      }
+      @keyframes nodes-gate-pulse-kf {
+        0%, 100% { opacity: 0.45; transform: scale(1); }
+        50%      { opacity: 0.85; transform: scale(1.04); }
       }
       @keyframes nodes-shake-kf {
         0%, 88%, 100% { transform: translateX(0); }
-        90%           { transform: translateX(-2px); }
-        92%           { transform: translateX(2px); }
-        94%           { transform: translateX(-2px); }
-        96%           { transform: translateX(2px); }
+        90%           { transform: translateX(-1.6px); }
+        92%           { transform: translateX(1.6px); }
+        94%           { transform: translateX(-1.2px); }
+        96%           { transform: translateX(1.2px); }
       }
-      .nodes-dash { animation: nodes-dash-kf 1.2s linear infinite; }
-      .nodes-halo { animation: nodes-halo-kf 2s ease-in-out infinite; }
+      .nodes-dash { animation: nodes-dash-kf 1.4s linear infinite; }
+      .nodes-halo { animation: nodes-halo-kf 2.4s ease-in-out infinite; }
+      .nodes-gate-pulse {
+        animation: nodes-gate-pulse-kf 3.2s ease-in-out infinite;
+        transform-origin: ${CENTER}px ${CENTER}px;
+        transform-box: fill-box;
+      }
       .nodes-shake { animation: nodes-shake-kf 6s ease-in-out infinite; }
     `;
   }, [reduced]);
 
+  const gradientId = React.useId();
+  const glowId = React.useId();
+
   return (
     <div
-      className={cn(
-        "relative w-full overflow-hidden rounded-lg border border-border bg-card/40",
-        className,
-      )}
+      className={cn("relative w-full overflow-hidden", className)}
       data-testid="topology-graph"
     >
       <style>{styleBlock}</style>
@@ -128,15 +150,27 @@ export function TopologyGraph({
         className="block h-auto w-full"
         onClick={() => onSelect(null)}
       >
-        {/* Orbital guides — decorative, muted. */}
+        <defs>
+          <radialGradient id={gradientId} cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="var(--tp-amber)" stopOpacity="1" />
+            <stop offset="100%" stopColor="var(--tp-ember)" stopOpacity="0.95" />
+          </radialGradient>
+          <radialGradient id={glowId} cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="var(--tp-amber-glow)" />
+            <stop offset="100%" stopColor="var(--tp-amber-glow)" stopOpacity="0" />
+          </radialGradient>
+        </defs>
+
+        {/* Orbital guides — quiet dashed ellipses. */}
         <ellipse
           cx={CENTER}
           cy={CENTER}
           rx={RINGS[0].rx}
           ry={RINGS[0].ry}
           fill="none"
-          stroke="hsl(var(--border))"
-          strokeDasharray="2 6"
+          stroke="var(--tp-ink-4)"
+          strokeOpacity={0.32}
+          strokeDasharray="2 8"
           strokeWidth={1}
           aria-hidden="true"
         />
@@ -146,84 +180,121 @@ export function TopologyGraph({
           rx={RINGS[1].rx}
           ry={RINGS[1].ry}
           fill="none"
-          stroke="hsl(var(--border))"
-          strokeDasharray="2 6"
+          stroke="var(--tp-ink-4)"
+          strokeOpacity={0.26}
+          strokeDasharray="2 8"
           strokeWidth={1}
           aria-hidden="true"
         />
 
-        {/* Connection lines — drawn first so runners render on top. */}
+        {/* Edges — first, so satellites paint over them. */}
         {positioned.map(({ runner, cx, cy }) => {
-          const stroke = strokeForHealth(runner.health);
-          const opacity = runner.health === "offline" ? 0.25 : 0.55;
+          const stroke = edgeStrokeVar(runner.health);
+          const caps = capabilityOf(runner);
+          const capMatch =
+            capabilityFilter === null || caps.includes(capabilityFilter);
+          const baseOpacity = runner.health === "offline" ? 0.2 : 0.45;
+          const opacity = capMatch ? baseOpacity : 0.12;
+          const active = runner.health !== "offline" && capMatch;
           return (
             <path
               key={`link-${runner.id}`}
               d={`M ${CENTER} ${CENTER} L ${cx} ${cy}`}
               stroke={stroke}
               strokeOpacity={opacity}
-              strokeWidth={1.5}
+              strokeWidth={1.25}
               strokeDasharray="6 6"
               fill="none"
-              className={runner.health === "offline" ? undefined : "nodes-dash"}
+              className={active ? "nodes-dash" : undefined}
               aria-hidden="true"
               data-testid={`link-${runner.id}`}
             />
           );
         })}
 
-        {/* Gateway center block. */}
+        {/* Gateway — outer glow disc, then pulsing halo, then gradient body.
+            Motion classes drop when `reduced` so the pulse/halo collapse to
+            static state rather than leaking into the reduced-motion DOM. */}
         <g aria-label="Gateway">
-          <rect
-            x={CENTER - GATEWAY_HALF_W}
-            y={CENTER - GATEWAY_HALF_H}
-            width={GATEWAY_HALF_W * 2}
-            height={GATEWAY_HALF_H * 2}
-            rx={12}
-            fill="hsl(var(--accent))"
-            stroke="hsl(var(--primary))"
-            strokeWidth={2}
+          <circle
+            cx={CENTER}
+            cy={CENTER}
+            r={GATEWAY_GLOW_RADIUS}
+            fill={`url(#${glowId})`}
+            className={reduced ? undefined : "nodes-gate-pulse"}
+            aria-hidden="true"
           />
-          {/* Server-stack glyph (pure SVG copy of Lucide `Server`). */}
+          {reduced ? null : (
+            <circle
+              cx={CENTER}
+              cy={CENTER}
+              r={GATEWAY_RADIUS + 10}
+              fill="none"
+              stroke="var(--tp-amber)"
+              strokeOpacity={0.35}
+              strokeWidth={1.4}
+              className="nodes-halo"
+              aria-hidden="true"
+            />
+          )}
+          <circle
+            cx={CENTER}
+            cy={CENTER}
+            r={GATEWAY_RADIUS}
+            fill={`url(#${gradientId})`}
+            stroke="var(--tp-amber)"
+            strokeOpacity={0.55}
+            strokeWidth={1}
+          />
+          {/* Server-stack glyph (pure SVG copy of Lucide `Server`), tinted
+              against the ember body. */}
           <g
             aria-hidden="true"
-            transform={`translate(${CENTER - 10} ${CENTER - 22})`}
-            stroke="hsl(var(--primary))"
+            transform={`translate(${CENTER - 13} ${CENTER - 16})`}
+            stroke="var(--tp-glass-hl)"
+            strokeOpacity={0.9}
             strokeWidth={1.6}
             strokeLinecap="round"
             strokeLinejoin="round"
             fill="none"
           >
-            <rect x={0} y={0} width={20} height={8} rx={2} />
-            <rect x={0} y={12} width={20} height={8} rx={2} />
-            <line x1={6} y1={4} x2={6.01} y2={4} />
-            <line x1={6} y1={16} x2={6.01} y2={16} />
+            <rect x={0} y={0} width={26} height={10} rx={2.5} />
+            <rect x={0} y={14} width={26} height={10} rx={2.5} />
+            <line x1={7} y1={5} x2={7.01} y2={5} />
+            <line x1={7} y1={19} x2={7.01} y2={19} />
           </g>
           <text
             x={CENTER}
-            y={CENTER + 20}
-            fontSize="12"
+            y={CENTER + GATEWAY_RADIUS + 22}
+            fontSize="13"
             fontWeight={600}
             textAnchor="middle"
-            fill="hsl(var(--foreground))"
+            fill="var(--tp-ink)"
+            style={{ letterSpacing: "-0.01em" }}
           >
-            Gateway
+            gateway
           </text>
         </g>
 
-        {/* Runners — drawn last so they z-stack above the lines. */}
-        {positioned.map(({ runner, cx, cy, r }) => (
-          <RunnerNode
-            key={runner.id}
-            runner={runner}
-            cx={cx}
-            cy={cy}
-            r={r}
-            selected={selectedId === runner.id}
-            reduced={reduced}
-            onSelect={(next) => onSelect(next)}
-          />
-        ))}
+        {/* Satellite runners — drawn last so they z-stack above edges. */}
+        {positioned.map(({ runner, cx, cy, r }) => {
+          const caps = capabilityOf(runner);
+          const dim =
+            capabilityFilter !== null && !caps.includes(capabilityFilter);
+          return (
+            <RunnerNode
+              key={runner.id}
+              runner={runner}
+              cx={cx}
+              cy={cy}
+              r={r}
+              selected={selectedId === runner.id}
+              reduced={reduced}
+              dim={dim}
+              onSelect={(next) => onSelect(next)}
+            />
+          );
+        })}
       </svg>
     </div>
   );

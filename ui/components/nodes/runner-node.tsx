@@ -7,9 +7,21 @@ import { cn } from "@/lib/utils";
 import type { Runner } from "@/lib/mocks/nodes";
 
 /**
- * Visual specification for a single runner circle. Produced by
- * `<TopologyGraph>` once it has resolved ring + slot geometry.
+ * Tidepool-retokened satellite node.
+ *
+ * Palette:
+ *   - healthy  → --tp-ok (soft fill at 12%, stroke at 80%)
+ *   - degraded → --tp-warn (adds `!` glyph + subtle jitter animation)
+ *   - offline  → --tp-ink-4 (desaturated, `∅` glyph, no pulse)
+ *
+ * Motion:
+ *   - healthy gets a pulsing halo (class `.nodes-halo`)
+ *   - degraded gets a gentle horizontal shake (class `.nodes-shake`)
+ *   - `reduced` collapses both to static
+ *
+ * Selection adds a 3px stroke + a concentric outer ring.
  */
+
 export interface RunnerNodeProps {
   runner: Runner;
   /** Pre-computed x coordinate in SVG user units. */
@@ -21,32 +33,28 @@ export interface RunnerNodeProps {
   selected: boolean;
   /** User has enabled `prefers-reduced-motion`. */
   reduced: boolean;
+  /** Capability filter excluded this runner — desaturate to 35% opacity. */
+  dim?: boolean;
   onSelect: (runner: Runner) => void;
 }
 
 const HEALTH_STROKE: Record<Runner["health"], string> = {
-  healthy: "hsl(var(--ok))",
-  degraded: "hsl(var(--warn))",
-  offline: "hsl(var(--muted-foreground))",
+  healthy: "var(--tp-ok)",
+  degraded: "var(--tp-warn)",
+  offline: "var(--tp-ink-4)",
 };
 
 const HEALTH_FILL: Record<Runner["health"], string> = {
-  healthy: "hsl(var(--ok) / 0.12)",
-  degraded: "hsl(var(--warn) / 0.12)",
-  offline: "hsl(var(--muted) / 0.3)",
+  healthy: "color-mix(in oklch, var(--tp-ok) 16%, transparent)",
+  degraded: "color-mix(in oklch, var(--tp-warn) 16%, transparent)",
+  offline: "color-mix(in oklch, var(--tp-ink-4) 18%, transparent)",
 };
 
-function truncateId(id: string, max = 8): string {
+function truncateId(id: string, max = 10): string {
   if (id.length <= max) return id;
   return `${id.slice(0, max)}…`;
 }
 
-/**
- * Focusable SVG group representing one runner. Health state drives stroke
- * color and pulse; `selected` lifts the node forward via a framer `layoutId`.
- *
- * Keyboard: Tab moves focus between runners, Enter/Space toggles selection.
- */
 export const RunnerNode = React.memo(function RunnerNode({
   runner,
   cx,
@@ -54,11 +62,13 @@ export const RunnerNode = React.memo(function RunnerNode({
   r,
   selected,
   reduced,
+  dim = false,
   onSelect,
 }: RunnerNodeProps) {
-  const opacity = runner.health === "offline" ? 0.3 : 1;
-  const showPulse = runner.health === "healthy" && !reduced;
-  const showShake = runner.health === "degraded" && !reduced;
+  const baseOpacity = runner.health === "offline" ? 0.55 : 1;
+  const opacity = dim ? baseOpacity * 0.35 : baseOpacity;
+  const showPulse = runner.health === "healthy" && !reduced && !dim;
+  const showShake = runner.health === "degraded" && !reduced && !dim;
 
   const onKeyDown = (e: React.KeyboardEvent<SVGGElement>) => {
     if (e.key === "Enter" || e.key === " ") {
@@ -103,19 +113,31 @@ export const RunnerNode = React.memo(function RunnerNode({
       }}
       onKeyDown={onKeyDown}
     >
-      {/* Outer soft halo — pulses on healthy nodes. Keyframes live in
-          <TopologyGraph>'s scoped <style> block. */}
+      {/* Outer halo — pulses on healthy nodes. */}
       {showPulse ? (
         <circle
           aria-hidden="true"
           cx={cx}
           cy={cy}
-          r={r + 6}
+          r={r + 7}
           fill="none"
           stroke={HEALTH_STROKE[runner.health]}
-          strokeOpacity={0.35}
+          strokeOpacity={0.4}
           strokeWidth={1}
           className="nodes-halo"
+        />
+      ) : null}
+      {/* Selection ring — a quiet amber outline when selected. */}
+      {selected ? (
+        <circle
+          aria-hidden="true"
+          cx={cx}
+          cy={cy}
+          r={r + 4}
+          fill="none"
+          stroke="var(--tp-amber)"
+          strokeOpacity={0.9}
+          strokeWidth={1.4}
         />
       ) : null}
       {/* Body. */}
@@ -125,54 +147,53 @@ export const RunnerNode = React.memo(function RunnerNode({
         r={r}
         fill={HEALTH_FILL[runner.health]}
         stroke={HEALTH_STROKE[runner.health]}
-        strokeWidth={selected ? 3 : 2}
+        strokeWidth={selected ? 3 : 1.8}
       />
       {/* Tool-count badge (top-right). */}
       <g aria-hidden="true">
         <circle
-          cx={cx + r * 0.7}
-          cy={cy - r * 0.7}
+          cx={cx + r * 0.72}
+          cy={cy - r * 0.72}
           r={8}
-          fill="hsl(var(--background))"
+          fill="var(--tp-glass-inner-strong)"
           stroke={HEALTH_STROKE[runner.health]}
+          strokeOpacity={0.6}
           strokeWidth={1}
         />
         <text
-          x={cx + r * 0.7}
-          y={cy - r * 0.7}
+          x={cx + r * 0.72}
+          y={cy - r * 0.72}
           fontSize="9"
           fontFamily="var(--font-geist-mono, ui-monospace)"
           textAnchor="middle"
           dominantBaseline="central"
-          fill="hsl(var(--foreground))"
+          fill="var(--tp-ink)"
         >
           {runner.toolCount}
         </text>
       </g>
-      {/* Id label below the node. */}
+      {/* Hostname label below the node. */}
       <text
         x={cx}
-        y={cy + r + 14}
-        fontSize="10"
+        y={cy + r + 15}
+        fontSize="10.5"
         fontFamily="var(--font-geist-mono, ui-monospace)"
         textAnchor="middle"
-        fill="hsl(var(--muted-foreground))"
+        fill="var(--tp-ink-2)"
         aria-hidden="true"
       >
-        {truncateId(runner.id.replace("rnr_", ""))}
+        {truncateId(runner.hostname.replace("runner-", ""))}
       </text>
-      {/* Color-blind safety: a shape/glyph overlay for non-healthy states.
-          Degraded → "!" in warn; offline → "∅" in muted. Healthy is baseline
-          (green + pulse, no glyph needed). Pair with aria-label text above. */}
+      {/* Colour-blind safety glyph. */}
       {runner.health === "degraded" ? (
         <text
           aria-hidden="true"
-          x={cx - r * 0.7}
+          x={cx - r * 0.68}
           y={cy - r * 0.55}
           fontSize={11}
           fontWeight={700}
           textAnchor="middle"
-          fill="hsl(var(--warn))"
+          fill="var(--tp-warn)"
           data-testid={`runner-glyph-${runner.id}`}
         >
           !
@@ -181,12 +202,12 @@ export const RunnerNode = React.memo(function RunnerNode({
       {runner.health === "offline" ? (
         <text
           aria-hidden="true"
-          x={cx - r * 0.7}
+          x={cx - r * 0.68}
           y={cy - r * 0.55}
           fontSize={11}
           fontWeight={700}
           textAnchor="middle"
-          fill="hsl(var(--muted-foreground))"
+          fill="var(--tp-ink-4)"
           data-testid={`runner-glyph-${runner.id}`}
         >
           ∅

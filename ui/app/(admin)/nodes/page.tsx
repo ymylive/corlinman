@@ -1,14 +1,23 @@
 "use client";
 
 import * as React from "react";
+import { motion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 
-import { AnimatedNumber } from "@/components/ui/animated-number";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Skeleton } from "@/components/ui/skeleton";
+import { useMotion } from "@/components/ui/motion-safe";
+import { GlassPanel } from "@/components/ui/glass-panel";
 import { TopologyGraph } from "@/components/nodes/topology-graph";
-import { RunnerDetailPanel } from "@/components/nodes/runner-detail-panel";
+import { NodeSideRail } from "@/components/nodes/node-side-rail";
+import { NodeDetailDrawer } from "@/components/nodes/node-detail-drawer";
+import { PageHero } from "@/components/nodes/page-hero";
+import { StatsRow } from "@/components/nodes/stats-row";
+import { CapabilityFilter } from "@/components/nodes/capability-filter";
+import {
+  OfflineBlock,
+  EmptyBlock,
+} from "@/components/nodes/offline-block";
+import { capabilityCounts, capabilityOf } from "@/components/nodes/capabilities";
 import {
   fetchRunnersMock,
   summariseRunners,
@@ -16,32 +25,83 @@ import {
 } from "@/lib/mocks/nodes";
 
 /**
- * Distributed Nodes page (B4-FE2).
+ * Distributed Nodes — Tidepool (Phase 5d) cutover.
  *
- * Radial topology of WebSocket tool runners connected to the gateway. Real
- * data flows in over `/wstool/runners` + SSE once B4-BE3 lands; for now we
- * render the static mock at a 5-second refetch cadence to exercise the
- * layout-animation paths.
+ * Layout:
+ *   ┌── hero (prose) ────────────────────────────┐
+ *   │  "Nodes" + one-sentence summary            │
+ *   └────────────────────────────────────────────┘
+ *   [ StatChip × 4: Total · Online · Degraded · Offline ]
+ *   [ FilterChipGroup: all · <caps>… ]
+ *   ┌── topology (glass strong) ──┬── side rail (glass soft) ──┐
+ *   │  gateway + orbit rings       │  inner/outer runner entries │
+ *   │  satellites (click → select) │  click → select              │
+ *   └──────────────────────────────┴──────────────────────────────┘
+ *   [ DetailDrawer beneath when a node is selected ]
+ *
+ * Data flow is unchanged from B4-FE2: React Query polls `fetchRunnersMock`
+ * at a 5s cadence until B4-BE3 lands the real `/wstool/runners` endpoint +
+ * SSE stream.
  */
 // TODO(B4-BE3): replace with real apiFetch<Runner[]>("/wstool/runners") + SSE.
+
 export default function NodesPage() {
   const { t } = useTranslation();
+  const { reduced } = useMotion();
+
   const query = useQuery<Runner[]>({
     queryKey: ["nodes"],
     queryFn: fetchRunnersMock,
     refetchInterval: 5_000,
+    retry: false,
   });
 
   const runners = React.useMemo(() => query.data ?? [], [query.data]);
 
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  const [capabilityFilter, setCapabilityFilter] = React.useState<string | null>(
+    null,
+  );
 
   const selected = React.useMemo(
     () => runners.find((r) => r.id === selectedId) ?? null,
     [runners, selectedId],
   );
 
+  // When a capability filter is active and the current selection is dimmed,
+  // keep the drawer open — operators often want to inspect the "why it
+  // doesn't match" case. We only drop the selection if the runner itself
+  // disappears (e.g. the whole list reloaded).
+  React.useEffect(() => {
+    if (selectedId && !runners.some((r) => r.id === selectedId)) {
+      setSelectedId(null);
+    }
+  }, [selectedId, runners]);
+
   const stats = React.useMemo(() => summariseRunners(runners), [runners]);
+
+  // Degraded-prose surface: pick the most "recent" degraded runner — we use
+  // `lastPingMs` as a coarse proxy for recency (shorter = more recent in the
+  // mock; this matches how operators think about the viz).
+  const recentDegraded = React.useMemo(() => {
+    const degraded = runners.filter((r) => r.health === "degraded");
+    if (degraded.length === 0) return null;
+    degraded.sort((a, b) => a.lastPingMs - b.lastPingMs);
+    const top = degraded[0]!;
+    const caps = capabilityOf(top);
+    return {
+      host: top.hostname,
+      agoSec: Math.max(1, Math.round(top.lastPingMs / 1000)),
+      capability: caps[0] ?? null,
+    };
+  }, [runners]);
+
+  const degradedCount = runners.filter((r) => r.health === "degraded").length;
+
+  const capabilityCount = React.useMemo(
+    () => capabilityCounts(runners).size,
+    [runners],
+  );
 
   const onSelect = React.useCallback((runner: Runner | null) => {
     if (runner === null) {
@@ -51,89 +111,126 @@ export default function NodesPage() {
     setSelectedId((prev) => (prev === runner.id ? null : runner.id));
   }, []);
 
+  const live = !query.isError;
+  const listIsEmpty = !query.isPending && !query.isError && runners.length === 0;
+
   return (
-    <div className="flex flex-col gap-5">
-      <header className="flex flex-col gap-3">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Distributed Nodes · 节点拓扑
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            WebSocket tool runners orbiting the gateway. Hover or tab to a node
-            for details.
-          </p>
-        </div>
-        <dl
-          className="grid grid-cols-2 gap-3 sm:grid-cols-4"
-          data-testid="nodes-stats"
-        >
-          <StatCard
-            label={t("nodes.connected")}
-            value={stats.connected}
-            tone="ok"
-          />
-          <StatCard
-            label={t("nodes.disconnected")}
-            value={stats.disconnected}
-            tone="muted"
-          />
-          <StatCard
-            label={t("nodes.avgLatency")}
-            value={stats.avgLatencyMs}
-            suffix=" ms"
-            tone="neutral"
-          />
-          <StatCard
-            label={t("nodes.tasksPerMin")}
-            value={stats.tasksPerMin}
-            tone="neutral"
-          />
-        </dl>
-      </header>
+    <motion.div
+      className="flex flex-col gap-5"
+      initial={reduced ? undefined : { opacity: 0, y: 6 }}
+      animate={reduced ? undefined : { opacity: 1, y: 0 }}
+      transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+    >
+      <PageHero
+        onlineCount={stats.connected}
+        capabilityCount={capabilityCount}
+        degradedCount={degradedCount}
+        offlineCount={stats.disconnected}
+        total={runners.length}
+        recentDegradedHost={recentDegraded?.host ?? null}
+        recentDegradedAgoSec={recentDegraded?.agoSec ?? null}
+        recentDegradedCapability={recentDegraded?.capability ?? null}
+      />
+
+      <StatsRow
+        total={runners.length}
+        online={stats.connected}
+        degraded={degradedCount}
+        offline={stats.disconnected}
+        avgLatencyMs={stats.avgLatencyMs}
+        live={live}
+      />
+
+      {runners.length > 0 ? (
+        <CapabilityFilter
+          runners={runners}
+          value={capabilityFilter}
+          onChange={setCapabilityFilter}
+        />
+      ) : null}
 
       {query.isPending ? (
-        <Skeleton className="h-[540px] w-full rounded-lg" />
+        <TopologySkeleton />
       ) : query.isError ? (
-        <EmptyState
-          title={t("common.loadFailed")}
-          description={(query.error as Error)?.message ?? t("common.error")}
-        />
-      ) : runners.length === 0 ? (
-        <EmptyState
-          title={t("nodes.empty")}
-          description={t("nodes.emptyHint")}
-        />
+        <OfflineBlock message={(query.error as Error | undefined)?.message} />
+      ) : listIsEmpty ? (
+        <EmptyBlock />
       ) : (
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
-          <div className="mx-auto w-full max-w-[900px] flex-1">
-            <TopologyGraph
+        <>
+          <section className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <GlassPanel
+              variant="strong"
+              className="relative overflow-hidden p-4"
+              data-testid="nodes-viz-panel"
+            >
+              {/* Warm aurora glow behind the topology — reinforces the
+                  amber+ember dialect without competing with node colour.
+                  Pointer-events: none so it never swallows clicks. */}
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-0"
+                style={{
+                  background:
+                    "radial-gradient(ellipse at center, var(--tp-amber-glow), transparent 60%)",
+                  opacity: 0.55,
+                }}
+              />
+              <div className="relative">
+                <header className="mb-2 flex items-center justify-between px-1">
+                  <div className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-tp-ink-4">
+                    {t("nodes.tp.vizTitle")}
+                  </div>
+                  <div className="font-mono text-[10.5px] tabular-nums text-tp-ink-3">
+                    {t("nodes.tp.vizMeta", {
+                      online: stats.connected,
+                      total: runners.length,
+                    })}
+                  </div>
+                </header>
+                <div className="relative h-[480px] w-full">
+                  <TopologyGraph
+                    runners={runners}
+                    selectedId={selectedId}
+                    onSelect={onSelect}
+                    capabilityFilter={capabilityFilter}
+                    className="absolute inset-0 flex items-center justify-center [&>svg]:max-h-full"
+                  />
+                </div>
+              </div>
+            </GlassPanel>
+
+            <NodeSideRail
               runners={runners}
               selectedId={selectedId}
               onSelect={onSelect}
+              capabilityFilter={capabilityFilter}
+              className="max-h-[520px] lg:sticky lg:top-4"
             />
-          </div>
+          </section>
+
           {selected ? (
-            <RunnerDetailPanel
+            <NodeDetailDrawer
               runner={selected}
-              onClose={() => setSelectedId(null)}
+              onReconnect={undefined}
+              className="mt-1"
             />
           ) : null}
-        </div>
+        </>
       )}
 
       {/* Screen-reader / no-JS fallback: a plain data table summarising every
           runner. Visually hidden via `sr-only`, but present in the DOM so
           assistive tech can enumerate the topology without parsing SVG. */}
       <details className="sr-only">
-        <summary>Runner table (accessibility fallback)</summary>
+        <summary>{t("nodes.tp.a11yTableSummary")}</summary>
         <table>
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Ring</th>
-              <th>Health</th>
-              <th>Latency</th>
-              <th>Tools</th>
+              <th>{t("nodes.tp.a11yColName")}</th>
+              <th>{t("nodes.tp.a11yColRing")}</th>
+              <th>{t("nodes.tp.a11yColHealth")}</th>
+              <th>{t("nodes.tp.a11yColLatency")}</th>
+              <th>{t("nodes.tp.a11yColTools")}</th>
             </tr>
           </thead>
           <tbody>
@@ -149,35 +246,18 @@ export default function NodesPage() {
           </tbody>
         </table>
       </details>
-    </div>
+    </motion.div>
   );
 }
 
-// ---------- local helpers ----------
-
-interface StatCardProps {
-  label: string;
-  value: number;
-  suffix?: string;
-  tone: "ok" | "muted" | "neutral";
-}
-
-function StatCard({ label, value, suffix, tone }: StatCardProps) {
-  const valueClass =
-    tone === "ok"
-      ? "text-ok"
-      : tone === "muted"
-        ? "text-muted-foreground"
-        : "text-foreground";
+function TopologySkeleton() {
   return (
-    <div className="rounded-lg border border-border bg-card/40 px-3 py-2">
-      <dt className="text-[10px] uppercase tracking-wider text-muted-foreground">
-        {label}
-      </dt>
-      <dd className={`mt-0.5 text-xl font-semibold tabular-nums ${valueClass}`}>
-        <AnimatedNumber value={value} />
-        {suffix ?? ""}
-      </dd>
-    </div>
+    <section className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div
+        className="h-[520px] animate-pulse rounded-2xl border border-tp-glass-edge bg-tp-glass-inner/70"
+        data-testid="nodes-viz-skeleton"
+      />
+      <div className="h-[520px] animate-pulse rounded-2xl border border-tp-glass-edge bg-tp-glass-inner/70" />
+    </section>
   );
 }
