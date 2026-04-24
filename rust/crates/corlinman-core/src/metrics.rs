@@ -380,6 +380,25 @@ pub static APPROVALS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     cv
 });
 
+/// `gateway_log_files_removed_total{reason}` — rotated log files the
+/// retention task has deleted. `reason` is currently fixed to `"age"`
+/// (mtime older than `logging.file.retention_days`); new eviction
+/// policies would add more labels here without breaking dashboards.
+pub static LOG_FILES_REMOVED: Lazy<CounterVec> = Lazy::new(|| {
+    let cv = CounterVec::new(
+        Opts::new(
+            "gateway_log_files_removed_total",
+            "Rotated gateway log files deleted by the retention task",
+        ),
+        &["reason"],
+    )
+    .expect("valid metric");
+    REGISTRY
+        .register(Box::new(cv.clone()))
+        .expect("register log_files_removed_total");
+    cv
+});
+
 /// Encode the registry in Prometheus text-exposition v0.0.4 format.
 pub fn encode() -> Vec<u8> {
     use prometheus::Encoder;
@@ -418,4 +437,5 @@ pub fn init() {
     Lazy::force(&AGENT_MUTES_TOTAL);
     Lazy::force(&RATE_LIMIT_TRIGGERS_TOTAL);
     Lazy::force(&APPROVALS_TOTAL);
+    Lazy::force(&LOG_FILES_REMOVED);
 }

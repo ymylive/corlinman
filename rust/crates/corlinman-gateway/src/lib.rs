@@ -7,6 +7,7 @@
 pub mod config_watcher;
 pub mod grpc;
 pub mod log_broadcast;
+pub mod log_retention;
 pub mod metrics;
 pub mod middleware;
 pub mod py_config;

@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use corlinman_core::config::Config;
+use corlinman_core::config::{Config, FileLoggingConfig};
 use corlinman_gateway::config_watcher::ConfigWatcher;
 use corlinman_gateway::grpc::{
     serve_placeholder, PlaceholderService, DEFAULT_RUST_SOCKET, ENV_RUST_SOCKET,
@@ -21,7 +21,9 @@ use corlinman_gateway::grpc::{
 use corlinman_gateway::log_broadcast::{
     BroadcastLayer, BroadcastLayerSpans, LogRecord, DEFAULT_CAPACITY,
 };
+use corlinman_gateway::log_retention;
 use corlinman_gateway::services::ChatService as GatewayChatService;
+use corlinman_gateway::telemetry::FileSink;
 use corlinman_gateway::{server, shutdown, telemetry};
 use corlinman_gateway_api::ChatService as ChatServiceTrait;
 use corlinman_plugins::registry::watcher::{HotReloader, DEFAULT_DEBOUNCE};
@@ -29,6 +31,7 @@ use corlinman_plugins::runtime::service_grpc::ServiceRuntime;
 use corlinman_plugins::{PluginSupervisor, PluginType};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 /// Default root directory for per-plugin UDS files. Mirrors the env the
@@ -37,7 +40,13 @@ const DEFAULT_SOCKET_ROOT: &str = "/tmp/corlinman-plugins";
 
 #[tokio::main]
 async fn main() {
-    let log_tx = init_tracing();
+    // P0-1: pick up the file-logging sub-section early so the appender
+    // is wired into the very first `init_tracing()` call. Load is
+    // best-effort — a missing / malformed config falls back to stdout
+    // only, matching the pre-P0-1 behaviour.
+    let file_log_cfg = preload_file_logging_config();
+
+    let (log_tx, _file_guard, retention_spec) = init_tracing(file_log_cfg.as_ref());
 
     let addr = resolve_addr();
     tracing::info!(%addr, "starting corlinman-gateway");
@@ -57,6 +66,12 @@ async fn main() {
 
     // Root cancellation token. Cancels gRPC/channels/axum on shutdown.
     let root = CancellationToken::new();
+
+    // P0-1: spawn the log-retention sweeper if a file sink is active.
+    // Delete rotated files older than `retention_days` from the log
+    // directory every `SWEEP_INTERVAL`. Failure is warn-only.
+    let log_retention_handle = retention_spec
+        .map(|(dir, prefix, days)| log_retention::spawn(dir, prefix, days, root.child_token()));
 
     // B5-BE3: build the live `ConfigWatcher` *before* the router so the
     // admin state + canvas state can share its `Arc<ArcSwap<Config>>`. The
@@ -226,13 +241,36 @@ async fn main() {
     if let Some((_watcher, handle)) = config_watcher {
         let _ = handle.await;
     }
+    if let Some(h) = log_retention_handle {
+        let _ = h.await;
+    }
 
     // S7.T1: flush + shutdown the OTLP exporter if it was installed. No-op
     // when telemetry was never initialised.
     telemetry::shutdown();
 
+    // Drop the file-appender guard last so any pending writes queued by
+    // the shutdown path above make it to disk.
+    drop(_file_guard);
+
     std::process::exit(shutdown::EXIT_CODE_ON_SIGNAL);
 }
+
+/// `(dir, prefix, retention_days)` — everything the retention sweeper
+/// needs to find and age rotated files. Returned alongside the worker
+/// guard so `main` doesn't have to re-read `[logging.file]`.
+type RetentionSpec = (PathBuf, String, u32);
+
+/// Return tuple for [`init_tracing`]:
+///   * broadcast sender feeding `/admin/logs/stream`;
+///   * `WorkerGuard` that must live for the process lifetime (dropping
+///     it stops the non-blocking file writer);
+///   * optional retention spec — `Some` iff a file sink was initialised.
+type TracingInit = (
+    broadcast::Sender<LogRecord>,
+    Option<WorkerGuard>,
+    Option<RetentionSpec>,
+);
 
 /// Wire up tracing:
 ///   - `EnvFilter` from `RUST_LOG` (fallback `info`).
@@ -240,21 +278,55 @@ async fn main() {
 ///   - `BroadcastLayer` + `BroadcastLayerSpans` → feed `/admin/logs/stream`.
 ///   - `tracing-opentelemetry` layer when `OTEL_EXPORTER_OTLP_ENDPOINT`
 ///     is set (S7.T1). Missing / unreachable collector is warn-and-continue.
-///
-/// Returns the broadcast sender so `main` can inject it into `AppState`.
-fn init_tracing() -> broadcast::Sender<LogRecord> {
+///   - P0-1: when `file_cfg` is `Some` and its `path` is non-empty, also
+///     write JSON events to a rolling file via `tracing-appender`.
+fn init_tracing(file_cfg: Option<&FileLoggingConfig>) -> TracingInit {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let (broadcast_layer, log_tx) = BroadcastLayer::new(DEFAULT_CAPACITY);
     let otel_layer =
         telemetry::try_init_tracer().map(tracing_opentelemetry::OpenTelemetryLayer::new);
+
+    let file_sink: Option<FileSink> = file_cfg.and_then(telemetry::build_file_layer);
+    let retention_spec = file_sink
+        .as_ref()
+        .zip(file_cfg)
+        .map(|(sink, cfg)| (sink.dir.clone(), sink.prefix.clone(), cfg.retention_days));
+    let file_layer = file_sink.as_ref().map(|sink| {
+        fmt::layer()
+            .json()
+            .with_current_span(false)
+            .with_writer(sink.writer.clone())
+    });
+    let guard = file_sink.map(|s| s.guard);
+
     tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt::layer().json().with_current_span(false))
         .with(BroadcastLayerSpans)
         .with(broadcast_layer)
         .with(otel_layer)
+        .with(file_layer)
         .init();
-    log_tx
+    (log_tx, guard, retention_spec)
+}
+
+/// Best-effort read of `[logging.file]` from the config file resolved
+/// via `CORLINMAN_CONFIG` (or the default path). Returns `None` when the
+/// file is missing or cannot be parsed — the gateway then keeps the
+/// pre-P0-1 stdout-only behaviour rather than crashing on boot because
+/// of a malformed TOML.
+fn preload_file_logging_config() -> Option<FileLoggingConfig> {
+    let path = std::env::var("CORLINMAN_CONFIG")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(Config::default_path);
+    if !path.exists() {
+        return None;
+    }
+    match Config::load_from_path(&path) {
+        Ok(cfg) => Some(cfg.logging.file),
+        Err(_) => None,
+    }
 }
 
 fn resolve_addr() -> SocketAddr {

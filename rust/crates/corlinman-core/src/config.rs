@@ -739,6 +739,10 @@ pub struct LoggingConfig {
     #[validate(custom(function = "validate_log_format"))]
     pub format: String,
     pub file_rolling: bool,
+    /// File-sink configuration for the gateway. When `file.path` is empty
+    /// the gateway stays stdout-only (back-compat with pre-P0-1 configs).
+    #[serde(default)]
+    pub file: FileLoggingConfig,
 }
 
 impl Default for LoggingConfig {
@@ -747,6 +751,7 @@ impl Default for LoggingConfig {
             level: default_log_level(),
             format: default_log_format(),
             file_rolling: false,
+            file: FileLoggingConfig::default(),
         }
     }
 }
@@ -769,6 +774,74 @@ fn validate_log_format(v: &str) -> Result<(), validator::ValidationError> {
         "json" | "text" => Ok(()),
         _ => Err(validator::ValidationError::new("log_format")),
     }
+}
+
+/// File-sink configuration for the gateway (`[logging.file]`).
+///
+/// Consumed by `corlinman-gateway::telemetry` to wire a
+/// `tracing_appender::rolling::RollingFileAppender` alongside the existing
+/// stdout layer. Every field defaults so old `corlinman.toml` files that
+/// omit `[logging.file]` entirely still parse.
+///
+/// Semantics:
+///
+/// * `path` is the primary active log file. When empty the file sink is
+///   disabled (gateway stays stdout-only).
+/// * `max_size_mb` is an advisory ceiling used by the doctor diagnostics
+///   and retention task. The rolling appender rotates on wall-clock time,
+///   not size.
+/// * `retention_days` bounds how long old rotated files are kept. A
+///   background task scans the parent directory hourly and deletes
+///   mtime-older-than-`retention_days` entries.
+/// * `rotation` picks the appender cadence (`daily` | `hourly` |
+///   `minutely` | `never`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FileLoggingConfig {
+    #[serde(default = "default_log_file_path")]
+    pub path: PathBuf,
+    #[serde(default = "default_log_max_size_mb")]
+    pub max_size_mb: u64,
+    #[serde(default = "default_log_retention_days")]
+    pub retention_days: u32,
+    #[serde(default)]
+    pub rotation: RotationKind,
+}
+
+impl Default for FileLoggingConfig {
+    fn default() -> Self {
+        Self {
+            path: default_log_file_path(),
+            max_size_mb: default_log_max_size_mb(),
+            retention_days: default_log_retention_days(),
+            rotation: RotationKind::default(),
+        }
+    }
+}
+
+fn default_log_file_path() -> PathBuf {
+    PathBuf::from("/data/logs/gateway.log")
+}
+fn default_log_max_size_mb() -> u64 {
+    5
+}
+fn default_log_retention_days() -> u32 {
+    7
+}
+
+/// Rotation cadence for the file appender.
+///
+/// Matches `tracing_appender::rolling::Rotation` variants 1:1 so the
+/// gateway can map without an extra lookup table. `Never` disables
+/// rotation (single ever-growing file — useful in tests / dev).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RotationKind {
+    #[default]
+    Daily,
+    Hourly,
+    Minutely,
+    Never,
 }
 
 // ---------------------------------------------------------------------------
@@ -2072,5 +2145,81 @@ accept_unsigned = true
             errs.iter().any(|e| e.contains("hooks.capacity")),
             "expected hooks.capacity error, got: {errs:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // P0-1: [logging.file] — back-compat + schema coverage.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn old_logging_toml_without_file_section_still_parses() {
+        // Pre-P0-1 configs only have `level` / `format` / `file_rolling` —
+        // the back-compat guarantee is that the file sub-section is
+        // populated from defaults, not required.
+        let frag = r#"
+[logging]
+level = "info"
+format = "json"
+file_rolling = false
+"#;
+        let cfg: Config = toml::from_str(frag).expect("old logging block must parse");
+        assert_eq!(cfg.logging.level, "info");
+        assert_eq!(cfg.logging.format, "json");
+        assert!(!cfg.logging.file_rolling);
+        // Defaults land for the new block.
+        assert_eq!(
+            cfg.logging.file.path,
+            PathBuf::from("/data/logs/gateway.log")
+        );
+        assert_eq!(cfg.logging.file.max_size_mb, 5);
+        assert_eq!(cfg.logging.file.retention_days, 7);
+        assert_eq!(cfg.logging.file.rotation, RotationKind::Daily);
+    }
+
+    #[test]
+    fn new_logging_file_toml_parses_every_field() {
+        let frag = r#"
+[logging.file]
+path = "/var/log/corlinman/gateway.log"
+max_size_mb = 25
+retention_days = 14
+rotation = "hourly"
+"#;
+        let cfg: Config = toml::from_str(frag).expect("new logging.file block must parse");
+        assert_eq!(
+            cfg.logging.file.path,
+            PathBuf::from("/var/log/corlinman/gateway.log")
+        );
+        assert_eq!(cfg.logging.file.max_size_mb, 25);
+        assert_eq!(cfg.logging.file.retention_days, 14);
+        assert_eq!(cfg.logging.file.rotation, RotationKind::Hourly);
+        // Outer fields still default.
+        assert_eq!(cfg.logging.level, "info");
+    }
+
+    #[test]
+    fn logging_file_rotation_accepts_every_variant() {
+        for (raw, want) in [
+            ("daily", RotationKind::Daily),
+            ("hourly", RotationKind::Hourly),
+            ("minutely", RotationKind::Minutely),
+            ("never", RotationKind::Never),
+        ] {
+            let frag = format!("[logging.file]\nrotation = \"{raw}\"\n");
+            let cfg: Config = toml::from_str(&frag).unwrap();
+            assert_eq!(cfg.logging.file.rotation, want, "rotation = {raw}");
+        }
+    }
+
+    #[test]
+    fn empty_toml_populates_logging_file_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(
+            cfg.logging.file.path,
+            PathBuf::from("/data/logs/gateway.log")
+        );
+        assert_eq!(cfg.logging.file.max_size_mb, 5);
+        assert_eq!(cfg.logging.file.retention_days, 7);
+        assert_eq!(cfg.logging.file.rotation, RotationKind::Daily);
     }
 }
