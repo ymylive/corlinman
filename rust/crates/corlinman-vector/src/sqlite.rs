@@ -864,6 +864,23 @@ impl SqliteStore {
         Ok(res.last_insert_rowid())
     }
 
+    /// Delete a single chunk by id.
+    ///
+    /// The `chunks_ad` trigger keeps `chunks_fts` in sync. Returns
+    /// the number of rows removed (0 when `id` is unknown). Added in
+    /// the memory-host skeleton (Phase 1) so `LocalSqliteHost::delete`
+    /// has a non-SQL-duplicating call path; callers outside the
+    /// memory-host crate can use this for surgical chunk removal
+    /// without touching the owning `files` row.
+    pub async fn delete_chunk_by_id(&self, id: i64) -> Result<u64> {
+        let res = sqlx::query("DELETE FROM chunks WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("delete_chunk_by_id({id})"))?;
+        Ok(res.rows_affected())
+    }
+
     /// Read a `kv_store` string value by key.
     pub async fn kv_get(&self, key: &str) -> Result<Option<String>> {
         let row = sqlx::query("SELECT value FROM kv_store WHERE key = ?1")
