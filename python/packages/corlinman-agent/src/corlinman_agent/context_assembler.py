@@ -8,6 +8,7 @@ list before the reasoning loop hands it to the provider::
       1. agent cards expansion   (AgentExpander on system / system-inject-gated)
       2. cascade var substitution (fixed / tar / var / sar via VariableCascade)
       3. skill context injection  (expanded_agent.skill_refs → system prompt)
+      3.5 toolbox dedup + gate    ({{toolbox.*}} single-expansion + privilege)
       4. placeholder pass        (remaining {{namespace.*}} via Rust UDS)
       5. emit hook               (``message.preprocessed``)
     output: AssembledContext
@@ -73,6 +74,16 @@ _SYSTEM_INJECT_PREFIXES: tuple[str, ...] = ("[系统提示:]", "[系统邀请指
 # after the first position.
 _BARE_KEY_RE = re.compile(r"\{\{([A-Za-z][A-Za-z0-9_]*)\}\}")
 
+# Toolbox placeholder: ``{{toolbox.NAME}}``. Mirrors the openclaw
+# ``expanded_toolboxes`` dedup pattern (``VCPToolBox/modules/messageProcessor.js``):
+# the first encounter of a given name survives the pass so downstream
+# resolvers (placeholder engine, future toolbox registry) can render it;
+# repeat encounters inside the same ``assemble()`` call are silenced.
+# The name grammar matches :data:`_BARE_KEY_RE` — leading letter, then
+# letters/digits/underscores — so toolbox names line up with the rest
+# of the placeholder surface.
+_TOOLBOX_NS_RE = re.compile(r"\{\{\s*toolbox\.([A-Za-z][A-Za-z0-9_]*)\s*\}\}")
+
 
 def has_system_inject_prefix(content: str) -> bool:
     """Return ``True`` when ``content`` begins with any system-injection marker."""
@@ -120,6 +131,17 @@ class AssembledContext:
         Human-readable problem strings from skills whose
         ``check_requirements`` failed in stage 3. Non-fatal: the skill's
         body is not injected but the pipeline continues.
+    muted_toolboxes
+        ``{{toolbox.NAME}}`` references whose ``NAME`` had already been
+        seen (and left alone) earlier in the same ``assemble()`` call.
+        Duplicates are removed from the content and recorded here in
+        encounter order. Mirrors the single-agent-gate pattern.
+    stripped_toolboxes
+        ``{{toolbox.NAME}}`` references that appeared in **non-privileged**
+        messages (ordinary user turns). They are removed from the content
+        — letting a toolbox expand from arbitrary user input is a prompt-
+        injection vector — and the names are recorded here so logs /
+        admin surfaces can show what was refused.
     metadata
         Pass-through of the caller-supplied metadata map (or ``{}`` when
         none was given). Useful so callers can chain the returned
@@ -131,6 +153,8 @@ class AssembledContext:
     muted_agents: list[str] = field(default_factory=list)
     unresolved_keys: list[str] = field(default_factory=list)
     skill_errors: list[str] = field(default_factory=list)
+    muted_toolboxes: list[str] = field(default_factory=list)
+    stripped_toolboxes: list[str] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
 
 
@@ -209,6 +233,32 @@ class ContextAssembler:
             if card is not None and card.skill_refs:
                 self._inject_skills(msgs, card.skill_refs, skill_errors)
 
+        # --- Stage 3.5: toolbox dedup + privilege gate ------------------
+        # Mirrors the ``single_agent_gate`` pattern (and the openclaw
+        # ``expanded_toolboxes`` set in ``VCPToolBox/modules/messageProcessor.js``):
+        # each toolbox name may expand at most once per ``assemble()``
+        # call; repeat encounters are silenced. Non-privileged messages
+        # cannot expand toolboxes at all — we strip the tokens to close a
+        # prompt-injection vector where a user turn could force a toolbox
+        # to render.
+        expanded_toolboxes: set[str] = set()
+        muted_toolboxes: list[str] = []
+        stripped_toolboxes: list[str] = []
+        for msg in msgs:
+            content = msg.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            if _TOOLBOX_NS_RE.search(content) is None:
+                continue
+            if _is_privileged(msg):
+                new_content = self._dedup_toolboxes(
+                    content, expanded_toolboxes, muted_toolboxes
+                )
+            else:
+                new_content = self._strip_toolboxes(content, stripped_toolboxes)
+            if new_content != content:
+                msg["content"] = new_content
+
         # --- Stage 4: placeholder pass (system-only) --------------------
         for msg in msgs:
             if not _is_privileged(msg):
@@ -253,6 +303,8 @@ class ContextAssembler:
             muted_agents=list(expansion.muted_agents),
             unresolved_keys=unresolved,
             skill_errors=skill_errors,
+            muted_toolboxes=muted_toolboxes,
+            stripped_toolboxes=stripped_toolboxes,
             metadata=md,
         )
 
@@ -282,6 +334,60 @@ class ContextAssembler:
 
         new_content = _BARE_KEY_RE.sub(_sub, content)
         return new_content, unresolved
+
+    @staticmethod
+    def _dedup_toolboxes(
+        content: str,
+        expanded: set[str],
+        muted: list[str],
+    ) -> str:
+        """Enforce single-expansion-per-name across a privileged message.
+
+        Every ``{{toolbox.NAME}}`` match is checked against ``expanded``
+        (the session-scoped set of names seen so far). First encounter of
+        a name is left literal so the downstream placeholder pass can
+        render it; later encounters are replaced with an empty string
+        and the name is appended to ``muted`` in encounter order
+        (duplicates are kept — matching :attr:`ExpansionResult.muted_agents`
+        semantics).
+        """
+
+        def _sub(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name in expanded:
+                muted.append(name)
+                logger.info(
+                    "context_assembler.toolbox_muted",
+                    name=name,
+                )
+                return ""
+            expanded.add(name)
+            return match.group(0)
+
+        return _TOOLBOX_NS_RE.sub(_sub, content)
+
+    @staticmethod
+    def _strip_toolboxes(content: str, stripped: list[str]) -> str:
+        """Remove every ``{{toolbox.NAME}}`` from a non-privileged message.
+
+        Ordinary user turns are not allowed to spawn toolboxes — doing so
+        is a prompt-injection vector. Each stripped name is appended to
+        ``stripped`` in encounter order so the caller can log / surface
+        the refusal. The toolbox is *not* added to the session's
+        ``expanded_toolboxes`` set: a stripped reference in a user turn
+        should not block a later legitimate expansion in a system turn.
+        """
+
+        def _sub(match: re.Match[str]) -> str:
+            name = match.group(1)
+            stripped.append(name)
+            logger.info(
+                "context_assembler.toolbox_stripped",
+                name=name,
+            )
+            return ""
+
+        return _TOOLBOX_NS_RE.sub(_sub, content)
 
     def _inject_skills(
         self,
