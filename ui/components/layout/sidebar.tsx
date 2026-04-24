@@ -37,6 +37,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { logout } from "@/lib/auth";
 import { useMotion } from "@/components/ui/motion-safe";
+import { useMobileDrawer } from "./mobile-drawer-context";
 import { BrandMark } from "./brand-mark";
 
 interface NavItem {
@@ -132,6 +133,7 @@ export function Sidebar({ user }: SidebarProps) {
   const [collapsed, setCollapsed] = React.useState(false);
   const [hydrated, setHydrated] = React.useState(false);
   const [loggingOut, setLoggingOut] = React.useState(false);
+  const { open: drawerOpen } = useMobileDrawer();
 
   React.useEffect(() => {
     setCollapsed(readCollapsed());
@@ -158,24 +160,42 @@ export function Sidebar({ user }: SidebarProps) {
     }
   }
 
-  const width = collapsed && hydrated ? "w-[72px]" : "w-[240px]";
+  // Mobile always uses the expanded 240px width (the 72px collapsed mode
+  // is a desktop affordance; in a drawer there's plenty of horizontal
+  // room). Desktop follows the persisted `collapsed` preference.
+  const width = collapsed && hydrated ? "md:w-[72px]" : "md:w-[240px]";
 
   return (
     <aside
       className={cn(
-        // Tidepool: floating glass panel. The admin layout wrapper handles
-        // the 16px gutter via `p-4 gap-4`, so this component no longer sets
-        // its own margins. Sticky to the viewport top at the gutter offset
-        // so long pages don't scroll the sidebar out of view.
-        "relative flex shrink-0 flex-col overflow-hidden rounded-2xl border",
+        // Tidepool: floating glass panel. On desktop it's a sticky flex
+        // column in the admin layout row; on mobile (<md) it slides in
+        // from the left over a backdrop driven by <MobileDrawerProvider>.
+        "flex flex-col overflow-hidden rounded-2xl border",
         "bg-tp-glass border-tp-glass-edge",
         "backdrop-blur-glass backdrop-saturate-glass",
         "shadow-[inset_0_1px_0_var(--tp-glass-hl)] shadow-tp-panel",
-        "sticky top-4 self-start max-h-[calc(100dvh-2rem)]",
-        "transition-[width] duration-200 ease-out",
+        // Desktop ≥md: sticky inline flex member.
+        "md:relative md:sticky md:top-4 md:self-start md:max-h-[calc(100dvh-2rem)]",
+        "md:shrink-0 md:translate-x-0",
+        "md:transition-[width] md:duration-200 md:ease-out",
+        // Mobile <md: fixed slide-in drawer at 240px.
+        "fixed inset-y-2 left-2 z-50 w-[240px] max-h-[calc(100dvh-16px)]",
+        "transition-transform duration-200 ease-out",
+        drawerOpen ? "translate-x-0" : "-translate-x-[calc(100%+12px)]",
         width,
       )}
+      id="admin-sidebar"
       aria-label={t("nav.dashboard")}
+      aria-hidden={
+        // On mobile when the drawer is closed, take the aside out of the
+        // accessibility tree so screen readers don't land on hidden nav.
+        typeof window !== "undefined" &&
+        window.matchMedia?.("(max-width: 767px)").matches &&
+        !drawerOpen
+          ? true
+          : undefined
+      }
     >
       {/* brand + collapse */}
       <div className="flex items-center justify-between gap-2 border-b border-tp-glass-edge px-3.5 py-3.5">

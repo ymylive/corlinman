@@ -186,7 +186,7 @@ export default function DashboardPage() {
       animate="visible"
     >
       {/* ─── HERO ──────────────────────────────────────────── */}
-      <GlassPanel variant="strong" as="section" className="relative overflow-hidden p-8">
+      <GlassPanel variant="strong" as="section" className="relative overflow-hidden p-5 md:p-8">
         {/* aurora glow blobs behind hero copy */}
         <div
           aria-hidden
