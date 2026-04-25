@@ -19,17 +19,37 @@ use corlinman_evolution::{
     EvolutionKind, EvolutionProposal, EvolutionRisk, EvolutionStatus, EvolutionStore, ProposalId,
     ProposalsRepo,
 };
+use corlinman_gateway::evolution_applier::EvolutionApplier;
 use corlinman_gateway::routes::admin::{evolution as evolution_routes, AdminState};
 use corlinman_plugins::registry::PluginRegistry;
+use corlinman_vector::SqliteStore;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
 #[tokio::test]
 async fn happy_path_list_approve_apply() {
-    // 1. Boot a real EvolutionStore over a tempfile and seed one pending
-    //    proposal directly through ProposalsRepo so the admin API has
-    //    something to find.
+    // 1. Boot real EvolutionStore + kb SqliteStore over a tempdir.
+    //    Seed two real chunks so the wave 2-A applier has something to
+    //    merge when we hit /apply at the end.
     let tmp = TempDir::new().unwrap();
+    let kb = Arc::new(
+        SqliteStore::open(&tmp.path().join("kb.sqlite"))
+            .await
+            .unwrap(),
+    );
+    let file_id = kb
+        .insert_file("/notes.md", "diary", "checksum", 0, 64)
+        .await
+        .unwrap();
+    let winner_id = kb
+        .insert_chunk(file_id, 0, "winner content", None, "general")
+        .await
+        .unwrap();
+    let loser_id = kb
+        .insert_chunk(file_id, 1, "loser content", None, "general")
+        .await
+        .unwrap();
+
     let store = Arc::new(
         EvolutionStore::open(&tmp.path().join("evolution.sqlite"))
             .await
@@ -40,7 +60,7 @@ async fn happy_path_list_approve_apply() {
     repo.insert(&EvolutionProposal {
         id: pid.clone(),
         kind: EvolutionKind::MemoryOp,
-        target: "merge_chunks:7,8".into(),
+        target: format!("merge_chunks:{winner_id},{loser_id}"),
         diff: String::new(),
         reasoning: "duplicate context".into(),
         risk: EvolutionRisk::Low,
@@ -58,16 +78,17 @@ async fn happy_path_list_approve_apply() {
     .await
     .unwrap();
 
-    // 2. Stand up the admin sub-router with a minimal AdminState — the
-    //    only field the evolution routes consult is `evolution_store`.
-    //    The guard layer (Basic auth / cookies) lives one level up in
-    //    `router_with_state`; here we directly mount the sub-router so
-    //    the test stays focussed on state-machine behaviour.
+    // 2. Stand up the admin sub-router with both an `EvolutionStore`
+    //    (read path) and an `EvolutionApplier` (write path). Wave 2-A
+    //    swap: the apply route needs the applier; without it the route
+    //    returns 503 alongside the rest of the evolution surface.
+    let applier = Arc::new(EvolutionApplier::new(store.clone(), kb.clone()));
     let state = AdminState::new(
         Arc::new(PluginRegistry::default()),
         Arc::new(ArcSwap::from_pointee(Config::default())),
     )
-    .with_evolution_store(store.clone());
+    .with_evolution_store(store.clone())
+    .with_evolution_applier(applier);
     let app = evolution_routes::router(state);
 
     // 3. GET /admin/evolution should return our pending proposal.
@@ -108,9 +129,11 @@ async fn happy_path_list_approve_apply() {
     assert_eq!(row.decided_by.as_deref(), Some("e2e-operator"));
     assert!(row.decided_at.is_some());
 
-    // 5. POST /admin/evolution/:id/apply moves approved → applied.
-    //    Phase 2 stub — the response body carries the warning string so
-    //    the UI can render it without sniffing for missing fields.
+    // 5. POST /admin/evolution/:id/apply moves approved → applied via
+    //    the wave 2-A real applier — kb.sqlite mutates, an
+    //    `evolution_history` row lands, the proposal flips. The
+    //    response carries the new `history_id` field so the UI can
+    //    deep-link into the audit trail.
     let resp = app
         .oneshot(
             Request::builder()
@@ -124,10 +147,15 @@ async fn happy_path_list_approve_apply() {
     assert_eq!(resp.status(), StatusCode::OK);
     let v: serde_json::Value =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(v["status"], "applied_stub");
-    assert_eq!(v["warning"], "real applier not implemented");
+    assert_eq!(v["status"], "applied");
+    assert!(v["history_id"].is_i64());
 
     let row = repo.get(&pid).await.unwrap();
     assert_eq!(row.status, EvolutionStatus::Applied);
     assert!(row.applied_at.is_some());
+
+    // kb side: loser deleted, winner still present.
+    let kb_rows = kb.query_chunks_by_ids(&[winner_id, loser_id]).await.unwrap();
+    assert_eq!(kb_rows.len(), 1);
+    assert_eq!(kb_rows[0].id, winner_id);
 }

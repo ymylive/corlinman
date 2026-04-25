@@ -464,19 +464,56 @@ pub static EVOLUTION_PROPOSALS_DECISION: Lazy<CounterVec> = Lazy::new(|| {
     cv
 });
 
-/// `gateway_evolution_proposals_applied_total` — `apply` calls that
-/// successfully transitioned a proposal `approved → applied`. Phase 2
-/// increments are stub applies; Phase 3's `EvolutionApplier` will continue
-/// to bump the same counter so dashboards stay stable across the swap.
-pub static EVOLUTION_PROPOSALS_APPLIED: Lazy<Counter> = Lazy::new(|| {
+/// `gateway_evolution_proposals_applied_total{kind, outcome}` — `apply`
+/// calls served by the admin API. `kind` mirrors the proposal's
+/// `EvolutionKind` (`memory_op` etc); `outcome` is `"ok"` when the
+/// `EvolutionApplier` finished cleanly and `"error"` for any failure
+/// path (kb mutation, history insert, proposal flip). Phase 2 only
+/// applies `memory_op` proposals — other kinds emit
+/// `outcome="error"` with `kind` carrying the proposal's actual kind so
+/// dashboards can spot unsupported proposal traffic.
+pub static EVOLUTION_PROPOSALS_APPLIED: Lazy<CounterVec> = Lazy::new(|| {
+    let cv = CounterVec::new(
+        Opts::new(
+            "gateway_evolution_proposals_applied_total",
+            "Proposals transitioned approved → applied via the admin API",
+        ),
+        &["kind", "outcome"],
+    )
+    .expect("valid metric");
+    REGISTRY
+        .register(Box::new(cv.clone()))
+        .expect("register evolution_proposals_applied_total");
+    cv
+});
+
+/// `gateway_evolution_chunks_merged_total` — successful `merge_chunks:<a>,<b>`
+/// applies. Each increment corresponds to one loser chunk being deleted from
+/// `kb.sqlite`; the winner content stays untouched.
+pub static EVOLUTION_CHUNKS_MERGED: Lazy<Counter> = Lazy::new(|| {
     let c = Counter::new(
-        "gateway_evolution_proposals_applied_total",
-        "Proposals transitioned approved → applied via the admin API",
+        "gateway_evolution_chunks_merged_total",
+        "memory_op merge_chunks proposals successfully applied against kb.sqlite",
     )
     .expect("valid metric");
     REGISTRY
         .register(Box::new(c.clone()))
-        .expect("register evolution_proposals_applied_total");
+        .expect("register evolution_chunks_merged_total");
+    c
+});
+
+/// `gateway_evolution_chunks_deleted_total` — successful `delete_chunk:<id>`
+/// applies. Counts standalone deletions only; the loser-side delete inside
+/// `merge_chunks` is tracked under `EVOLUTION_CHUNKS_MERGED`.
+pub static EVOLUTION_CHUNKS_DELETED: Lazy<Counter> = Lazy::new(|| {
+    let c = Counter::new(
+        "gateway_evolution_chunks_deleted_total",
+        "memory_op delete_chunk proposals successfully applied against kb.sqlite",
+    )
+    .expect("valid metric");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register evolution_chunks_deleted_total");
     c
 });
 
@@ -543,5 +580,7 @@ pub fn init() {
     Lazy::force(&EVOLUTION_PROPOSALS_LISTED);
     Lazy::force(&EVOLUTION_PROPOSALS_DECISION);
     Lazy::force(&EVOLUTION_PROPOSALS_APPLIED);
+    Lazy::force(&EVOLUTION_CHUNKS_MERGED);
+    Lazy::force(&EVOLUTION_CHUNKS_DELETED);
     Lazy::force(&LOG_FILES_REMOVED);
 }
