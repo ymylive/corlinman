@@ -339,6 +339,7 @@ const CASES: AuditCase[] = [
   { name: "nodes", loader: () => import("@/app/(admin)/nodes/page") },
   { name: "tagmemo", loader: () => import("@/app/(admin)/tagmemo/page") },
   { name: "diary", loader: () => import("@/app/(admin)/diary/page") },
+  { name: "evolution", loader: () => import("@/app/(admin)/evolution/page") },
   {
     name: "canvas",
     loader: () => import("@/app/(admin)/canvas/page"),

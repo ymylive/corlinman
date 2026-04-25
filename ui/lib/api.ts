@@ -820,3 +820,75 @@ export async function benchmarkEmbedding(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Wave 1-D — EvolutionLoop proposal queue
+//
+// Mirrors the gateway routes in
+// rust/crates/corlinman-gateway/src/routes/admin/evolution.rs (landing in
+// Wave 1-C). Until those endpoints ship, set NEXT_PUBLIC_MOCK_MODE=1 to
+// route reads through `lib/mocks/evolution.ts`.
+// ---------------------------------------------------------------------------
+
+export type EvolutionRisk = "low" | "medium" | "high";
+
+export interface EvolutionProposal {
+  id: string;
+  kind: string;
+  target: string;
+  diff: string;
+  reasoning: string;
+  risk: EvolutionRisk;
+  status: string;
+  signal_ids: number[];
+  trace_ids: string[];
+  /** epoch-ms */
+  created_at: number;
+  decided_at?: number;
+  decided_by?: string;
+  applied_at?: number;
+}
+
+export async function fetchEvolutionPending(): Promise<EvolutionProposal[]> {
+  const { MOCK_EVOLUTION_PENDING } = await import("./mocks/evolution");
+  return apiFetch<EvolutionProposal[]>(
+    "/admin/evolution?status=pending&limit=50",
+    { mock: MOCK_EVOLUTION_PENDING },
+  );
+}
+
+export interface EvolutionDecideResult {
+  id: string;
+  status: string;
+  decided_at?: number;
+  decided_by?: string;
+}
+
+export function approveEvolutionProposal(
+  id: string,
+  decided_by: string,
+): Promise<EvolutionDecideResult> {
+  return apiFetch<EvolutionDecideResult>(
+    `/admin/evolution/${encodeURIComponent(id)}/approve`,
+    {
+      method: "POST",
+      body: { decided_by },
+      mock: { id, status: "approved", decided_by, decided_at: Date.now() },
+    },
+  );
+}
+
+export function denyEvolutionProposal(
+  id: string,
+  decided_by: string,
+  reason?: string,
+): Promise<EvolutionDecideResult> {
+  return apiFetch<EvolutionDecideResult>(
+    `/admin/evolution/${encodeURIComponent(id)}/deny`,
+    {
+      method: "POST",
+      body: { decided_by, reason },
+      mock: { id, status: "denied", decided_by, decided_at: Date.now() },
+    },
+  );
+}
+
