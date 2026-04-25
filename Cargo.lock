@@ -707,6 +707,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "corlinman-evolution"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "corlinman-gateway"
 version = "0.1.0"
 dependencies = [
@@ -720,6 +736,7 @@ dependencies = [
  "corlinman-agent-client",
  "corlinman-channels",
  "corlinman-core",
+ "corlinman-evolution",
  "corlinman-gateway-api",
  "corlinman-hooks",
  "corlinman-plugins",

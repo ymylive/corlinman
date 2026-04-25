@@ -90,6 +90,9 @@ pub struct Config {
     #[serde(default)]
     #[validate(nested)]
     pub nodebridge: NodeBridgeConfig,
+    #[serde(default)]
+    #[validate(nested)]
+    pub evolution: EvolutionConfig,
     pub meta: Meta,
 }
 
@@ -1109,6 +1112,53 @@ impl Default for NodeBridgeConfig {
         Self {
             listen: "127.0.0.1:18788".into(),
             accept_unsigned: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [evolution] — Phase 2 EvolutionLoop master switches.
+// ---------------------------------------------------------------------------
+
+/// Top-level evolution config. Each subsystem (observer in the gateway, the
+/// Python EvolutionEngine, future ShadowTester) gets its own nested section
+/// with an `enabled` master switch so a half-rolled-out feature can be
+/// turned off without removing the rest of the wiring.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct EvolutionConfig {
+    #[validate(nested)]
+    pub observer: EvolutionObserverConfig,
+}
+
+/// Tunables for the gateway's `EvolutionObserver` (Phase 2 wave 1-A). It
+/// subscribes to the hook bus, adapts the curated event set into
+/// `EvolutionSignal`s, and persists them via the `corlinman-evolution`
+/// repos.
+///
+/// * `enabled` — master switch. When `false` the observer is not spawned;
+///   the gateway boots otherwise unchanged.
+/// * `db_path` — SQLite file backing `evolution_signals` /
+///   `evolution_proposals` / `evolution_history`. Default
+///   `/data/evolution.sqlite` mirrors the `auto-evolution.md` design doc.
+/// * `queue_capacity` — bounded write queue between hook subscription and
+///   the SQLite writer. Overflows drop the *oldest* row (so recent context
+///   wins) and increment `gateway_evolution_signals_dropped_total`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct EvolutionObserverConfig {
+    pub enabled: bool,
+    pub db_path: PathBuf,
+    #[validate(range(min = 1, max = 1_048_576))]
+    pub queue_capacity: usize,
+}
+
+impl Default for EvolutionObserverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            db_path: PathBuf::from("/data/evolution.sqlite"),
+            queue_capacity: 10_000,
         }
     }
 }

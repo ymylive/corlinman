@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use corlinman_core::config::{Config, FileLoggingConfig};
+use corlinman_evolution::{EvolutionStore, SignalsRepo};
 use corlinman_gateway::config_watcher::ConfigWatcher;
+use corlinman_gateway::evolution_observer;
 use corlinman_gateway::grpc::{
     serve_placeholder, PlaceholderService, DEFAULT_RUST_SOCKET, ENV_RUST_SOCKET,
 };
@@ -66,6 +68,13 @@ async fn main() {
 
     // Root cancellation token. Cancels gRPC/channels/axum on shutdown.
     let root = CancellationToken::new();
+
+    // Phase 2 wave 1-A: stand up the EvolutionObserver. Subscribes to the
+    // hook bus, adapts the curated event set into `EvolutionSignal`s, and
+    // persists them via `corlinman-evolution`'s `SignalsRepo`. Gated by
+    // `[evolution.observer.enabled]` (default true). Failures here only
+    // warn — gateway startup never blocks on the observer.
+    let evolution_observer_handle = maybe_spawn_evolution_observer(&hook_bus).await;
 
     // P0-1: spawn the log-retention sweeper if a file sink is active.
     // Delete rotated files older than `retention_days` from the log
@@ -244,6 +253,13 @@ async fn main() {
     if let Some(h) = log_retention_handle {
         let _ = h.await;
     }
+    if let Some(h) = evolution_observer_handle {
+        // The observer's writer task exits cleanly once every sender on
+        // its bounded queue is dropped, which happens when the subscriber
+        // loop sees the `HookBus` close. We give it a moment to drain;
+        // dropping the runtime would otherwise abort it mid-write.
+        let _ = h.await;
+    }
 
     // S7.T1: flush + shutdown the OTLP exporter if it was installed. No-op
     // when telemetry was never initialised.
@@ -342,6 +358,67 @@ fn resolve_addr() -> SocketAddr {
         .parse()
         .unwrap_or_else(|_| std::net::IpAddr::from([127, 0, 0, 1]));
     SocketAddr::new(ip, port)
+}
+
+/// Best-effort boot of the `EvolutionObserver` (Phase 2 wave 1-A). Reads
+/// `[evolution.observer]` from the same config the rest of the gateway
+/// uses; missing config / `enabled = false` / DB open failures all skip
+/// the spawn and return `None` so the gateway boots unchanged.
+///
+/// Returns the writer task handle so `main` can await its drain on
+/// shutdown.
+async fn maybe_spawn_evolution_observer(
+    hook_bus: &corlinman_hooks::HookBus,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let cfg = match load_config() {
+        Ok(Some(cfg)) => cfg.evolution.observer,
+        Ok(None) => corlinman_core::config::EvolutionObserverConfig::default(),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "evolution observer: config load failed; using defaults",
+            );
+            corlinman_core::config::EvolutionObserverConfig::default()
+        }
+    };
+    if !cfg.enabled {
+        tracing::info!("evolution observer disabled by config");
+        return None;
+    }
+    if let Some(parent) = cfg.db_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    error = %err,
+                    dir = %parent.display(),
+                    "evolution observer: could not create db dir; observer disabled",
+                );
+                return None;
+            }
+        }
+    }
+    let store = match EvolutionStore::open(&cfg.db_path).await {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %cfg.db_path.display(),
+                "evolution observer: could not open evolution.sqlite; observer disabled",
+            );
+            return None;
+        }
+    };
+    let repo = SignalsRepo::new(store.pool().clone());
+    tracing::info!(
+        path = %cfg.db_path.display(),
+        queue_capacity = cfg.queue_capacity,
+        "evolution observer: spawned"
+    );
+    Some(evolution_observer::spawn(
+        Arc::new(hook_bus.clone()),
+        repo,
+        &cfg,
+    ))
 }
 
 /// Resolve `$CORLINMAN_CONFIG` (or [`Config::default_path`]) and — when the

@@ -12,7 +12,9 @@
 //! low-cardinality — per-request ids belong in tracing spans.
 
 use once_cell::sync::Lazy;
-use prometheus::{CounterVec, HistogramOpts, HistogramVec, IntGauge, IntGaugeVec, Opts, Registry};
+use prometheus::{
+    Counter, CounterVec, HistogramOpts, HistogramVec, IntGauge, IntGaugeVec, Opts, Registry,
+};
 
 /// Process-wide registry. All `Lazy` metrics below register into this.
 pub static REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
@@ -380,6 +382,55 @@ pub static APPROVALS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     cv
 });
 
+/// `gateway_evolution_signals_observed_total{event_kind, severity}` —
+/// signals the gateway's `EvolutionObserver` has persisted into
+/// `evolution_signals`. Labels match the `EvolutionSignal` shape so
+/// dashboards can slice by adapted hook event and severity.
+pub static EVOLUTION_SIGNALS_OBSERVED: Lazy<CounterVec> = Lazy::new(|| {
+    let cv = CounterVec::new(
+        Opts::new(
+            "gateway_evolution_signals_observed_total",
+            "Hook events the EvolutionObserver persisted as evolution_signals rows",
+        ),
+        &["event_kind", "severity"],
+    )
+    .expect("valid metric");
+    REGISTRY
+        .register(Box::new(cv.clone()))
+        .expect("register evolution_signals_observed_total");
+    cv
+});
+
+/// `gateway_evolution_signals_dropped_total` — signals the observer had to
+/// drop because the bounded write queue was full. Each increment also
+/// emits a WARN log line on the offending side.
+pub static EVOLUTION_SIGNALS_DROPPED: Lazy<Counter> = Lazy::new(|| {
+    let c = Counter::new(
+        "gateway_evolution_signals_dropped_total",
+        "Hook events the EvolutionObserver dropped due to a full write queue",
+    )
+    .expect("valid metric");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register evolution_signals_dropped_total");
+    c
+});
+
+/// `gateway_evolution_signals_queue_depth` — current depth of the
+/// observer's bounded write queue. Sampled on each enqueue/dequeue so
+/// dashboards can spot backpressure before the queue overflows.
+pub static EVOLUTION_SIGNALS_QUEUE_DEPTH: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new(
+        "gateway_evolution_signals_queue_depth",
+        "Current depth of the EvolutionObserver write queue",
+    )
+    .expect("valid metric");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("register evolution_signals_queue_depth");
+    g
+});
+
 /// `gateway_log_files_removed_total{reason}` — rotated log files the
 /// retention task has deleted. `reason` is currently fixed to `"age"`
 /// (mtime older than `logging.file.retention_days`); new eviction
@@ -437,5 +488,8 @@ pub fn init() {
     Lazy::force(&AGENT_MUTES_TOTAL);
     Lazy::force(&RATE_LIMIT_TRIGGERS_TOTAL);
     Lazy::force(&APPROVALS_TOTAL);
+    Lazy::force(&EVOLUTION_SIGNALS_OBSERVED);
+    Lazy::force(&EVOLUTION_SIGNALS_DROPPED);
+    Lazy::force(&EVOLUTION_SIGNALS_QUEUE_DEPTH);
     Lazy::force(&LOG_FILES_REMOVED);
 }

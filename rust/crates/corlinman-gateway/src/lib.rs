@@ -5,6 +5,7 @@
 //! without booting the process.
 
 pub mod config_watcher;
+pub mod evolution_observer;
 pub mod grpc;
 pub mod log_broadcast;
 pub mod log_retention;

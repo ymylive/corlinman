@@ -24,6 +24,7 @@ corlinman-channels = { path = "../corlinman-channels" }
 corlinman-plugins = { path = "../corlinman-plugins" }
 corlinman-vector = { path = "../corlinman-vector" }
 corlinman-hooks = { path = "../corlinman-hooks" }
+corlinman-evolution = { path = "../corlinman-evolution" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
