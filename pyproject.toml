@@ -17,6 +17,7 @@ dependencies = [
     "corlinman-agent",
     "corlinman-server",
     "corlinman-tagmemo",
+    "corlinman-evolution-engine",
 ]
 
 [tool.uv.sources]
@@ -26,6 +27,7 @@ corlinman-embedding = { workspace = true }
 corlinman-agent = { workspace = true }
 corlinman-server = { workspace = true }
 corlinman-tagmemo = { workspace = true }
+corlinman-evolution-engine = { workspace = true }
 
 [tool.uv.workspace]
 members = ["python/packages/*"]
