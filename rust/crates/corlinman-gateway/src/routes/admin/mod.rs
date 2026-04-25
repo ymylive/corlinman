@@ -26,6 +26,7 @@ use corlinman_vector::SqliteStore;
 use tokio::sync::broadcast;
 
 use crate::config_watcher::ConfigWatcher;
+use crate::evolution_applier::EvolutionApplier;
 use crate::log_broadcast::LogRecord;
 use crate::middleware::admin_auth::{require_admin, AdminAuthState};
 use crate::middleware::admin_session::AdminSessionStore;
@@ -107,6 +108,15 @@ pub struct AdminState {
     /// just a pool-clone wrapper, so the cost is negligible and avoids a
     /// second field that has to stay in sync with the store.
     pub evolution_store: Option<Arc<EvolutionStore>>,
+    /// Wave 2-A: real `EvolutionApplier` that mutates `kb.sqlite` and
+    /// records `evolution_history` rows when an approved `memory_op`
+    /// proposal is applied. `None` when either the kb store or the
+    /// evolution store failed to open at boot — `POST /admin/evolution/
+    /// :id/apply` then returns 503 `evolution_disabled` with the same
+    /// shape `evolution_store=None` returns, so the UI can keep its
+    /// single banner. Holding it on `AdminState` (rather than rebuilding
+    /// per-request) keeps the kb-pool clones to one per gateway boot.
+    pub evolution_applier: Option<Arc<EvolutionApplier>>,
 }
 
 impl AdminState {
@@ -123,6 +133,7 @@ impl AdminState {
             py_config_path: None,
             config_watcher: None,
             evolution_store: None,
+            evolution_applier: None,
         }
     }
 
@@ -189,6 +200,15 @@ impl AdminState {
     /// file on disk and one connection budget.
     pub fn with_evolution_store(mut self, store: Arc<EvolutionStore>) -> Self {
         self.evolution_store = Some(store);
+        self
+    }
+
+    /// Fluent: attach the live `EvolutionApplier`. When set,
+    /// `POST /admin/evolution/:id/apply` runs the real `memory_op`
+    /// pipeline (kb mutation + history insert + proposal flip). Absent
+    /// → the route 503s alongside the rest of the evolution surface.
+    pub fn with_evolution_applier(mut self, applier: Arc<EvolutionApplier>) -> Self {
+        self.evolution_applier = Some(applier);
         self
     }
 

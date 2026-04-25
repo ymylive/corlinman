@@ -289,6 +289,7 @@ mod tests {
             py_config_path: None,
             config_watcher: None,
             evolution_store: None,
+            evolution_applier: None,
         };
         router(state)
     }

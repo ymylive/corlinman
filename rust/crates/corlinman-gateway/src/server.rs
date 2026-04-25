@@ -395,6 +395,24 @@ pub async fn build_runtime_full_with_evolution(
         admin_state = admin_state.with_config_watcher(w.clone());
     }
     if let Some(store) = evolution_store {
+        // Wave 2-A: when both the evolution store and the kb store are
+        // available, build a real `EvolutionApplier` so
+        // `POST /admin/evolution/:id/apply` mutates kb.sqlite + writes
+        // an `evolution_history` row. Missing kb store → applier stays
+        // `None`, the route 503s alongside the rest of the evolution
+        // surface so the UI keeps a single banner.
+        if let Some(kb) = admin_state.rag_store.clone() {
+            let applier = Arc::new(crate::evolution_applier::EvolutionApplier::new(
+                store.clone(),
+                kb,
+            ));
+            admin_state = admin_state.with_evolution_applier(applier);
+        } else {
+            tracing::warn!(
+                "evolution applier not constructed: kb store missing; \
+                 /admin/evolution/:id/apply will return 503",
+            );
+        }
         admin_state = admin_state.with_evolution_store(store);
     }
     // B5-BE1: Canvas Host protocol stubs. Sub-router carries its own auth

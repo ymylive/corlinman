@@ -49,11 +49,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use corlinman_core::metrics::{
-    EVOLUTION_PROPOSALS_APPLIED, EVOLUTION_PROPOSALS_DECISION, EVOLUTION_PROPOSALS_LISTED,
-};
+use corlinman_core::metrics::{EVOLUTION_PROPOSALS_DECISION, EVOLUTION_PROPOSALS_LISTED};
 use corlinman_evolution::{
-    EvolutionProposal, EvolutionStatus, EvolutionStore, ProposalId, ProposalsRepo, RepoError,
+    EvolutionKind, EvolutionProposal, EvolutionStatus, EvolutionStore, ProposalId, ProposalsRepo,
+    RepoError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -62,6 +61,7 @@ use std::str::FromStr;
 use tracing::warn;
 
 use super::AdminState;
+use crate::evolution_applier::{ApplyError, EvolutionApplier};
 
 /// Default `?limit=` when the caller doesn't pass one. Same ballpark as
 /// `/admin/approvals` (no explicit limit there, but the UI batches in 50s).
@@ -367,35 +367,83 @@ async fn deny_proposal(
 }
 
 async fn apply_proposal(State(state): State<AdminState>, Path(id): Path<String>) -> Response {
-    let Some(store) = state.evolution_store.as_ref() else {
+    // Both `evolution_store` (read path) and `evolution_applier` (write
+    // path) must be wired for `/apply` to function. Treating the
+    // missing-applier case as 503 `evolution_disabled` keeps the UI to
+    // one banner regardless of which subsystem is unconfigured.
+    let Some(applier) = state.evolution_applier.as_ref() else {
         return evolution_disabled();
     };
-    let (repo, _) = resolve_handles(store);
     let pid = ProposalId::new(id.clone());
-    let current = match repo.get(&pid).await {
-        Ok(p) => p,
-        Err(RepoError::NotFound(_)) => return not_found(&id),
-        Err(err) => return storage_error(err, "apply.get"),
-    };
-    if current.status != EvolutionStatus::Approved {
-        return invalid_state_transition(current.status, EvolutionStatus::Applied);
+    match applier.apply(&pid).await {
+        Ok(history) => Json(json!({
+            "id": id,
+            "status": EvolutionStatus::Applied.as_str(),
+            "history_id": history.id,
+        }))
+        .into_response(),
+        Err(ApplyError::NotFound(_)) => not_found(&id),
+        Err(ApplyError::NotApproved(actual)) => {
+            // Mirror the pre-Wave-2-A 409 contract — clients already
+            // depend on the `invalid_state_transition` shape from the
+            // approve / deny routes.
+            EvolutionApplier::observe_failure(EvolutionKind::MemoryOp);
+            let from = EvolutionStatus::from_str(&actual).unwrap_or(EvolutionStatus::Pending);
+            invalid_state_transition(from, EvolutionStatus::Applied)
+        }
+        Err(ApplyError::UnsupportedKind(kind_str)) => {
+            // Map `kind_str` back to a typed enum for the metrics call.
+            // Unknown strings (shouldn't happen — value came from the
+            // typed `EvolutionKind`) fall back to `MemoryOp` so the
+            // counter still moves.
+            let kind =
+                EvolutionKind::from_str(&kind_str).unwrap_or(EvolutionKind::MemoryOp);
+            EvolutionApplier::observe_failure(kind);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "unsupported_kind",
+                    "kind": kind_str,
+                    "message": "Phase 2 only applies memory_op proposals",
+                })),
+            )
+                .into_response()
+        }
+        Err(ApplyError::InvalidTarget(target)) => {
+            EvolutionApplier::observe_failure(EvolutionKind::MemoryOp);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_target",
+                    "target": target,
+                })),
+            )
+                .into_response()
+        }
+        Err(ApplyError::ChunkNotFound(chunk_id)) => {
+            EvolutionApplier::observe_failure(EvolutionKind::MemoryOp);
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "chunk_not_found",
+                    "chunk_id": chunk_id,
+                })),
+            )
+                .into_response()
+        }
+        Err(other) => {
+            EvolutionApplier::observe_failure(EvolutionKind::MemoryOp);
+            warn!(error = %other, "admin/evolution apply failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "apply_failed",
+                    "message": other.to_string(),
+                })),
+            )
+                .into_response()
+        }
     }
-    if let Err(err) = repo.mark_applied(&pid, now_ms()).await {
-        return match err {
-            RepoError::NotFound(_) => not_found(&id),
-            other => storage_error(other, "apply.mark_applied"),
-        };
-    }
-    EVOLUTION_PROPOSALS_APPLIED.inc();
-    // Phase 2 stub: the real `EvolutionApplier` lands in Phase 3. The
-    // response shape signals to the UI that nothing was actually mutated
-    // on disk — only the proposal row's status flipped.
-    Json(json!({
-        "id": id,
-        "status": "applied_stub",
-        "warning": "real applier not implemented",
-    }))
-    .into_response()
 }
 
 /// Approve / deny are allowed from `pending` and `shadow_done`. Any other
@@ -470,6 +518,16 @@ mod tests {
     }
 
     fn app_with(store: Option<Arc<EvolutionStore>>) -> Router {
+        app_with_full(store, None)
+    }
+
+    /// Variant that also accepts an `EvolutionApplier`. Wave 2-A apply
+    /// tests need a real applier — earlier list/approve/deny tests don't
+    /// touch the apply route and pass `None`.
+    fn app_with_full(
+        store: Option<Arc<EvolutionStore>>,
+        applier: Option<Arc<EvolutionApplier>>,
+    ) -> Router {
         let state = AdminState {
             plugins: Arc::new(PluginRegistry::default()),
             config: Arc::new(ArcSwap::from_pointee(Config::default())),
@@ -482,8 +540,22 @@ mod tests {
             py_config_path: None,
             config_watcher: None,
             evolution_store: store,
+            evolution_applier: applier,
         };
         router(state)
+    }
+
+    /// Build a kb store + applier wired against the given evolution
+    /// store. Returns the kb store so individual tests can seed chunks
+    /// before calling `/apply`.
+    async fn build_applier(
+        tmp: &TempDir,
+        evol: Arc<EvolutionStore>,
+    ) -> (Arc<corlinman_vector::SqliteStore>, Arc<EvolutionApplier>) {
+        let kb_path = tmp.path().join("kb.sqlite");
+        let kb = Arc::new(corlinman_vector::SqliteStore::open(&kb_path).await.unwrap());
+        let applier = Arc::new(EvolutionApplier::new(evol, kb.clone()));
+        (kb, applier)
     }
 
     async fn read_json(resp: Response) -> serde_json::Value {
@@ -705,11 +777,29 @@ mod tests {
 
     #[tokio::test]
     async fn apply_only_works_from_approved() {
-        let (_tmp, store, repo) = fresh_store().await;
-        repo.insert(&proposal("p1", EvolutionStatus::Pending))
+        let (tmp, store, repo) = fresh_store().await;
+        let (kb, applier) = build_applier(&tmp, store.clone()).await;
+        // Seed two chunks so the real merge_chunks pipeline finds rows
+        // when the proposal flips to approved.
+        let file_id = kb
+            .insert_file("/t", "diary", "ck", 0, 0)
             .await
             .unwrap();
-        let app = app_with(Some(store.clone()));
+        let a = kb
+            .insert_chunk(file_id, 0, "winner", None, "general")
+            .await
+            .unwrap();
+        let b = kb
+            .insert_chunk(file_id, 1, "loser", None, "general")
+            .await
+            .unwrap();
+        let target = format!("merge_chunks:{a},{b}");
+
+        let mut p = proposal("p1", EvolutionStatus::Pending);
+        p.target = target;
+        repo.insert(&p).await.unwrap();
+
+        let app = app_with_full(Some(store.clone()), Some(applier.clone()));
         // Pending → apply: 409.
         let resp = app
             .oneshot(
@@ -733,7 +823,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = app_with(Some(store));
+        let app = app_with_full(Some(store), Some(applier));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -746,16 +836,23 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let v = read_json(resp).await;
-        assert_eq!(v["status"], "applied_stub");
+        assert_eq!(v["status"], "applied");
+        assert!(v["history_id"].is_i64());
         let row = repo.get(&ProposalId::new("p1")).await.unwrap();
         assert_eq!(row.status, EvolutionStatus::Applied);
         assert!(row.applied_at.is_some());
+
+        // Loser chunk gone; winner kept.
+        let rows = kb.query_chunks_by_ids(&[a, b]).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, a);
     }
 
     #[tokio::test]
     async fn apply_unknown_id_returns_404() {
-        let (_tmp, store, _repo) = fresh_store().await;
-        let app = app_with(Some(store));
+        let (tmp, store, _repo) = fresh_store().await;
+        let (_kb, applier) = build_applier(&tmp, store.clone()).await;
+        let app = app_with_full(Some(store), Some(applier));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -767,5 +864,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn apply_returns_503_when_applier_missing() {
+        let (_tmp, store, repo) = fresh_store().await;
+        repo.insert(&proposal("p1", EvolutionStatus::Approved))
+            .await
+            .unwrap();
+        let app = app_with(Some(store));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/evolution/p1/apply")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
