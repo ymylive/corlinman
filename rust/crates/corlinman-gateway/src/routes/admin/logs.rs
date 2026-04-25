@@ -185,6 +185,7 @@ mod tests {
             scheduler_history: None,
             py_config_path: None,
             config_watcher: None,
+            evolution_store: None,
         };
         router(state)
     }

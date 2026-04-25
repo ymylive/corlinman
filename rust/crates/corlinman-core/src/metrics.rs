@@ -431,6 +431,55 @@ pub static EVOLUTION_SIGNALS_QUEUE_DEPTH: Lazy<IntGauge> = Lazy::new(|| {
     g
 });
 
+/// `gateway_evolution_proposals_listed_total` — number of times the admin
+/// API served a proposal listing (regardless of result size). Mostly a
+/// liveness signal for the operator UI's polling loop.
+pub static EVOLUTION_PROPOSALS_LISTED: Lazy<Counter> = Lazy::new(|| {
+    let c = Counter::new(
+        "gateway_evolution_proposals_listed_total",
+        "Calls to GET /admin/evolution served by the proposal admin API",
+    )
+    .expect("valid metric");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register evolution_proposals_listed_total");
+    c
+});
+
+/// `gateway_evolution_proposals_decision_total{decision}` — successful
+/// approve/deny transitions through the admin API. `decision` is one of
+/// `approved` | `denied`.
+pub static EVOLUTION_PROPOSALS_DECISION: Lazy<CounterVec> = Lazy::new(|| {
+    let cv = CounterVec::new(
+        Opts::new(
+            "gateway_evolution_proposals_decision_total",
+            "Approve/deny decisions recorded against evolution_proposals",
+        ),
+        &["decision"],
+    )
+    .expect("valid metric");
+    REGISTRY
+        .register(Box::new(cv.clone()))
+        .expect("register evolution_proposals_decision_total");
+    cv
+});
+
+/// `gateway_evolution_proposals_applied_total` — `apply` calls that
+/// successfully transitioned a proposal `approved → applied`. Phase 2
+/// increments are stub applies; Phase 3's `EvolutionApplier` will continue
+/// to bump the same counter so dashboards stay stable across the swap.
+pub static EVOLUTION_PROPOSALS_APPLIED: Lazy<Counter> = Lazy::new(|| {
+    let c = Counter::new(
+        "gateway_evolution_proposals_applied_total",
+        "Proposals transitioned approved → applied via the admin API",
+    )
+    .expect("valid metric");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register evolution_proposals_applied_total");
+    c
+});
+
 /// `gateway_log_files_removed_total{reason}` — rotated log files the
 /// retention task has deleted. `reason` is currently fixed to `"age"`
 /// (mtime older than `logging.file.retention_days`); new eviction
@@ -491,5 +540,8 @@ pub fn init() {
     Lazy::force(&EVOLUTION_SIGNALS_OBSERVED);
     Lazy::force(&EVOLUTION_SIGNALS_DROPPED);
     Lazy::force(&EVOLUTION_SIGNALS_QUEUE_DEPTH);
+    Lazy::force(&EVOLUTION_PROPOSALS_LISTED);
+    Lazy::force(&EVOLUTION_PROPOSALS_DECISION);
+    Lazy::force(&EVOLUTION_PROPOSALS_APPLIED);
     Lazy::force(&LOG_FILES_REMOVED);
 }

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use axum::{routing::any, Router};
 use corlinman_core::config::Config;
+use corlinman_evolution::EvolutionStore;
 use corlinman_plugins::registry::PluginRegistry;
 use corlinman_vector::SqliteStore;
 use tokio::sync::broadcast;
@@ -38,6 +39,7 @@ pub mod auth;
 pub mod channels;
 pub mod config;
 pub mod embedding;
+pub mod evolution;
 pub mod logs;
 pub mod models;
 pub mod napcat;
@@ -96,6 +98,15 @@ pub struct AdminState {
     /// harnesses that don't spawn the watcher — the endpoint then 503s
     /// with `config_reload_disabled`.
     pub config_watcher: Option<Arc<ConfigWatcher>>,
+    /// Wave 1-C: shared `evolution.sqlite` handle backing the
+    /// `/admin/evolution/*` admin API. `None` when the EvolutionObserver
+    /// failed to open the database (or `[evolution.observer.enabled]` =
+    /// false); every `/admin/evolution/*` route then returns 503
+    /// `evolution_disabled`, matching the approval-gate convention. The
+    /// admin handlers build a fresh `ProposalsRepo` per request — that's
+    /// just a pool-clone wrapper, so the cost is negligible and avoids a
+    /// second field that has to stay in sync with the store.
+    pub evolution_store: Option<Arc<EvolutionStore>>,
 }
 
 impl AdminState {
@@ -111,6 +122,7 @@ impl AdminState {
             scheduler_history: None,
             py_config_path: None,
             config_watcher: None,
+            evolution_store: None,
         }
     }
 
@@ -171,6 +183,15 @@ impl AdminState {
         self
     }
 
+    /// Fluent: attach the shared `EvolutionStore` so `/admin/evolution/*`
+    /// has a real backing database. The same SQLite the observer writes
+    /// signals into — sharing the store keeps the EvolutionLoop to one
+    /// file on disk and one connection budget.
+    pub fn with_evolution_store(mut self, store: Arc<EvolutionStore>) -> Self {
+        self.evolution_store = Some(store);
+        self
+    }
+
     /// Re-serialise the current config snapshot to the Python-side JSON
     /// drop. No-op + warn when the path isn't configured — admin writes
     /// still succeed (the TOML write already landed), they just can't
@@ -217,6 +238,7 @@ pub fn router_with_state(state: AdminState) -> Router {
         .merge(rag::router(state.clone()))
         .merge(channels::router(state.clone()))
         .merge(scheduler::router(state.clone()))
+        .merge(evolution::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             require_admin,

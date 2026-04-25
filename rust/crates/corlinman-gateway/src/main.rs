@@ -74,7 +74,14 @@ async fn main() {
     // persists them via `corlinman-evolution`'s `SignalsRepo`. Gated by
     // `[evolution.observer.enabled]` (default true). Failures here only
     // warn — gateway startup never blocks on the observer.
-    let evolution_observer_handle = maybe_spawn_evolution_observer(&hook_bus).await;
+    //
+    // Wave 1-C also needs the same `EvolutionStore` so the
+    // `/admin/evolution/*` admin API can reuse it. `maybe_spawn_…` returns
+    // both — the writer handle for the shutdown drain, and the `Arc<…>`
+    // store so downstream `build_runtime_full` can stitch it onto the
+    // admin state.
+    let (evolution_observer_handle, evolution_store) =
+        maybe_spawn_evolution_observer(&hook_bus).await;
 
     // P0-1: spawn the log-retention sweeper if a file sink is active.
     // Delete rotated files older than `retention_days` from the log
@@ -91,12 +98,14 @@ async fn main() {
     // Build router + keep a handle on the shared backend + registry.
     // The log broadcast sender threads through so `/admin/logs/stream`
     // can subscribe fresh receivers per request.
-    let (router, backend, plugin_registry, _cfg_handle, _cfg_path) = server::build_runtime_full(
-        Some(log_tx),
-        Some(Arc::new(hook_bus.clone())),
-        config_watcher.as_ref().map(|(w, _)| w.clone()),
-    )
-    .await;
+    let (router, backend, plugin_registry, _cfg_handle, _cfg_path) =
+        server::build_runtime_full_with_evolution(
+            Some(log_tx),
+            Some(Arc::new(hook_bus.clone())),
+            config_watcher.as_ref().map(|(w, _)| w.clone()),
+            evolution_store.clone(),
+        )
+        .await;
 
     // B4-BE1: when `[telegram.webhook].public_url` is set, mount the
     // `POST /channels/telegram/webhook` route onto the gateway router.
@@ -363,13 +372,24 @@ fn resolve_addr() -> SocketAddr {
 /// Best-effort boot of the `EvolutionObserver` (Phase 2 wave 1-A). Reads
 /// `[evolution.observer]` from the same config the rest of the gateway
 /// uses; missing config / `enabled = false` / DB open failures all skip
-/// the spawn and return `None` so the gateway boots unchanged.
+/// the spawn and return `(None, None)` so the gateway boots unchanged.
 ///
-/// Returns the writer task handle so `main` can await its drain on
-/// shutdown.
+/// Returns `(writer_join_handle, evolution_store)`:
+///   - The writer task handle so `main` can await its drain on shutdown.
+///   - The shared `EvolutionStore` so wave 1-C's `/admin/evolution/*`
+///     admin routes reuse the same SQLite file the observer writes into.
+///
+/// Both are `Option`. Either both are `Some` (observer running) or both
+/// are `None` (observer disabled / failed to open). Splitting the
+/// failure modes per-tuple-slot would let admin endpoints work without
+/// the observer, but that's not a configuration we want to encourage —
+/// the API is read-only without the observer feeding signals in.
 async fn maybe_spawn_evolution_observer(
     hook_bus: &corlinman_hooks::HookBus,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> (
+    Option<tokio::task::JoinHandle<()>>,
+    Option<Arc<EvolutionStore>>,
+) {
     let cfg = match load_config() {
         Ok(Some(cfg)) => cfg.evolution.observer,
         Ok(None) => corlinman_core::config::EvolutionObserverConfig::default(),
@@ -383,7 +403,7 @@ async fn maybe_spawn_evolution_observer(
     };
     if !cfg.enabled {
         tracing::info!("evolution observer disabled by config");
-        return None;
+        return (None, None);
     }
     if let Some(parent) = cfg.db_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -393,19 +413,19 @@ async fn maybe_spawn_evolution_observer(
                     dir = %parent.display(),
                     "evolution observer: could not create db dir; observer disabled",
                 );
-                return None;
+                return (None, None);
             }
         }
     }
     let store = match EvolutionStore::open(&cfg.db_path).await {
-        Ok(s) => s,
+        Ok(s) => Arc::new(s),
         Err(err) => {
             tracing::warn!(
                 error = %err,
                 path = %cfg.db_path.display(),
                 "evolution observer: could not open evolution.sqlite; observer disabled",
             );
-            return None;
+            return (None, None);
         }
     };
     let repo = SignalsRepo::new(store.pool().clone());
@@ -414,11 +434,8 @@ async fn maybe_spawn_evolution_observer(
         queue_capacity = cfg.queue_capacity,
         "evolution observer: spawned"
     );
-    Some(evolution_observer::spawn(
-        Arc::new(hook_bus.clone()),
-        repo,
-        &cfg,
-    ))
+    let handle = evolution_observer::spawn(Arc::new(hook_bus.clone()), repo, &cfg);
+    (Some(handle), Some(store))
 }
 
 /// Resolve `$CORLINMAN_CONFIG` (or [`Config::default_path`]) and — when the

@@ -13,6 +13,7 @@ use axum::Router;
 use corlinman_agent_client::client::{connect_channel, resolve_endpoint, AgentClient};
 use corlinman_core::config::Config;
 use corlinman_core::{SessionStore, SqliteSessionStore};
+use corlinman_evolution::EvolutionStore;
 use corlinman_plugins::{roots_from_env_var, Origin, PluginRegistry, SearchRoot};
 use corlinman_vector::SqliteStore;
 use tokio::net::TcpListener;
@@ -235,6 +236,28 @@ pub async fn build_runtime_full(
     Arc<ArcSwap<Config>>,
     Option<PathBuf>,
 ) {
+    build_runtime_full_with_evolution(log_tx, hook_bus, watcher, None).await
+}
+
+/// Wave 1-C: superset of [`build_runtime_full`] that additionally accepts
+/// the shared `EvolutionStore` opened by `main.rs` for the observer. When
+/// `Some`, the resulting `AdminState` carries it through so
+/// `/admin/evolution/*` returns real data; `None` keeps the previous
+/// behaviour (those routes 503 with `evolution_disabled`). All earlier
+/// signatures stay backwards-compatible — `build_runtime_full` just calls
+/// this with `evolution_store = None`.
+pub async fn build_runtime_full_with_evolution(
+    log_tx: Option<broadcast::Sender<LogRecord>>,
+    hook_bus: Option<Arc<corlinman_hooks::HookBus>>,
+    watcher: Option<Arc<crate::config_watcher::ConfigWatcher>>,
+    evolution_store: Option<Arc<EvolutionStore>>,
+) -> (
+    Router,
+    Option<Arc<dyn ChatBackend>>,
+    Arc<PluginRegistry>,
+    Arc<ArcSwap<Config>>,
+    Option<PathBuf>,
+) {
     let registry = Arc::new(load_plugin_registry());
     tracing::info!(
         plugin_count = registry.len(),
@@ -370,6 +393,9 @@ pub async fn build_runtime_full(
     );
     if let Some(w) = watcher.as_ref() {
         admin_state = admin_state.with_config_watcher(w.clone());
+    }
+    if let Some(store) = evolution_store {
+        admin_state = admin_state.with_evolution_store(store);
     }
     // B5-BE1: Canvas Host protocol stubs. Sub-router carries its own auth
     // guard (shares `AdminAuthState` with the admin surface), so we can
