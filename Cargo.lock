@@ -603,6 +603,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "corlinman-auto-rollback"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "corlinman-core",
+ "corlinman-evolution",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "corlinman-auto-rollback-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "corlinman-auto-rollback",
+ "corlinman-core",
+ "corlinman-evolution",
+ "corlinman-gateway",
+ "corlinman-vector",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "corlinman-channels"
 version = "0.1.0"
 dependencies = [
@@ -734,6 +768,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "corlinman-agent-client",
+ "corlinman-auto-rollback",
  "corlinman-channels",
  "corlinman-core",
  "corlinman-evolution",
@@ -814,6 +849,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "corlinman-auto-rollback",
  "corlinman-channels",
  "corlinman-core",
  "corlinman-evolution",

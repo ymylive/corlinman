@@ -38,12 +38,17 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use corlinman_auto_rollback::metrics::{capture_snapshot, watched_event_kinds};
+use corlinman_auto_rollback::revert::{Applier as AutoRollbackApplier, RevertError};
+use corlinman_core::config::AutoRollbackThresholds;
 use corlinman_core::metrics::{
     EVOLUTION_CHUNKS_DELETED, EVOLUTION_CHUNKS_MERGED, EVOLUTION_PROPOSALS_APPLIED,
+    EVOLUTION_PROPOSALS_ROLLED_BACK,
 };
 use corlinman_evolution::{
-    EvolutionHistory, EvolutionKind, EvolutionStatus, EvolutionStore, ProposalId, ProposalsRepo,
-    RepoError,
+    EvolutionHistory, EvolutionKind, EvolutionStatus, EvolutionStore, HistoryRepo, ProposalId,
+    ProposalsRepo, RepoError,
 };
 use corlinman_vector::SqliteStore;
 use serde_json::json;
@@ -78,6 +83,23 @@ pub enum ApplyError {
     /// Repo-level read on the proposal failed.
     #[error("repo error: {0}")]
     Repo(#[from] RepoError),
+    /// Phase 3 W1-B revert: proposal isn't in `applied`. Carries the
+    /// actual status string. Distinct from `NotApproved` so the monitor
+    /// can tell "already rolled back" apart from "never applied".
+    #[error("proposal not applied (status={0})")]
+    NotApplied(String),
+    /// Phase 3 W1-B revert: forward apply succeeded but the audit row
+    /// is gone — flag as data corruption rather than silent skip.
+    #[error("history row missing for proposal {0}")]
+    HistoryMissing(String),
+    /// Phase 3 W1-B revert: kind has no inverse handler yet. W1-B ships
+    /// `memory_op` only — sibling lines land here as later kinds activate.
+    #[error("kind {0} cannot be reverted yet")]
+    UnsupportedRevertKind(String),
+    /// Phase 3 W1-B revert: `inverse_diff` JSON didn't parse or was
+    /// missing required keys. Carries a short reason string.
+    #[error("malformed inverse_diff: {0}")]
+    MalformedInverseDiff(String),
 }
 
 /// Real applier for `memory_op` evolution proposals. Constructed at
@@ -86,8 +108,14 @@ pub enum ApplyError {
 /// can return 503 when either store is missing.
 pub struct EvolutionApplier {
     proposals: ProposalsRepo,
+    history: HistoryRepo,
     kb_store: Arc<SqliteStore>,
     evolution_store: Arc<EvolutionStore>,
+    /// AutoRollback thresholds (Phase 3 W1-B). Owned here so the applier
+    /// uses the same `signal_window_secs` for the baseline snapshot as
+    /// the monitor uses for the post-apply snapshot — symmetric windows
+    /// prevent sample-mismatch false positives.
+    auto_rollback_thresholds: AutoRollbackThresholds,
 }
 
 impl EvolutionApplier {
@@ -99,12 +127,25 @@ impl EvolutionApplier {
     /// `EvolutionStore` directly rather than constructing a `HistoryRepo`
     /// — the repo's `insert` doesn't take a `Transaction`, and adding a
     /// TX-aware variant would touch `corlinman-evolution`.
-    pub fn new(evolution_store: Arc<EvolutionStore>, kb_store: Arc<SqliteStore>) -> Self {
+    ///
+    /// `auto_rollback_thresholds` is consumed at apply time to size the
+    /// `metrics_baseline` window. We capture the snapshot regardless of
+    /// the master `enabled` flag — populating baselines while the
+    /// monitor is off is cheap and gives operators historical data to
+    /// flip on later (see `EvolutionAutoRollbackConfig` doc).
+    pub fn new(
+        evolution_store: Arc<EvolutionStore>,
+        kb_store: Arc<SqliteStore>,
+        auto_rollback_thresholds: AutoRollbackThresholds,
+    ) -> Self {
         let proposals = ProposalsRepo::new(evolution_store.pool().clone());
+        let history = HistoryRepo::new(evolution_store.pool().clone());
         Self {
             proposals,
+            history,
             kb_store,
             evolution_store,
+            auto_rollback_thresholds,
         }
     }
 
@@ -139,6 +180,34 @@ impl EvolutionApplier {
         //    DELETE statement, atomic by SQLite contract); a TX here
         //    keeps the audit row + status flip in lockstep.
         let now = now_ms();
+
+        // W1-B Step 2: capture per-event-kind signal counts at apply
+        // time so AutoRollback (Step 4) can compare against a fresh
+        // post-apply snapshot. Empty whitelist (kind not yet wired) →
+        // empty baseline so monitor knows to skip — see
+        // `watched_event_kinds`.
+        let watched = watched_event_kinds(proposal.kind);
+        let metrics_baseline = if watched.is_empty() {
+            tracing::debug!(
+                kind = proposal.kind.as_str(),
+                "no AutoRollback whitelist for {} yet; metrics_baseline left empty",
+                proposal.kind.as_str(),
+            );
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            let snap = capture_snapshot(
+                self.evolution_store.pool(),
+                &proposal.target,
+                watched,
+                self.auto_rollback_thresholds.signal_window_secs,
+                now,
+            )
+            .await
+            .map_err(|e| ApplyError::History(anyhow::Error::from(e)))?;
+            serde_json::to_value(&snap)
+                .map_err(|e| ApplyError::History(anyhow::Error::from(e)))?
+        };
+
         let history_row = EvolutionHistory {
             id: None,
             proposal_id: id.clone(),
@@ -147,7 +216,7 @@ impl EvolutionApplier {
             before_sha: mutation.before_sha,
             after_sha: mutation.after_sha,
             inverse_diff: mutation.inverse_diff,
-            metrics_baseline: serde_json::Value::Object(serde_json::Map::new()),
+            metrics_baseline,
             applied_at: now,
             rolled_back_at: None,
             rollback_reason: None,
@@ -325,6 +394,233 @@ impl EvolutionApplier {
             .with_label_values(&[kind.as_str(), "error"])
             .inc();
     }
+
+    /// Phase 3 W1-B: replay a proposal's `inverse_diff` against the kb,
+    /// then stamp the rollback audit fields on the proposal + history
+    /// rows. Returns the freshly-updated history row (with
+    /// `rolled_back_at` / `rollback_reason` populated).
+    ///
+    /// Same two-DB partial-fail caveat as `apply`: the kb mutation and
+    /// the evolution UPDATEs aren't in a shared transaction. Order is
+    /// kb → history → proposal so the worst-case is "kb restored but
+    /// audit silent" — operators detect via the diff between
+    /// `evolution_proposals.status = 'applied'` rows and the actual kb
+    /// state, same monitoring path the forward apply already uses.
+    pub async fn revert(
+        &self,
+        id: &ProposalId,
+        reason: &str,
+    ) -> Result<EvolutionHistory, ApplyError> {
+        // 1. Gate on `Applied`. `RolledBack` returns NotApplied so the
+        //    monitor can tell idempotent re-fires apart from missing
+        //    proposals.
+        let proposal = match self.proposals.get(id).await {
+            Ok(p) => p,
+            Err(RepoError::NotFound(_)) => return Err(ApplyError::NotFound(id.0.clone())),
+            Err(other) => return Err(ApplyError::Repo(other)),
+        };
+        if proposal.status != EvolutionStatus::Applied {
+            return Err(ApplyError::NotApplied(
+                proposal.status.as_str().to_string(),
+            ));
+        }
+
+        // 2. Fetch the audit row's inverse_diff. Missing here is data
+        //    corruption — forward apply must have written it.
+        let history_row = match self.history.latest_for_proposal(id).await {
+            Ok(h) => h,
+            Err(RepoError::NotFound(_)) => {
+                return Err(ApplyError::HistoryMissing(id.0.clone()));
+            }
+            Err(other) => return Err(ApplyError::Repo(other)),
+        };
+
+        // 3. Dispatch per kind. New kinds add a sibling line below.
+        match proposal.kind {
+            EvolutionKind::MemoryOp => self.revert_memory_op(&history_row).await?,
+            other => return Err(ApplyError::UnsupportedRevertKind(other.as_str().to_string())),
+        }
+
+        // 4. Audit + status flip. Two writes against evolution.sqlite —
+        //    not in a shared TX with the kb mutation; see method doc.
+        let now = now_ms();
+        self.history
+            .mark_rolled_back(id, now, reason)
+            .await
+            .map_err(|e| ApplyError::History(anyhow::Error::from(e)))?;
+        self.proposals
+            .mark_auto_rolled_back(id, now, reason)
+            .await
+            .map_err(|e| ApplyError::Repo(e))?;
+
+        EVOLUTION_PROPOSALS_ROLLED_BACK
+            .with_label_values(&[proposal.kind.as_str()])
+            .inc();
+
+        let mut out = history_row;
+        out.rolled_back_at = Some(now);
+        out.rollback_reason = Some(reason.to_string());
+        Ok(out)
+    }
+
+    /// Reverse handler for `memory_op`. Re-INSERT the chunk that the
+    /// forward path deleted. `INSERT OR IGNORE` makes a partial
+    /// double-revert safe: when an explicit `id` is bound (the
+    /// merge_chunks shape carries `loser_id`), a PK collision with a
+    /// re-inserted row becomes a no-op rather than a failure.
+    ///
+    /// `delete_chunk`'s forward inverse_diff doesn't carry the original
+    /// chunk id, so its revert lets SQLite assign a fresh autoincrement
+    /// id — content is restored, the (file_id, chunk_index, namespace)
+    /// metadata is intact, and the proposal status flip below prevents
+    /// the monitor from firing the same revert twice.
+    async fn revert_memory_op(&self, history: &EvolutionHistory) -> Result<(), ApplyError> {
+        let raw: serde_json::Value = serde_json::from_str(&history.inverse_diff)
+            .map_err(|e| ApplyError::MalformedInverseDiff(format!("parse: {e}")))?;
+        let action = raw
+            .get("action")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApplyError::MalformedInverseDiff("missing 'action'".into()))?;
+        if action != "restore_chunk" {
+            return Err(ApplyError::MalformedInverseDiff(format!(
+                "unknown action: {action}"
+            )));
+        }
+
+        // Forward path emits two shapes: `merge_chunks` keys are
+        // prefixed `loser_*` (winner stays put); `delete_chunk` uses
+        // bare `content/file_id/...`. Discriminate on `loser_id`.
+        let plan = ChunkRestore::parse(&raw).map_err(ApplyError::MalformedInverseDiff)?;
+        plan.execute(self.kb_store.pool())
+            .await
+            .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+        Ok(())
+    }
+}
+
+/// Internal helper: the fields needed to re-INSERT a chunk row. Two
+/// shapes — merge_chunks carries the original chunk id (so the revert
+/// can pin idempotency on the PK), delete_chunk doesn't (autoincrement
+/// fresh).
+enum ChunkRestore {
+    /// merge_chunks revert: explicit id from `loser_id`.
+    WithId {
+        id: i64,
+        file_id: i64,
+        chunk_index: i64,
+        content: String,
+        namespace: String,
+    },
+    /// delete_chunk revert: id auto-assigned.
+    WithoutId {
+        file_id: i64,
+        chunk_index: i64,
+        content: String,
+        namespace: String,
+    },
+}
+
+impl ChunkRestore {
+    fn parse(v: &serde_json::Value) -> Result<Self, String> {
+        if v.get("loser_id").is_some() {
+            Ok(Self::WithId {
+                id: pick_i64(v, "loser_id")?,
+                file_id: pick_i64(v, "loser_file_id")?,
+                chunk_index: pick_i64(v, "loser_chunk_index")?,
+                content: pick_str(v, "loser_content")?,
+                namespace: pick_str(v, "loser_namespace")?,
+            })
+        } else {
+            Ok(Self::WithoutId {
+                file_id: pick_i64(v, "file_id")?,
+                chunk_index: pick_i64(v, "chunk_index")?,
+                content: pick_str(v, "content")?,
+                namespace: pick_str(v, "namespace")?,
+            })
+        }
+    }
+
+    async fn execute(&self, pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+        match self {
+            // INSERT OR IGNORE: PK collision on re-insert is a no-op so
+            // a partial double-revert (history rolled_back but proposal
+            // still applied, monitor re-fires) lands cleanly.
+            Self::WithId {
+                id,
+                file_id,
+                chunk_index,
+                content,
+                namespace,
+            } => {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO chunks(id, file_id, chunk_index, content, vector, namespace) \
+                     VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+                )
+                .bind(id)
+                .bind(file_id)
+                .bind(chunk_index)
+                .bind(content)
+                .bind(namespace)
+                .execute(pool)
+                .await?;
+            }
+            // No PK to collide on — idempotency comes from the proposal
+            // status flip in the caller. Still INSERT OR IGNORE for
+            // shape consistency with the merge path.
+            Self::WithoutId {
+                file_id,
+                chunk_index,
+                content,
+                namespace,
+            } => {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO chunks(file_id, chunk_index, content, vector, namespace) \
+                     VALUES (?1, ?2, ?3, NULL, ?4)",
+                )
+                .bind(file_id)
+                .bind(chunk_index)
+                .bind(content)
+                .bind(namespace)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn pick_str(v: &serde_json::Value, key: &str) -> Result<String, String> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("missing '{key}'"))
+}
+
+fn pick_i64(v: &serde_json::Value, key: &str) -> Result<i64, String> {
+    v.get(key)
+        .and_then(|x| x.as_i64())
+        .ok_or_else(|| format!("missing '{key}'"))
+}
+
+/// Adapter so the AutoRollback monitor can hold an
+/// `Arc<dyn AutoRollbackApplier>` without dragging the gateway crate
+/// into `corlinman-auto-rollback`. Maps the rich `ApplyError` set into
+/// the leaner `RevertError` the monitor cares about.
+#[async_trait]
+impl AutoRollbackApplier for EvolutionApplier {
+    async fn revert(&self, id: &ProposalId, reason: &str) -> Result<(), RevertError> {
+        match EvolutionApplier::revert(self, id, reason).await {
+            Ok(_) => Ok(()),
+            Err(ApplyError::NotFound(s)) => Err(RevertError::NotFound(s)),
+            Err(ApplyError::NotApplied(s)) => Err(RevertError::NotApplied(s)),
+            Err(ApplyError::HistoryMissing(s)) => Err(RevertError::HistoryMissing(s)),
+            Err(ApplyError::UnsupportedRevertKind(s)) => Err(RevertError::UnsupportedKind(s)),
+            // Everything else (Kb, History, MalformedInverseDiff, Repo,
+            // ...) collapses to Internal — operator inspects gateway
+            // logs for the underlying cause.
+            Err(other) => Err(RevertError::Internal(format!("{other}"))),
+        }
+    }
 }
 
 /// Internal representation of a parsed `memory_op` target.
@@ -429,7 +725,8 @@ mod tests {
         let evol_path = tmp.path().join("evolution.sqlite");
         let kb = Arc::new(SqliteStore::open(&kb_path).await.unwrap());
         let evol = Arc::new(EvolutionStore::open(&evol_path).await.unwrap());
-        let applier = EvolutionApplier::new(evol.clone(), kb.clone());
+        let applier =
+            EvolutionApplier::new(evol.clone(), kb.clone(), AutoRollbackThresholds::default());
         (tmp, applier, kb, evol)
     }
 
@@ -669,5 +966,178 @@ mod tests {
             applier.apply(&pid).await,
             Err(ApplyError::ChunkNotFound(99999))
         ));
+    }
+
+    /// W1-B Step 2: applying a memory_op proposal must populate
+    /// `metrics_baseline` with the snapshot of recent regression
+    /// signals on the proposal's target. Seeds two `tool.call.failed`
+    /// rows on the target before applying and asserts the baseline
+    /// JSON carries a non-zero count.
+    #[tokio::test]
+    async fn apply_populates_metrics_baseline_from_signals() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let id = seed_chunk(&kb, "/m", "metric content").await;
+        let target = format!("delete_chunk:{id}");
+
+        // Seed signals "now-ish" so they fall inside the default
+        // 1800s window. Use the same now() the applier will use —
+        // good enough for the assert.
+        let now = now_ms();
+        for _ in 0..3 {
+            sqlx::query(
+                r#"INSERT INTO evolution_signals
+                     (event_kind, target, severity, payload_json, observed_at)
+                   VALUES ('tool.call.failed', ?, 'error', '{}', ?)"#,
+            )
+            .bind(&target)
+            .bind(now - 1_000)
+            .execute(evol.pool())
+            .await
+            .unwrap();
+        }
+
+        let pid = seed_approved(&evol, "evol-baseline-001", &target).await;
+        let history = applier.apply(&pid).await.unwrap();
+
+        // metrics_baseline shape comes from MetricSnapshot — check we
+        // serialised the counts and that the seeded signals show up.
+        let baseline = &history.metrics_baseline;
+        assert_eq!(baseline["target"], target);
+        assert_eq!(baseline["counts"]["tool.call.failed"], 3);
+        // search.recall.dropped is in the whitelist but unseeded → 0.
+        assert_eq!(baseline["counts"]["search.recall.dropped"], 0);
+    }
+
+    /// W1-B Step 3: a forward `merge_chunks` apply followed by a revert
+    /// must restore the deleted loser chunk and stamp the proposal +
+    /// history rollback fields. Pins both the kb-side restore and the
+    /// evolution.sqlite audit trail in one shot.
+    #[tokio::test]
+    async fn revert_memory_op_restores_deleted_chunk() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let a = seed_chunk(&kb, "/a", "winner content").await;
+        let b = seed_chunk(&kb, "/b", "loser content").await;
+        let target = format!("merge_chunks:{a},{b}");
+        let pid = seed_approved(&evol, "evol-revert-001", &target).await;
+
+        // Forward apply removes the loser.
+        applier.apply(&pid).await.unwrap();
+        let rows = kb.query_chunks_by_ids(&[a, b]).await.unwrap();
+        assert_eq!(rows.len(), 1, "loser deleted by forward apply");
+
+        // Revert restores it (id-stable: same loser_id comes back).
+        let reverted = applier
+            .revert(&pid, "metrics regression: +200% err signals")
+            .await
+            .unwrap();
+        assert!(reverted.rolled_back_at.is_some());
+        assert_eq!(
+            reverted.rollback_reason.as_deref(),
+            Some("metrics regression: +200% err signals")
+        );
+
+        // Loser chunk back at its original id.
+        let rows = kb.query_chunks_by_ids(&[a, b]).await.unwrap();
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![a, b], "loser restored at original id");
+        let loser = rows.iter().find(|r| r.id == b).unwrap();
+        assert_eq!(loser.content, "loser content");
+        assert_eq!(loser.namespace, "general");
+
+        // Proposal flipped applied → rolled_back with audit columns set.
+        let after = ProposalsRepo::new(evol.pool().clone()).get(&pid).await.unwrap();
+        assert_eq!(after.status, EvolutionStatus::RolledBack);
+        let row: (Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT auto_rollback_at, auto_rollback_reason FROM evolution_proposals WHERE id = ?",
+        )
+        .bind(pid.as_str())
+        .fetch_one(evol.pool())
+        .await
+        .unwrap();
+        assert!(row.0.is_some());
+        assert_eq!(
+            row.1.as_deref(),
+            Some("metrics regression: +200% err signals")
+        );
+    }
+
+    /// Calling revert on an already-rolled-back proposal must surface
+    /// `NotApplied` (status is `RolledBack`, not `Applied`). Pins the
+    /// idempotency contract the monitor relies on.
+    #[tokio::test]
+    async fn revert_idempotent() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let a = seed_chunk(&kb, "/a", "winner").await;
+        let b = seed_chunk(&kb, "/b", "loser").await;
+        let pid = seed_approved(&evol, "evol-revert-002", &format!("merge_chunks:{a},{b}")).await;
+        applier.apply(&pid).await.unwrap();
+        applier.revert(&pid, "first").await.unwrap();
+
+        match applier.revert(&pid, "second").await {
+            Err(ApplyError::NotApplied(s)) => assert_eq!(s, "rolled_back"),
+            other => panic!("expected NotApplied, got {other:?}"),
+        }
+    }
+
+    /// Reverting a non-memory_op kind must short-circuit with
+    /// `UnsupportedRevertKind`. Hand-seed the rows because the forward
+    /// apply path refuses non-memory_op kinds — the revert path needs
+    /// to be tested independently.
+    #[tokio::test]
+    async fn revert_unsupported_kind() {
+        let (_tmp, applier, _kb, evol) = fresh_applier().await;
+        let pid = ProposalId::new("evol-revert-tag-001");
+        let proposals = ProposalsRepo::new(evol.pool().clone());
+        proposals
+            .insert(&EvolutionProposal {
+                id: pid.clone(),
+                kind: EvolutionKind::TagRebalance,
+                target: "tag_tree".into(),
+                diff: String::new(),
+                reasoning: String::new(),
+                risk: EvolutionRisk::Low,
+                budget_cost: 0,
+                status: EvolutionStatus::Applied,
+                shadow_metrics: None,
+                signal_ids: vec![],
+                trace_ids: vec![],
+                created_at: 1_000,
+                decided_at: Some(2_000),
+                decided_by: Some("op".into()),
+                applied_at: Some(3_000),
+                rollback_of: None,
+            })
+            .await
+            .unwrap();
+        // History row: required so the gate after kind-check would
+        // theoretically have one to consume — but UnsupportedRevertKind
+        // fires before the kb mutation, so we get there only via the
+        // status check first. Insert anyway so a future reorder of the
+        // checks doesn't masquerade as a regression.
+        let history = HistoryRepo::new(evol.pool().clone());
+        history
+            .insert(&EvolutionHistory {
+                id: None,
+                proposal_id: pid.clone(),
+                kind: EvolutionKind::TagRebalance,
+                target: "tag_tree".into(),
+                before_sha: "x".into(),
+                after_sha: "y".into(),
+                inverse_diff: "{}".into(),
+                metrics_baseline: serde_json::json!({}),
+                applied_at: 3_000,
+                rolled_back_at: None,
+                rollback_reason: None,
+            })
+            .await
+            .unwrap();
+
+        match applier.revert(&pid, "won't take").await {
+            Err(ApplyError::UnsupportedRevertKind(s)) => assert_eq!(s, "tag_rebalance"),
+            other => panic!("expected UnsupportedRevertKind, got {other:?}"),
+        }
+        // Still applied — no audit fields written.
+        let after = proposals.get(&pid).await.unwrap();
+        assert_eq!(after.status, EvolutionStatus::Applied);
     }
 }

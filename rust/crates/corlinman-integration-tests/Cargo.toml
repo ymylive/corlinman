@@ -33,6 +33,10 @@ corlinman-nodebridge = { path = "../corlinman-nodebridge" }
 # dev-dep level.
 corlinman-evolution = { path = "../corlinman-evolution" }
 corlinman-shadow-tester = { path = "../corlinman-shadow-tester" }
+# Phase 3 W1-B Step 4: cross-crate auto-rollback loop test (applied
+# proposal + history baseline → injected error signals → monitor →
+# rollback) needs auto-rollback's monitor + the gateway's applier.
+corlinman-auto-rollback = { path = "../corlinman-auto-rollback" }
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time", "sync"] }
 tokio-util = { workspace = true }

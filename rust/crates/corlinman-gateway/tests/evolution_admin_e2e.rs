@@ -82,7 +82,11 @@ async fn happy_path_list_approve_apply() {
     //    (read path) and an `EvolutionApplier` (write path). Wave 2-A
     //    swap: the apply route needs the applier; without it the route
     //    returns 503 alongside the rest of the evolution surface.
-    let applier = Arc::new(EvolutionApplier::new(store.clone(), kb.clone()));
+    let applier = Arc::new(EvolutionApplier::new(
+        store.clone(),
+        kb.clone(),
+        corlinman_core::config::AutoRollbackThresholds::default(),
+    ));
     let state = AdminState::new(
         Arc::new(PluginRegistry::default()),
         Arc::new(ArcSwap::from_pointee(Config::default())),

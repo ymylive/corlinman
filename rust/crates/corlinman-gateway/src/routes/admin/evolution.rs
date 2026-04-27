@@ -554,7 +554,11 @@ mod tests {
     ) -> (Arc<corlinman_vector::SqliteStore>, Arc<EvolutionApplier>) {
         let kb_path = tmp.path().join("kb.sqlite");
         let kb = Arc::new(corlinman_vector::SqliteStore::open(&kb_path).await.unwrap());
-        let applier = Arc::new(EvolutionApplier::new(evol, kb.clone()));
+        let applier = Arc::new(EvolutionApplier::new(
+            evol,
+            kb.clone(),
+            corlinman_core::config::AutoRollbackThresholds::default(),
+        ));
         (kb, applier)
     }
 

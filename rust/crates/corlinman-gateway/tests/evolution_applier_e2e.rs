@@ -85,7 +85,11 @@ async fn apply_runs_real_merge_chunks_pipeline() {
     .unwrap();
 
     // 3. Build the applier + admin sub-router.
-    let applier = Arc::new(EvolutionApplier::new(evol.clone(), kb.clone()));
+    let applier = Arc::new(EvolutionApplier::new(
+        evol.clone(),
+        kb.clone(),
+        corlinman_core::config::AutoRollbackThresholds::default(),
+    ));
     let state = AdminState::new(
         Arc::new(PluginRegistry::default()),
         Arc::new(ArcSwap::from_pointee(Config::default())),
@@ -192,7 +196,11 @@ async fn apply_runs_real_delete_chunk_pipeline() {
     .await
     .unwrap();
 
-    let applier = Arc::new(EvolutionApplier::new(evol.clone(), kb.clone()));
+    let applier = Arc::new(EvolutionApplier::new(
+        evol.clone(),
+        kb.clone(),
+        corlinman_core::config::AutoRollbackThresholds::default(),
+    ));
     let state = AdminState::new(
         Arc::new(PluginRegistry::default()),
         Arc::new(ArcSwap::from_pointee(Config::default())),

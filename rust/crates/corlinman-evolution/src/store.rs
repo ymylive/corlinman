@@ -149,7 +149,13 @@ mod tests {
             let store = EvolutionStore::open(&path).await.unwrap();
             (tmp, store)
         };
-        for col in ["shadow_metrics", "eval_run_id", "baseline_metrics_json"] {
+        for col in [
+            "shadow_metrics",
+            "eval_run_id",
+            "baseline_metrics_json",
+            "auto_rollback_at",
+            "auto_rollback_reason",
+        ] {
             let exists = column_exists(store.pool(), "evolution_proposals", leak(col))
                 .await
                 .unwrap();
@@ -228,7 +234,12 @@ mod tests {
         // Open through the production path → migrations apply.
         let store = EvolutionStore::open(&path).await.unwrap();
 
-        for col in ["eval_run_id", "baseline_metrics_json"] {
+        for col in [
+            "eval_run_id",
+            "baseline_metrics_json",
+            "auto_rollback_at",
+            "auto_rollback_reason",
+        ] {
             assert!(
                 column_exists(store.pool(), "evolution_proposals", leak(col))
                     .await

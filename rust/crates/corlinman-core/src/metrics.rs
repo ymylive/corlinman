@@ -487,6 +487,27 @@ pub static EVOLUTION_PROPOSALS_APPLIED: Lazy<CounterVec> = Lazy::new(|| {
     cv
 });
 
+/// `gateway_evolution_proposals_rolled_back_total{kind}` — proposals
+/// transitioned `applied → rolled_back` by the AutoRollback path
+/// (Phase 3 W1-B). `kind` mirrors the proposal's `EvolutionKind`. Manual
+/// operator-initiated rollbacks (the `rollback_of` flow) are not
+/// counted here — they go through the standard apply pipeline as a
+/// fresh proposal and increment `EVOLUTION_PROPOSALS_APPLIED` instead.
+pub static EVOLUTION_PROPOSALS_ROLLED_BACK: Lazy<CounterVec> = Lazy::new(|| {
+    let cv = CounterVec::new(
+        Opts::new(
+            "gateway_evolution_proposals_rolled_back_total",
+            "Proposals auto-reverted by the AutoRollback monitor",
+        ),
+        &["kind"],
+    )
+    .expect("valid metric");
+    REGISTRY
+        .register(Box::new(cv.clone()))
+        .expect("register evolution_proposals_rolled_back_total");
+    cv
+});
+
 /// `gateway_evolution_chunks_merged_total` — successful `merge_chunks:<a>,<b>`
 /// applies. Each increment corresponds to one loser chunk being deleted from
 /// `kb.sqlite`; the winner content stays untouched.
@@ -580,6 +601,7 @@ pub fn init() {
     Lazy::force(&EVOLUTION_PROPOSALS_LISTED);
     Lazy::force(&EVOLUTION_PROPOSALS_DECISION);
     Lazy::force(&EVOLUTION_PROPOSALS_APPLIED);
+    Lazy::force(&EVOLUTION_PROPOSALS_ROLLED_BACK);
     Lazy::force(&EVOLUTION_CHUNKS_MERGED);
     Lazy::force(&EVOLUTION_CHUNKS_DELETED);
     Lazy::force(&LOG_FILES_REMOVED);

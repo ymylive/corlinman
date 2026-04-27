@@ -25,16 +25,20 @@ gain the two columns automatically on first open (idempotent ALTER inside
 
 ### 2.1 Evolution schema v0.2 → v0.3
 
-Two new nullable columns on `evolution_proposals`:
+Four new nullable columns on `evolution_proposals` (W1-A adds the first
+two; W1-B adds the second two — both ship together as v0.3):
 
-| Column                  | Type | Purpose |
-|-------------------------|------|---------|
-| `eval_run_id`           | TEXT | Pointer to the shadow run that populated `shadow_metrics`. Lets the operator (and Phase 3 W1-B AutoRollback) trace metrics back to the eval set version they were measured against. |
-| `baseline_metrics_json` | TEXT | Pre-change baseline captured at shadow time, so the operator review surface can render a delta (`shadow_metrics − baseline_metrics_json`) instead of just the post-change snapshot. |
+| Column                  | Type    | Wave | Purpose |
+|-------------------------|---------|------|---------|
+| `eval_run_id`           | TEXT    | W1-A | Pointer to the shadow run that populated `shadow_metrics`. Lets the operator (and AutoRollback) trace metrics back to the eval set version they were measured against. |
+| `baseline_metrics_json` | TEXT    | W1-A | Pre-change baseline captured at shadow time, so the operator review surface can render a delta (`shadow_metrics − baseline_metrics_json`) instead of just the post-change snapshot. |
+| `auto_rollback_at`      | INTEGER | W1-B | Unix-ms timestamp set when the AutoRollback monitor decides to revert this proposal. `NULL` for proposals that were never auto-reverted (the common case). |
+| `auto_rollback_reason`  | TEXT    | W1-B | Human-readable string the monitor wrote describing which threshold breached (e.g. `"err_signal_count: 4 → 23 (+475%); threshold +50%"`). Read by the operator when triaging a rollback. |
 
-Both are nullable: `pending` proposals (low-risk, or filed before
-ShadowTester ran) leave them `NULL`, which is what the existing decoder
-expects.
+All four are nullable: `pending` proposals (low-risk, or filed before
+ShadowTester ran) leave the W1-A columns `NULL`; `applied` proposals
+that never tripped the monitor leave the W1-B columns `NULL`. Existing
+decoders treat `NULL` as "no shadow / no rollback" and keep working.
 
 **Migration is automatic.** The `evolution-evolution` crate's
 `EvolutionStore::open` walks `schema::MIGRATIONS` after applying
@@ -47,6 +51,8 @@ If you want to apply the migration by hand (e.g. for an offline copy):
 ```sql
 ALTER TABLE evolution_proposals ADD COLUMN eval_run_id           TEXT;
 ALTER TABLE evolution_proposals ADD COLUMN baseline_metrics_json TEXT;
+ALTER TABLE evolution_proposals ADD COLUMN auto_rollback_at      INTEGER;
+ALTER TABLE evolution_proposals ADD COLUMN auto_rollback_reason  TEXT;
 ```
 
 SQLite ALTER TABLE ADD COLUMN is online and lock-free for nullable text
@@ -54,17 +60,31 @@ columns, so this is safe to run on a live DB if the gateway is paused.
 
 ### 2.2 Config additions
 
-One new section. Existing `config.toml` loads unchanged because the
-section is `#[serde(default)]`.
+Two new sections. Existing `config.toml` loads unchanged because both
+are `#[serde(default)]`.
 
 ```toml
 [evolution.shadow]
 enabled        = false                  # opt-in master switch
 eval_set_dir   = "/data/eval/evolution" # root with per-kind subdirs
 sandbox_kind   = "in_process"           # only valid value in v0.3
+
+[evolution.auto_rollback]
+enabled            = false              # opt-in master switch
+grace_window_hours = 72                 # how long after apply a row stays eligible
+
+[evolution.auto_rollback.thresholds]
+default_err_rate_delta_pct    = 50.0    # +50% over baseline error count → revert
+default_p95_latency_delta_pct = 25.0    # +25% over baseline p95 latency → revert
+signal_window_secs            = 1800    # symmetric pre/post-apply sliding window
+min_baseline_signals          = 5       # quiet targets need ≥ 5 baseline signals
 ```
 
 `sandbox_kind = "docker"` is reserved for Phase 4 and rejected on load.
+`[evolution.auto_rollback].enabled = false` ships off so applies don't
+surprise-revert before the monitor is fully wired; `metrics_baseline`
+is still captured at apply time so flipping the switch on later
+doesn't lose the audit data.
 
 ## 3. Filesystem additions
 

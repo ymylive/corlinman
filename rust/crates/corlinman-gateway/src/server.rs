@@ -402,9 +402,21 @@ pub async fn build_runtime_full_with_evolution(
         // `None`, the route 503s alongside the rest of the evolution
         // surface so the UI keeps a single banner.
         if let Some(kb) = admin_state.rag_store.clone() {
+            // W1-B: applier needs the AutoRollback thresholds so
+            // `metrics_baseline` is captured over the configured
+            // signal window. Snapshot via `load()` — a hot-reload
+            // mid-apply is racy in a way the snapshot wouldn't fix
+            // anyway, and the next apply picks up the new value.
+            let thresholds = config_handle
+                .load()
+                .evolution
+                .auto_rollback
+                .thresholds
+                .clone();
             let applier = Arc::new(crate::evolution_applier::EvolutionApplier::new(
                 store.clone(),
                 kb,
+                thresholds,
             ));
             admin_state = admin_state.with_evolution_applier(applier);
         } else {

@@ -76,7 +76,7 @@ Goal: build the gates so Wave 2 kinds can land safely.
 | ID | Title | Stack | Wkload | Status |
 |---|---|---|---|---|
 | **3-1A** | **ShadowTester** — eval-set runner + metrics collector + proposal annotation | Rust + Python | 4-5d | ✅ Done 2026-04-27 |
-| **3-1B** | **AutoRollback** — 72h grace window, per-kind threshold config, automatic revert + history link | Rust | 3-4d | TBD |
+| **3-1B** | **AutoRollback** — 72h grace window, per-kind threshold config, automatic revert + history link | Rust | 3-4d | ✅ Done 2026-04-27 |
 | **3-1C** | **Budget enforcement** — per-week / per-kind caps in config; engine respects; UI surfaces remaining quota | Rust + UI | 2-3d | TBD |
 
 **3-1A breakdown** (see `docs/design/shadow-tester.md`):
@@ -280,7 +280,7 @@ If staffing allows: launch W1 + W3 together (week 1-2), then W2 (week 2.5-4), W4
 
 1. ~~**Eval set authorship**: operator-written, prod-trace-distilled, or hybrid?~~ — **Decided 2026-04-27 (W1-A)**: hybrid — hand-crafted seed cases ship in-repo at `rust/crates/corlinman-shadow-tester/tests/fixtures/eval/<kind>/`; operators grow the set via approved flagged sessions. The bundled 4 `memory_op` cases are the seed.
 2. ~~**Shadow sandbox isolation**: in-process eval vs docker sandbox?~~ — **Decided 2026-04-27 (W1-A)**: in-process for Phase 3, Docker reserved for Phase 4. Encoded in `EvolutionShadowConfig::sandbox_kind` (`ShadowSandboxKind::InProcess` | `Docker`); the `Docker` variant parses but is rejected on load until the runner supports it.
-3. **AutoRollback metrics scope**: which metrics count? — Lean: per-kind whitelist in config (skill_update watches success_rate + p95_latency on the affected tool; agent_card watches turn_count + handoff_rate; etc) — TBD, tracked under W1-B.
+3. **AutoRollback metrics scope**: which metrics count? — **Decided 2026-04-27**: per-kind whitelist lives in code at `corlinman-auto-rollback::metrics::watched_event_kinds` (not config — config churn risks operators silently disabling the safety gate). Initial coverage ships only `memory_op → ['tool.call.failed', 'search.recall.dropped']`; new kinds extend the match arm as their handlers land. The `min_baseline_signals` config knob (default 5) is the quiet-target guard against `0 → 1 = +∞%` false positives; absolute thresholds (per-kind p95 latency, etc) wait for the kinds that emit those signals.
 4. **User model granularity**: per-user, per-channel-session, per-conversation? — Lean: per-user keyed by `(channel, sender_id)` tuple; cross-channel join is Phase 4
 5. **Persona mutability source-of-truth**: agent-card YAML vs runtime DB? — Lean: YAML is the seed/template; DB is the runtime state; on agent-card update via Evolution proposal, DB resets to YAML defaults
 6. **Closed learning loop privacy**: skill_extraction sees full conversation text; how is sensitive content excluded? — Lean: same redaction pipeline as user_model; opt-in setting `[skills.allow_extraction_from_session]` defaulting false

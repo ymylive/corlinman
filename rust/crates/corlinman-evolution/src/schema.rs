@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS evolution_proposals (
     decided_at            INTEGER,
     decided_by            TEXT,
     applied_at            INTEGER,
+    auto_rollback_at      INTEGER,
+    auto_rollback_reason  TEXT,
     rollback_of           TEXT REFERENCES evolution_proposals(id)
 );
 
@@ -95,5 +97,19 @@ pub const MIGRATIONS: &[(&str, &str, &str)] = &[
         "evolution_proposals",
         "baseline_metrics_json",
         "ALTER TABLE evolution_proposals ADD COLUMN baseline_metrics_json TEXT",
+    ),
+    // Phase 3 W1-B AutoRollback adds the audit trail for proposals
+    // that were auto-reverted: when the monitor decided + why (signal-
+    // count delta string, threshold breached, etc). See
+    // `docs/migration/v2-to-v3.md`.
+    (
+        "evolution_proposals",
+        "auto_rollback_at",
+        "ALTER TABLE evolution_proposals ADD COLUMN auto_rollback_at INTEGER",
+    ),
+    (
+        "evolution_proposals",
+        "auto_rollback_reason",
+        "ALTER TABLE evolution_proposals ADD COLUMN auto_rollback_reason TEXT",
     ),
 ];

@@ -294,6 +294,71 @@ impl ProposalsRepo {
         Ok(())
     }
 
+    /// Phase 3 W1-B: AutoRollback transition `Applied → RolledBack` plus
+    /// audit fields. The `WHERE status = 'applied'` clause makes a
+    /// double-revert race surface as `NotFound` instead of a silent
+    /// second rollback. Manual operator-initiated rollbacks use a
+    /// different path (a fresh proposal with `rollback_of`); this one is
+    /// reserved for the monitor's auto-revert.
+    pub async fn mark_auto_rolled_back(
+        &self,
+        id: &ProposalId,
+        rolled_back_at_ms: i64,
+        reason: &str,
+    ) -> Result<(), RepoError> {
+        let res = sqlx::query(
+            "UPDATE evolution_proposals
+                SET status = 'rolled_back',
+                    auto_rollback_at = ?,
+                    auto_rollback_reason = ?
+              WHERE id = ? AND status = 'applied'",
+        )
+        .bind(rolled_back_at_ms)
+        .bind(reason)
+        .bind(id.as_str())
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(RepoError::NotFound(id.0.clone()));
+        }
+        Ok(())
+    }
+
+    /// List proposals applied within `[now_ms - grace_window_hours*3600*1000, now_ms]`
+    /// that are still in `Applied` (not yet rolled back). Used by the
+    /// AutoRollback monitor to pick candidates.
+    ///
+    /// `grace_window_hours` lower-bounds the apply timestamp; rows whose
+    /// `applied_at` is older than the window — or null entirely — are
+    /// excluded so a freshly-rolled-back row can't be re-considered after
+    /// the operator manually re-applies hours later.
+    pub async fn list_applied_in_grace_window(
+        &self,
+        now_ms: i64,
+        grace_window_hours: u32,
+        limit: i64,
+    ) -> Result<Vec<EvolutionProposal>, RepoError> {
+        let since_ms = now_ms - (grace_window_hours as i64) * 3_600 * 1_000;
+        let rows = sqlx::query(
+            r#"SELECT id, kind, target, diff, reasoning, risk, budget_cost, status,
+                      shadow_metrics, signal_ids, trace_ids,
+                      created_at, decided_at, decided_by, applied_at, rollback_of
+               FROM evolution_proposals
+               WHERE status = 'applied'
+                 AND applied_at IS NOT NULL
+                 AND applied_at >= ?
+                 AND applied_at <= ?
+               ORDER BY applied_at DESC
+               LIMIT ?"#,
+        )
+        .bind(since_ms)
+        .bind(now_ms)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(decode_proposal).collect()
+    }
+
     /// List `Pending` proposals for `kind` whose risk is in `risks`,
     /// newest first. Used by the ShadowRunner to pick candidates.
     pub async fn list_pending_for_shadow(
@@ -498,6 +563,58 @@ impl HistoryRepo {
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get::<i64, _>("id"))
+    }
+
+    /// Most recent history row for a given proposal. Phase 2 only writes
+    /// one row per proposal, but a future re-apply path could write more
+    /// — `ORDER BY applied_at DESC` keeps the API future-proof. Used by
+    /// the AutoRollback revert path to fetch the inverse_diff.
+    pub async fn latest_for_proposal(
+        &self,
+        proposal_id: &ProposalId,
+    ) -> Result<EvolutionHistory, RepoError> {
+        let row = sqlx::query(
+            r#"SELECT id, proposal_id, kind, target, before_sha, after_sha,
+                      inverse_diff, metrics_baseline, applied_at,
+                      rolled_back_at, rollback_reason
+               FROM evolution_history
+               WHERE proposal_id = ?
+               ORDER BY applied_at DESC, id DESC
+               LIMIT 1"#,
+        )
+        .bind(proposal_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        let row = row.ok_or_else(|| RepoError::NotFound(proposal_id.0.clone()))?;
+
+        let kind_raw: String = row.get("kind");
+        let kind =
+            kind_raw
+                .parse::<EvolutionKind>()
+                .map_err(|_| RepoError::MalformedEnum {
+                    column: "kind",
+                    value: kind_raw,
+                })?;
+        let metrics_str: String = row.get("metrics_baseline");
+        let metrics_baseline: Json =
+            serde_json::from_str(&metrics_str).map_err(|source| RepoError::MalformedJson {
+                column: "metrics_baseline",
+                source,
+            })?;
+
+        Ok(EvolutionHistory {
+            id: Some(row.get::<i64, _>("id")),
+            proposal_id: ProposalId(row.get("proposal_id")),
+            kind,
+            target: row.get("target"),
+            before_sha: row.get("before_sha"),
+            after_sha: row.get("after_sha"),
+            inverse_diff: row.get("inverse_diff"),
+            metrics_baseline,
+            applied_at: row.get("applied_at"),
+            rolled_back_at: row.get("rolled_back_at"),
+            rollback_reason: row.get("rollback_reason"),
+        })
     }
 
     pub async fn mark_rolled_back(
@@ -781,5 +898,202 @@ mod tests {
         .unwrap();
         assert_eq!(row.0, Some(4_000));
         assert_eq!(row.1.as_deref(), Some("metrics regression"));
+    }
+
+    /// Helper: insert an `applied` proposal so the auto-rollback gate
+    /// has something to flip.
+    async fn insert_applied(repo: &ProposalsRepo, id: &str) -> ProposalId {
+        let pid = ProposalId::new(id);
+        repo.insert(&EvolutionProposal {
+            id: pid.clone(),
+            kind: EvolutionKind::MemoryOp,
+            target: format!("delete_chunk:{id}"),
+            diff: String::new(),
+            reasoning: String::new(),
+            risk: EvolutionRisk::Low,
+            budget_cost: 0,
+            status: EvolutionStatus::Applied,
+            shadow_metrics: None,
+            signal_ids: vec![],
+            trace_ids: vec![],
+            created_at: 1_000,
+            decided_at: Some(2_000),
+            decided_by: Some("auto".into()),
+            applied_at: Some(3_000),
+            rollback_of: None,
+        })
+        .await
+        .unwrap();
+        pid
+    }
+
+    #[tokio::test]
+    async fn mark_auto_rolled_back_happy_path() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let pid = insert_applied(&repo, "evol-ar-001").await;
+
+        repo.mark_auto_rolled_back(&pid, 5_000, "err_signal_count: 4 -> 12 (+200%)")
+            .await
+            .unwrap();
+        let after = repo.get(&pid).await.unwrap();
+        assert_eq!(after.status, EvolutionStatus::RolledBack);
+
+        // auto_rollback_at + auto_rollback_reason aren't on the row type
+        // yet — verify via raw query so the test pins the column writes.
+        let row: (Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT auto_rollback_at, auto_rollback_reason
+               FROM evolution_proposals WHERE id = ?",
+        )
+        .bind(pid.as_str())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(row.0, Some(5_000));
+        assert_eq!(row.1.as_deref(), Some("err_signal_count: 4 -> 12 (+200%)"));
+    }
+
+    #[tokio::test]
+    async fn mark_auto_rolled_back_double_call_is_not_found() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let pid = insert_applied(&repo, "evol-ar-002").await;
+
+        repo.mark_auto_rolled_back(&pid, 5_000, "first").await.unwrap();
+        // Second call: status is now `rolled_back`, so the WHERE clause
+        // misses and we bail with NotFound — keeps a racing pair of
+        // monitor passes from double-incrementing or stomping the reason.
+        let err = repo
+            .mark_auto_rolled_back(&pid, 6_000, "second")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RepoError::NotFound(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn mark_auto_rolled_back_rejects_non_applied_status() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        // Pending row — must refuse: the monitor only ever rolls back
+        // proposals that already landed on disk.
+        let pid = insert_pending(&repo, "evol-ar-003", EvolutionKind::MemoryOp, EvolutionRisk::Low)
+            .await;
+        let err = repo
+            .mark_auto_rolled_back(&pid, 5_000, "won't take")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RepoError::NotFound(_)), "got {err:?}");
+        let after = repo.get(&pid).await.unwrap();
+        assert_eq!(after.status, EvolutionStatus::Pending);
+    }
+
+    /// Helper: insert one applied proposal with an explicit `applied_at`
+    /// so the time-window tests can pin behaviour without flakey clocks.
+    async fn insert_applied_at(
+        repo: &ProposalsRepo,
+        id: &str,
+        applied_at_ms: i64,
+    ) -> ProposalId {
+        let pid = ProposalId::new(id);
+        repo.insert(&EvolutionProposal {
+            id: pid.clone(),
+            kind: EvolutionKind::MemoryOp,
+            target: format!("delete_chunk:{id}"),
+            diff: String::new(),
+            reasoning: String::new(),
+            risk: EvolutionRisk::Low,
+            budget_cost: 0,
+            status: EvolutionStatus::Applied,
+            shadow_metrics: None,
+            signal_ids: vec![],
+            trace_ids: vec![],
+            created_at: 1_000,
+            decided_at: Some(2_000),
+            decided_by: Some("auto".into()),
+            applied_at: Some(applied_at_ms),
+            rollback_of: None,
+        })
+        .await
+        .unwrap();
+        pid
+    }
+
+    #[tokio::test]
+    async fn list_applied_in_grace_window_filters_by_time() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let now: i64 = 100 * 3_600 * 1_000; // pick a base in the integer middle.
+        let in_window = now - 1 * 3_600 * 1_000;
+        let too_old = now - 100 * 3_600 * 1_000;
+        let in_future = now + 5 * 60 * 1_000;
+        insert_applied_at(&repo, "evol-grace-in", in_window).await;
+        insert_applied_at(&repo, "evol-grace-old", too_old).await;
+        insert_applied_at(&repo, "evol-grace-future", in_future).await;
+
+        let hits = repo
+            .list_applied_in_grace_window(now, 72, 10)
+            .await
+            .unwrap();
+        let ids: Vec<String> = hits.iter().map(|p| p.id.0.clone()).collect();
+        assert_eq!(ids, vec!["evol-grace-in".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_applied_in_grace_window_excludes_rolled_back() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let now: i64 = 100 * 3_600 * 1_000;
+        let applied_at = now - 1 * 3_600 * 1_000;
+        let pid_rolled = insert_applied_at(&repo, "evol-grace-rolled", applied_at).await;
+        let _pid_live = insert_applied_at(&repo, "evol-grace-live", applied_at).await;
+        // Flip one row to rolled_back; it must drop out of the window list.
+        repo.mark_auto_rolled_back(&pid_rolled, now, "test-rollback")
+            .await
+            .unwrap();
+
+        let hits = repo
+            .list_applied_in_grace_window(now, 72, 10)
+            .await
+            .unwrap();
+        let ids: Vec<String> = hits.iter().map(|p| p.id.0.clone()).collect();
+        assert_eq!(ids, vec!["evol-grace-live".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn history_latest_for_proposal_round_trip() {
+        let (_tmp, store) = fresh_store().await;
+        let proposals = ProposalsRepo::new(store.pool().clone());
+        let pid = insert_applied(&proposals, "evol-hist-001").await;
+        let history = HistoryRepo::new(store.pool().clone());
+        let hid = history
+            .insert(&EvolutionHistory {
+                id: None,
+                proposal_id: pid.clone(),
+                kind: EvolutionKind::MemoryOp,
+                target: "delete_chunk:42".into(),
+                before_sha: "aaa".into(),
+                after_sha: "bbb".into(),
+                inverse_diff: r#"{"action":"restore_chunk","content":"x","namespace":"general","file_id":1,"chunk_index":0}"#
+                    .into(),
+                metrics_baseline: serde_json::json!({"target": "delete_chunk:42"}),
+                applied_at: 3_000,
+                rolled_back_at: None,
+                rollback_reason: None,
+            })
+            .await
+            .unwrap();
+
+        let got = history.latest_for_proposal(&pid).await.unwrap();
+        assert_eq!(got.id, Some(hid));
+        assert_eq!(got.proposal_id, pid);
+        assert_eq!(got.kind, EvolutionKind::MemoryOp);
+        assert_eq!(got.target, "delete_chunk:42");
+        assert_eq!(got.applied_at, 3_000);
+        assert!(got.inverse_diff.contains("restore_chunk"));
+
+        // Missing proposal id → NotFound.
+        let missing = ProposalId::new("evol-hist-nope");
+        let err = history.latest_for_proposal(&missing).await.unwrap_err();
+        assert!(matches!(err, RepoError::NotFound(_)), "got {err:?}");
     }
 }

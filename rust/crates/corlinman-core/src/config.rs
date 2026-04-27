@@ -1155,6 +1155,8 @@ pub struct EvolutionConfig {
     pub observer: EvolutionObserverConfig,
     #[validate(nested)]
     pub shadow: EvolutionShadowConfig,
+    #[validate(nested)]
+    pub auto_rollback: EvolutionAutoRollbackConfig,
 }
 
 /// Tunables for the gateway's `EvolutionObserver` (Phase 2 wave 1-A). It
@@ -1232,6 +1234,90 @@ impl Default for EvolutionShadowConfig {
             enabled: false,
             eval_set_dir: PathBuf::from("/data/eval/evolution"),
             sandbox_kind: ShadowSandboxKind::InProcess,
+        }
+    }
+}
+
+/// Tunables for the AutoRollback monitor (Phase 3 wave 1-B). Periodically
+/// scans recently-applied proposals — within the grace window — and
+/// compares the per-target signal counts in `evolution_signals` against
+/// the `metrics_baseline` snapshot the applier captured at apply time.
+/// When the relative delta breaches the configured threshold, the monitor
+/// fabricates a new rollback proposal (with `rollback_of` set) and the
+/// applier replays the original `inverse_diff` to restore prior state.
+///
+/// * `enabled` — master switch. When `false` the monitor job is not
+///   scheduled; metrics_baseline still gets populated at apply time so
+///   you can flip this on later without losing history.
+/// * `grace_window_hours` — how long after apply a proposal stays
+///   eligible for auto-rollback. 72h matches the roadmap spec — long
+///   enough to catch slow-burn regressions but short enough that an
+///   ancient apply can't be reverted out from under newer state.
+/// * `thresholds` — when a delta counts as "regression". Defaults are
+///   conservative; per-kind overrides land in W1-B Step 2.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct EvolutionAutoRollbackConfig {
+    pub enabled: bool,
+    #[validate(range(min = 1, max = 720))]
+    pub grace_window_hours: u32,
+    #[validate(nested)]
+    pub thresholds: AutoRollbackThresholds,
+}
+
+/// Threshold knobs the monitor uses to decide whether a metrics delta
+/// warrants a rollback. The ratios are *relative* to baseline so a
+/// chatty target doesn't auto-revert just because absolute counts are
+/// large.
+///
+/// `signal_window_secs` is how far back the metric snapshot looks at
+/// apply time *and* how far back the monitor looks when computing the
+/// post-apply current snapshot — keeping them symmetric prevents a
+/// false positive from sample-window mismatch.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct AutoRollbackThresholds {
+    /// Maximum percent increase in error-severity signal count over
+    /// baseline before triggering rollback (`50.0` = "+50%").
+    #[validate(range(min = 0.0, max = 1000.0))]
+    pub default_err_rate_delta_pct: f64,
+    /// Maximum percent increase in p95 latency signals over baseline.
+    /// Reserved for future kinds that emit latency signals; memory_op
+    /// today doesn't use it.
+    #[validate(range(min = 0.0, max = 1000.0))]
+    pub default_p95_latency_delta_pct: f64,
+    /// Sliding-window length used both pre-apply (baseline) and
+    /// post-apply (current) when counting signals. 30 min = 1800s.
+    #[validate(range(min = 60, max = 86_400))]
+    pub signal_window_secs: u32,
+    /// Minimum baseline count required before a percent delta is
+    /// trusted — guards against "0 → 1 = +infinity%" false positives
+    /// on quiet targets.
+    #[validate(range(min = 0, max = 10_000))]
+    pub min_baseline_signals: u32,
+}
+
+impl Default for EvolutionAutoRollbackConfig {
+    fn default() -> Self {
+        // `enabled = false` ships off so applies don't surprise-revert
+        // before W1-B is fully wired. metrics_baseline is still
+        // captured at apply time (cheap, useful as future audit data)
+        // even with the master switch off.
+        Self {
+            enabled: false,
+            grace_window_hours: 72,
+            thresholds: AutoRollbackThresholds::default(),
+        }
+    }
+}
+
+impl Default for AutoRollbackThresholds {
+    fn default() -> Self {
+        Self {
+            default_err_rate_delta_pct: 50.0,
+            default_p95_latency_delta_pct: 25.0,
+            signal_window_secs: 1_800,
+            min_baseline_signals: 5,
         }
     }
 }

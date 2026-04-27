@@ -228,6 +228,17 @@ name = "shadow_tester"
 cron = "0 30 3 * * * *"
 action = { type = "subprocess", command = "corlinman-shadow-tester", args = ["run-once", "--config", "/data/config.toml"], timeout_secs = 600, working_dir = "/data", env = { CORLINMAN_DATA_DIR = "/data" } }
 
+# Phase 3 wave 1-B: AutoRollback monitor runs another 30 min after the
+# shadow_tester so any approve+apply that landed in the operator review
+# loop has had time to settle and emit signals. The binary itself is a
+# no-op (exit 1 + clear log) when `[evolution.auto_rollback].enabled =
+# false` — wiring the cron job while leaving the master switch off is
+# safe and lets operators flip it on without a config-edit + redeploy.
+[[scheduler.jobs]]
+name = "auto_rollback"
+cron = "0 0 4 * * * *"
+action = { type = "subprocess", command = "corlinman-auto-rollback", args = ["run-once", "--config", "/data/config.toml"], timeout_secs = 600, working_dir = "/data", env = { CORLINMAN_DATA_DIR = "/data" } }
+
 # [[scheduler.jobs]]
 # name = "weekly-reindex"
 # cron = "0 0 3 * * 0 *"
