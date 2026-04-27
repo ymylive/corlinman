@@ -831,6 +831,21 @@ export async function benchmarkEmbedding(
 
 export type EvolutionRisk = "low" | "medium" | "high";
 
+/**
+ * MetricSnapshot — mirrors the Rust `corlinman_auto_rollback::metrics::
+ * MetricSnapshot`. Written into `evolution_history.metrics_baseline` at
+ * apply time and into `evolution_proposals.baseline_metrics_json` by the
+ * ShadowTester. Both surfaces feed the UI's `<MetricsDelta />` viz.
+ */
+export interface MetricSnapshot {
+  target: string;
+  /** epoch-ms */
+  captured_at_ms: number;
+  window_secs: number;
+  /** event_kind → count over the window. Stable shape across snapshots. */
+  counts: Record<string, number>;
+}
+
 export interface EvolutionProposal {
   id: string;
   kind: string;
@@ -839,6 +854,9 @@ export interface EvolutionProposal {
   reasoning: string;
   risk: EvolutionRisk;
   status: string;
+  /** Serialized `ShadowMetrics` (free-form per-kind shape). Populated on
+   * `shadow_done` rows — used by `MetricsDelta` for the post-shadow leg. */
+  shadow_metrics?: Record<string, unknown>;
   signal_ids: number[];
   trace_ids: string[];
   /** epoch-ms */
@@ -846,6 +864,47 @@ export interface EvolutionProposal {
   decided_at?: number;
   decided_by?: string;
   applied_at?: number;
+  /** W1-A: identifier of the eval run that produced `shadow_metrics`. */
+  eval_run_id?: string;
+  /** W1-A: pre-shadow baseline `MetricSnapshot` JSON. */
+  baseline_metrics_json?: MetricSnapshot;
+  /** W1-B: epoch-ms the AutoRollback monitor flipped this row. */
+  auto_rollback_at?: number;
+  /** W1-B: human-readable threshold-breach reason from the monitor. */
+  auto_rollback_reason?: string;
+}
+
+/**
+ * One row in `GET /admin/evolution/history`. Mirrors `HistoryEntryOut`
+ * in `rust/crates/corlinman-gateway/src/routes/admin/evolution.rs`.
+ *
+ * `metrics_baseline` is the `MetricSnapshot` JSON the W1-B applier wrote
+ * at apply time. `shadow_metrics` + `baseline_metrics_json` come from
+ * the original proposals row so the UI can render the full lineage of
+ * baseline → shadow → post-apply on one card.
+ */
+export interface HistoryEntry {
+  proposal_id: string;
+  kind: string;
+  target: string;
+  risk: EvolutionRisk;
+  /** "applied" | "rolled_back". */
+  status: string;
+  /** epoch-ms */
+  applied_at: number;
+  /** epoch-ms; null while the proposal is still applied. */
+  rolled_back_at: number | null;
+  /** Manual-rollback reason from the history table. */
+  rollback_reason: string | null;
+  /** Auto-rollback breach summary from the proposals row. */
+  auto_rollback_reason: string | null;
+  metrics_baseline: MetricSnapshot;
+  shadow_metrics: Record<string, unknown> | null;
+  baseline_metrics_json: MetricSnapshot | null;
+  before_sha: string;
+  after_sha: string;
+  eval_run_id: string | null;
+  reasoning: string;
 }
 
 export async function fetchEvolutionPending(): Promise<EvolutionProposal[]> {
@@ -853,6 +912,42 @@ export async function fetchEvolutionPending(): Promise<EvolutionProposal[]> {
   return apiFetch<EvolutionProposal[]>(
     "/admin/evolution?status=pending&limit=50",
     { mock: MOCK_EVOLUTION_PENDING },
+  );
+}
+
+export async function fetchEvolutionApproved(): Promise<EvolutionProposal[]> {
+  const { MOCK_EVOLUTION_APPROVED } = await import("./mocks/evolution");
+  return apiFetch<EvolutionProposal[]>(
+    "/admin/evolution?status=approved&limit=50",
+    { mock: MOCK_EVOLUTION_APPROVED },
+  );
+}
+
+export async function fetchEvolutionHistory(): Promise<HistoryEntry[]> {
+  const { MOCK_EVOLUTION_HISTORY } = await import("./mocks/evolution");
+  return apiFetch<HistoryEntry[]>("/admin/evolution/history?limit=50", {
+    mock: MOCK_EVOLUTION_HISTORY,
+  });
+}
+
+/** POST /admin/evolution/:id/apply — flips approved→applied and runs the
+ * EvolutionApplier. Used by the Approved tab; mirrors the existing
+ * approve/deny mutations. */
+export interface EvolutionApplyResult {
+  id: string;
+  status: string;
+  history_id?: number;
+}
+
+export function applyEvolutionProposal(
+  id: string,
+): Promise<EvolutionApplyResult> {
+  return apiFetch<EvolutionApplyResult>(
+    `/admin/evolution/${encodeURIComponent(id)}/apply`,
+    {
+      method: "POST",
+      mock: { id, status: "applied", history_id: 1 },
+    },
   );
 }
 

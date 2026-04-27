@@ -13,14 +13,18 @@ import {
   approveEvolutionProposal,
   denyEvolutionProposal,
   fetchBudget,
+  fetchEvolutionHistory,
   fetchEvolutionPending,
   type BudgetSnapshot,
   type EvolutionProposal,
+  type HistoryEntry,
 } from "@/lib/api";
 
 import { EvolutionPageHeader } from "@/components/evolution/PageHeader";
 import { StatsRow } from "@/components/evolution/StatsRow";
 import { ProposalCard } from "@/components/evolution/ProposalCard";
+import { ApprovedList } from "@/components/evolution/ApprovedList";
+import { HistoryList } from "@/components/evolution/HistoryList";
 import { EvolutionEmptyState } from "@/components/evolution/EmptyState";
 import type { Tab } from "@/components/evolution/types";
 
@@ -215,6 +219,26 @@ export default function EvolutionPage() {
   const budgetTotal = budgetQuery.data?.weekly_total.limit ?? 0;
   const budgetUsed = budgetQuery.data?.weekly_total.used ?? 0;
 
+  // Phase 3 W2 (3-2D): history-backed "rolled back this week" counter.
+  // Polls slowly because the History tab itself polls 10s — a separate
+  // query key keeps the chip live regardless of which tab is mounted.
+  const historyQuery = useQuery<HistoryEntry[]>({
+    queryKey: ["admin", "evolution", "history"],
+    queryFn: fetchEvolutionHistory,
+    refetchInterval: 10_000,
+    retry: false,
+  });
+  const rolledBackThisWeek = useMemo(() => {
+    const data = historyQuery.data;
+    if (!data) return 0;
+    const weekStart = now - 7 * 24 * 60 * 60 * 1_000;
+    let n = 0;
+    for (const h of data) {
+      if (h.rolled_back_at != null && h.rolled_back_at >= weekStart) n += 1;
+    }
+    return n;
+  }, [historyQuery.data, now]);
+
   const refresh = () => {
     void qc.invalidateQueries({ queryKey });
   };
@@ -245,6 +269,13 @@ export default function EvolutionPage() {
         budgetUsed={budgetUsed}
         budgetTotal={budgetTotal}
       />
+
+      {/* Phase 3 W2: rolled-back chip lives between StatsRow and the
+          tab filter so the existing 4-up StatsRow signature stays
+          stable. Renders only when there's actually rollback data. */}
+      {rolledBackThisWeek > 0 ? (
+        <RolledBackChip count={rolledBackThisWeek} />
+      ) : null}
 
       {errorBanner ? (
         <Banner
@@ -300,12 +331,38 @@ export default function EvolutionPage() {
             </AnimatePresence>
           )}
         </section>
+      ) : tab === "approved" ? (
+        <ApprovedList />
       ) : (
-        <EvolutionEmptyState tab={tab} />
+        <HistoryList />
       )}
 
       <LiveRegion politeness="polite">{srMessage}</LiveRegion>
     </motion.div>
+  );
+}
+
+function RolledBackChip({ count }: { count: number }) {
+  const { t } = useTranslation();
+  return (
+    <div
+      className={cn(
+        "inline-flex items-center gap-2 self-start rounded-full border px-3 py-1",
+        "border-tp-err/30 bg-tp-err-soft text-[12px] text-tp-err",
+      )}
+    >
+      <span
+        aria-hidden
+        className="h-[6px] w-[6px] rounded-full bg-tp-err"
+      />
+      <span className="font-medium">
+        {t("evolution.tp.statRolledBackThisWeek")}
+      </span>
+      <span className="font-mono tabular-nums">{count}</span>
+      <span className="text-tp-ink-3">
+        · {t("evolution.tp.statRolledBackFoot")}
+      </span>
+    </div>
   );
 }
 

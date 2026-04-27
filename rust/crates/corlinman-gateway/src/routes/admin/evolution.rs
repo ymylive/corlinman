@@ -80,6 +80,7 @@ pub fn router(state: AdminState) -> Router {
     Router::new()
         .route("/admin/evolution", get(list_proposals))
         .route("/admin/evolution/budget", get(budget_snapshot))
+        .route("/admin/evolution/history", get(list_history))
         .route("/admin/evolution/:id", get(get_proposal))
         .route("/admin/evolution/:id/approve", post(approve_proposal))
         .route("/admin/evolution/:id/deny", post(deny_proposal))
@@ -119,6 +120,17 @@ pub struct ProposalOut {
     pub decided_by: Option<String>,
     pub applied_at: Option<i64>,
     pub rollback_of: Option<String>,
+    // ─── W1-A / W1-B: shadow + auto-rollback context ─────────────────
+    /// Eval run identifier captured by the ShadowTester at shadow_done.
+    pub eval_run_id: Option<String>,
+    /// Pre-shadow baseline metrics (MetricSnapshot JSON). Lets the UI
+    /// render a baseline-vs-shadow delta on Approved cards.
+    pub baseline_metrics_json: Option<serde_json::Value>,
+    /// Unix-millis at which the AutoRollback monitor flipped this row
+    /// from `applied → rolled_back`. Null for the manual-rollback path.
+    pub auto_rollback_at: Option<i64>,
+    /// Human-readable threshold-breach reason carried from the monitor.
+    pub auto_rollback_reason: Option<String>,
 }
 
 impl From<EvolutionProposal> for ProposalOut {
@@ -140,6 +152,10 @@ impl From<EvolutionProposal> for ProposalOut {
             decided_by: p.decided_by,
             applied_at: p.applied_at,
             rollback_of: p.rollback_of.map(|p| p.0),
+            eval_run_id: p.eval_run_id,
+            baseline_metrics_json: p.baseline_metrics_json,
+            auto_rollback_at: p.auto_rollback_at,
+            auto_rollback_reason: p.auto_rollback_reason,
         }
     }
 }
@@ -546,6 +562,160 @@ async fn apply_proposal(State(state): State<AdminState>, Path(id): Path<String>)
     }
 }
 
+// ---------------------------------------------------------------------------
+// History — `GET /admin/evolution/history`
+// ---------------------------------------------------------------------------
+//
+// Joins `evolution_history` against `evolution_proposals` so the UI's
+// History tab can render terminal-state proposals (applied + rolled_back)
+// with full reasoning, baseline metrics, and the post-apply MetricSnapshot
+// captured by the W1-B applier — all in one round-trip.
+
+/// Query params for `GET /admin/evolution/history`. `limit` defaults to
+/// 50 and is clamped at the same MAX_LIMIT (200) as the proposal list so
+/// no client can yank the entire audit log in one fetch.
+#[derive(Debug, Deserialize, Default)]
+pub struct HistoryQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Wire shape for one row in `GET /admin/evolution/history`.
+///
+/// Carries both `metrics_baseline` (the W1-B `MetricSnapshot` written at
+/// apply time) and `shadow_metrics` (W1-A pre-apply shadow run output)
+/// so the UI's `MetricsDelta` viz can render baseline-vs-shadow on
+/// rolled-back rows without a follow-up fetch.
+#[derive(Debug, Serialize)]
+pub struct HistoryEntryOut {
+    pub proposal_id: String,
+    pub kind: String,
+    pub target: String,
+    pub risk: String,
+    /// Either "applied" or "rolled_back" — mirrors the proposals row.
+    pub status: String,
+    pub applied_at: i64,
+    pub rolled_back_at: Option<i64>,
+    /// Operator-supplied reason (history table). Distinct from
+    /// `auto_rollback_reason` which the AutoRollback monitor stamps.
+    pub rollback_reason: Option<String>,
+    pub auto_rollback_reason: Option<String>,
+    pub metrics_baseline: serde_json::Value,
+    pub shadow_metrics: Option<serde_json::Value>,
+    pub baseline_metrics_json: Option<serde_json::Value>,
+    pub before_sha: String,
+    pub after_sha: String,
+    pub eval_run_id: Option<String>,
+    pub reasoning: String,
+}
+
+async fn list_history(
+    State(state): State<AdminState>,
+    Query(q): Query<HistoryQuery>,
+) -> Response {
+    let Some(store) = state.evolution_store.as_ref() else {
+        return evolution_disabled();
+    };
+    let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let pool = store.pool();
+
+    // One JOINed pull — the UI never wants the proposals row without the
+    // history row (history holds the audit trail) so do the join in SQL
+    // rather than two round-trips.
+    let rows = match sqlx::query(
+        r#"SELECT h.proposal_id, p.kind, p.target, p.risk, p.status,
+                  h.applied_at, h.rolled_back_at, h.rollback_reason,
+                  p.auto_rollback_reason, h.metrics_baseline,
+                  p.shadow_metrics, p.baseline_metrics_json,
+                  h.before_sha, h.after_sha, p.eval_run_id, p.reasoning
+             FROM evolution_history h
+             JOIN evolution_proposals p ON p.id = h.proposal_id
+            ORDER BY h.applied_at DESC
+            LIMIT ?"#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            warn!(error = %err, "admin/evolution history.fetch failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "storage_error",
+                    "message": err.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut out: Vec<HistoryEntryOut> = Vec::with_capacity(rows.len());
+    for row in rows {
+        use sqlx::Row as _;
+        // metrics_baseline is NOT NULL in the schema; the others are
+        // optional. Bad JSON is a 500 — better to surface the corrupt
+        // row than to silently return a misleading payload.
+        let metrics_baseline_str: String = row.get("metrics_baseline");
+        let metrics_baseline: serde_json::Value = match serde_json::from_str(&metrics_baseline_str)
+        {
+            Ok(v) => v,
+            Err(err) => {
+                warn!(error = %err, "history.metrics_baseline malformed json");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "storage_error",
+                        "message": format!("metrics_baseline: {err}"),
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        let shadow_metrics = match row.get::<Option<String>, _>("shadow_metrics") {
+            Some(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+                Ok(v) => Some(v),
+                Err(err) => {
+                    warn!(error = %err, "history.shadow_metrics malformed json");
+                    None
+                }
+            },
+            None => None,
+        };
+        let baseline_metrics_json =
+            match row.get::<Option<String>, _>("baseline_metrics_json") {
+                Some(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        warn!(error = %err, "history.baseline_metrics_json malformed");
+                        None
+                    }
+                },
+                None => None,
+            };
+        out.push(HistoryEntryOut {
+            proposal_id: row.get("proposal_id"),
+            kind: row.get("kind"),
+            target: row.get("target"),
+            risk: row.get("risk"),
+            status: row.get("status"),
+            applied_at: row.get("applied_at"),
+            rolled_back_at: row.get("rolled_back_at"),
+            rollback_reason: row.get("rollback_reason"),
+            auto_rollback_reason: row.get("auto_rollback_reason"),
+            metrics_baseline,
+            shadow_metrics,
+            baseline_metrics_json,
+            before_sha: row.get("before_sha"),
+            after_sha: row.get("after_sha"),
+            eval_run_id: row.get("eval_run_id"),
+            reasoning: row.get("reasoning"),
+        });
+    }
+    Json(out).into_response()
+}
+
 /// Approve / deny are allowed from `pending` and `shadow_done`. Any other
 /// status (already-decided, applied, rolled-back, shadow-running) means the
 /// caller raced or the UI is out of sync.
@@ -614,6 +784,10 @@ mod tests {
             decided_by: None,
             applied_at: None,
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         }
     }
 
@@ -982,6 +1156,148 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/admin/evolution/p1/apply")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ---------------------------------------------------------------
+    // History endpoint — `GET /admin/evolution/history`
+    // ---------------------------------------------------------------
+
+    /// Helper: insert a history row for `pid` with explicit timestamps so
+    /// the limit / ordering tests can pin row order without touching the
+    /// real applier.
+    async fn seed_history_row(
+        pool: &SqlitePool,
+        pid: &str,
+        applied_at: i64,
+        rolled_back_at: Option<i64>,
+        rollback_reason: Option<&str>,
+    ) {
+        sqlx::query(
+            r#"INSERT INTO evolution_history
+                 (proposal_id, kind, target, before_sha, after_sha,
+                  inverse_diff, metrics_baseline, applied_at,
+                  rolled_back_at, rollback_reason)
+               VALUES (?, 'memory_op', 'merge_chunks:1,2', 'sha-before', 'sha-after',
+                       '{}', '{"target":"merge_chunks:1,2","counts":{"tool.call.failed":3}}',
+                       ?, ?, ?)"#,
+        )
+        .bind(pid)
+        .bind(applied_at)
+        .bind(rolled_back_at)
+        .bind(rollback_reason)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_empty_returns_200_and_empty_array() {
+        let (_tmp, store, _repo) = fresh_store().await;
+        let app = app_with(Some(store));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/evolution/history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = read_json(resp).await;
+        assert_eq!(v.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn history_returns_applied_and_rolled_back_rows_newest_first() {
+        let (_tmp, store, repo) = fresh_store().await;
+        // Seed two proposals: one applied, one rolled_back. Use distinct
+        // applied_at so the DESC ordering is observable.
+        let mut p1 = proposal("p-applied", EvolutionStatus::Applied);
+        p1.applied_at = Some(2_000);
+        repo.insert(&p1).await.unwrap();
+        let mut p2 = proposal("p-rolled", EvolutionStatus::RolledBack);
+        p2.applied_at = Some(3_000);
+        repo.insert(&p2).await.unwrap();
+
+        let pool = store.pool().clone();
+        seed_history_row(&pool, "p-applied", 2_000, None, None).await;
+        seed_history_row(
+            &pool,
+            "p-rolled",
+            3_000,
+            Some(4_000),
+            Some("metrics regression"),
+        )
+        .await;
+
+        let app = app_with(Some(store));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/evolution/history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = read_json(resp).await;
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        // Newest applied_at first.
+        assert_eq!(arr[0]["proposal_id"], "p-rolled");
+        assert_eq!(arr[0]["status"], "rolled_back");
+        assert_eq!(arr[0]["rollback_reason"], "metrics regression");
+        assert_eq!(arr[1]["proposal_id"], "p-applied");
+        assert_eq!(arr[1]["status"], "applied");
+        // metrics_baseline is decoded back into an object, not a string.
+        assert!(arr[0]["metrics_baseline"].is_object());
+    }
+
+    #[tokio::test]
+    async fn history_clamps_limit_param() {
+        let (_tmp, store, repo) = fresh_store().await;
+        // Seed 3 proposals + history rows.
+        for i in 0..3 {
+            let id = format!("p-h-{i}");
+            let mut p = proposal(&id, EvolutionStatus::Applied);
+            p.applied_at = Some(1_000 + i as i64);
+            repo.insert(&p).await.unwrap();
+            seed_history_row(store.pool(), &id, 1_000 + i as i64, None, None).await;
+        }
+
+        let app = app_with(Some(store));
+        // limit=1 must clamp upward (not downward) — return only the
+        // newest one.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/evolution/history?limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = read_json(resp).await;
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v[0]["proposal_id"], "p-h-2");
+    }
+
+    #[tokio::test]
+    async fn history_returns_503_when_store_missing() {
+        let app = app_with(None);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/evolution/history")
                     .body(Body::empty())
                     .unwrap(),
             )

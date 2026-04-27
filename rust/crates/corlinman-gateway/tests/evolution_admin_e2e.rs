@@ -74,6 +74,10 @@ async fn happy_path_list_approve_apply() {
         decided_by: None,
         applied_at: None,
         rollback_of: None,
+        eval_run_id: None,
+        baseline_metrics_json: None,
+        auto_rollback_at: None,
+        auto_rollback_reason: None,
     })
     .await
     .unwrap();
@@ -266,6 +270,10 @@ async fn budget_endpoint_reflects_filed_proposals() {
             decided_by: None,
             applied_at: None,
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();

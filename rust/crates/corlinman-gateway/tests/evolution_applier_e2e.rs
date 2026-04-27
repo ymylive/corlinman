@@ -80,6 +80,10 @@ async fn apply_runs_real_merge_chunks_pipeline() {
         decided_by: Some("e2e-operator".into()),
         applied_at: None,
         rollback_of: None,
+        eval_run_id: None,
+        baseline_metrics_json: None,
+        auto_rollback_at: None,
+        auto_rollback_reason: None,
     })
     .await
     .unwrap();
@@ -192,6 +196,10 @@ async fn apply_runs_real_delete_chunk_pipeline() {
         decided_by: Some("op".into()),
         applied_at: None,
         rollback_of: None,
+        eval_run_id: None,
+        baseline_metrics_json: None,
+        auto_rollback_at: None,
+        auto_rollback_reason: None,
     })
     .await
     .unwrap();

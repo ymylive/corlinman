@@ -136,6 +136,10 @@ async fn approved_then_applied(
             decided_by: Some("test".into()),
             applied_at: None,
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();

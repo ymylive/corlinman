@@ -242,7 +242,9 @@ impl ProposalsRepo {
         let row = sqlx::query(
             r#"SELECT id, kind, target, diff, reasoning, risk, budget_cost, status,
                       shadow_metrics, signal_ids, trace_ids,
-                      created_at, decided_at, decided_by, applied_at, rollback_of
+                      created_at, decided_at, decided_by, applied_at, rollback_of,
+                      eval_run_id, baseline_metrics_json,
+                      auto_rollback_at, auto_rollback_reason
                FROM evolution_proposals WHERE id = ?"#,
         )
         .bind(id.as_str())
@@ -261,7 +263,9 @@ impl ProposalsRepo {
         let rows = sqlx::query(
             r#"SELECT id, kind, target, diff, reasoning, risk, budget_cost, status,
                       shadow_metrics, signal_ids, trace_ids,
-                      created_at, decided_at, decided_by, applied_at, rollback_of
+                      created_at, decided_at, decided_by, applied_at, rollback_of,
+                      eval_run_id, baseline_metrics_json,
+                      auto_rollback_at, auto_rollback_reason
                FROM evolution_proposals
                WHERE status = ?
                ORDER BY created_at DESC
@@ -365,7 +369,9 @@ impl ProposalsRepo {
         let rows = sqlx::query(
             r#"SELECT id, kind, target, diff, reasoning, risk, budget_cost, status,
                       shadow_metrics, signal_ids, trace_ids,
-                      created_at, decided_at, decided_by, applied_at, rollback_of
+                      created_at, decided_at, decided_by, applied_at, rollback_of,
+                      eval_run_id, baseline_metrics_json,
+                      auto_rollback_at, auto_rollback_reason
                FROM evolution_proposals
                WHERE status = 'applied'
                  AND applied_at IS NOT NULL
@@ -399,7 +405,9 @@ impl ProposalsRepo {
         let sql = format!(
             r#"SELECT id, kind, target, diff, reasoning, risk, budget_cost, status,
                       shadow_metrics, signal_ids, trace_ids,
-                      created_at, decided_at, decided_by, applied_at, rollback_of
+                      created_at, decided_at, decided_by, applied_at, rollback_of,
+                      eval_run_id, baseline_metrics_json,
+                      auto_rollback_at, auto_rollback_reason
                FROM evolution_proposals
                WHERE status = 'pending' AND kind = ? AND risk IN ({placeholders})
                ORDER BY created_at DESC
@@ -560,6 +568,19 @@ fn decode_proposal(row: sqlx::sqlite::SqliteRow) -> Result<EvolutionProposal, Re
         ),
         None => None,
     };
+    // Stored as JSON-as-TEXT (the W1-A path serializes the
+    // MetricSnapshot before binding); decode lazily and surface a typed
+    // error so a malformed row doesn't masquerade as a clean None.
+    let baseline_metrics_json: Option<Json> =
+        match row.get::<Option<String>, _>("baseline_metrics_json") {
+            Some(s) => Some(serde_json::from_str(&s).map_err(|source| {
+                RepoError::MalformedJson {
+                    column: "baseline_metrics_json",
+                    source,
+                }
+            })?),
+            None => None,
+        };
 
     Ok(EvolutionProposal {
         id: ProposalId(row.get("id")),
@@ -578,6 +599,10 @@ fn decode_proposal(row: sqlx::sqlite::SqliteRow) -> Result<EvolutionProposal, Re
         decided_by: row.get("decided_by"),
         applied_at: row.get("applied_at"),
         rollback_of: row.get::<Option<String>, _>("rollback_of").map(ProposalId),
+        eval_run_id: row.get("eval_run_id"),
+        baseline_metrics_json,
+        auto_rollback_at: row.get("auto_rollback_at"),
+        auto_rollback_reason: row.get("auto_rollback_reason"),
     })
 }
 
@@ -767,6 +792,10 @@ mod tests {
             decided_by: None,
             applied_at: None,
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();
@@ -820,6 +849,10 @@ mod tests {
             decided_by: None,
             applied_at: None,
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();
@@ -921,6 +954,10 @@ mod tests {
                 decided_by: Some("auto".into()),
                 applied_at: Some(3_000),
                 rollback_of: None,
+                eval_run_id: None,
+                baseline_metrics_json: None,
+                auto_rollback_at: None,
+                auto_rollback_reason: None,
             })
             .await
             .unwrap();
@@ -981,6 +1018,10 @@ mod tests {
             decided_by: Some("auto".into()),
             applied_at: Some(3_000),
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();
@@ -1072,6 +1113,10 @@ mod tests {
             decided_by: Some("auto".into()),
             applied_at: Some(applied_at_ms),
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();
@@ -1207,6 +1252,10 @@ mod tests {
             decided_by: None,
             applied_at: None,
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();

@@ -250,6 +250,22 @@ pub struct EvolutionProposal {
     pub decided_by: Option<String>,
     pub applied_at: Option<i64>,
     pub rollback_of: Option<ProposalId>,
+    // ─── W1-A: shadow run identifiers ─────────────────────────────────
+    /// Identifier of the eval run that produced `shadow_metrics`.
+    pub eval_run_id: Option<String>,
+    /// Pre-shadow baseline counts captured by the ShadowTester. Mirrors
+    /// the same MetricSnapshot shape the W1-B applier writes into
+    /// `evolution_history.metrics_baseline`.
+    pub baseline_metrics_json: Option<serde_json::Value>,
+    // ─── W1-B: auto-rollback audit ────────────────────────────────────
+    /// Unix-millis timestamp the AutoRollback monitor flipped this row
+    /// from `applied → rolled_back`. None if the proposal was never
+    /// auto-rolled (manual rollback uses a fresh proposal with
+    /// `rollback_of` set).
+    pub auto_rollback_at: Option<i64>,
+    /// Human-readable summary of the threshold breach that triggered the
+    /// auto-rollback (e.g. `"err_signal_count: 4 -> 12 (+200%)"`).
+    pub auto_rollback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

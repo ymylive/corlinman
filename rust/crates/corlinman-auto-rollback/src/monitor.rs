@@ -346,6 +346,10 @@ mod tests {
             decided_by: Some("auto".into()),
             applied_at: Some(applied_at_ms),
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();

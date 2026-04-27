@@ -56,6 +56,10 @@ async fn shadow_run_passes_all_real_memory_op_fixtures() {
             decided_by: None,
             applied_at: None,
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();

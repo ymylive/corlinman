@@ -6,7 +6,12 @@
  * paths reference it directly.
  */
 
-import type { BudgetSnapshot, EvolutionProposal } from "@/lib/api";
+import type {
+  BudgetSnapshot,
+  EvolutionProposal,
+  HistoryEntry,
+  MetricSnapshot,
+} from "@/lib/api";
 
 const NOW = Date.UTC(2026, 3, 25, 14, 0, 0); // matches currentDate
 const ONE_WEEK_MS = 1000 * 60 * 60 * 24 * 7;
@@ -88,5 +93,170 @@ export const MOCK_EVOLUTION_PENDING: EvolutionProposal[] = [
     signal_ids: [3990, 4001, 4055, 4112, 4188],
     trace_ids: ["t-2872fa", "t-2872fb", "t-2891aa"],
     created_at: NOW - 1000 * 60 * 60 * 2 - 1000 * 17,
+  },
+];
+
+// ─── Phase 3 W2 (3-2D): Approved + History fixtures ────────────────────────
+
+/** Helper: a `MetricSnapshot` JSON with hand-tuned counts. Keeps the
+ * mocks readable rather than scattering literal objects through the file. */
+function snapshot(target: string, counts: Record<string, number>): MetricSnapshot {
+  return {
+    target,
+    captured_at_ms: NOW - 1000 * 60 * 30,
+    window_secs: 1800,
+    counts,
+  };
+}
+
+/**
+ * Approved proposals: a memory_op with shadow improvements (counts down)
+ * and a skill_update where shadow held flat. Both populate
+ * `baseline_metrics_json` + `shadow_metrics` so the `MetricsDelta`
+ * compact bar chart has data to render.
+ */
+export const MOCK_EVOLUTION_APPROVED: EvolutionProposal[] = [
+  {
+    id: "evo_01HZBA",
+    kind: "memory_op",
+    target: "merge_chunks:8821,8822",
+    diff: "",
+    reasoning:
+      "两条 chunk 内容 0.94 余弦相似，合并后 search.recall.dropped 影子下降 33%。",
+    risk: "low",
+    status: "approved",
+    signal_ids: [4205, 4211],
+    trace_ids: ["t-2b03aa"],
+    created_at: NOW - 1000 * 60 * 60 * 6,
+    decided_at: NOW - 1000 * 60 * 25,
+    decided_by: "operator",
+    eval_run_id: "eval-2026-04-25-001",
+    baseline_metrics_json: snapshot("merge_chunks:8821,8822", {
+      "tool.call.failed": 4,
+      "search.recall.dropped": 6,
+    }),
+    shadow_metrics: {
+      "tool.call.failed": 3,
+      "search.recall.dropped": 4,
+      success_rate: 0.93,
+    },
+  },
+  {
+    id: "evo_01HZBB",
+    kind: "skill_update",
+    target: "skills/diary_writer/prompt.md",
+    diff: [
+      "--- a/skills/diary_writer/prompt.md",
+      "+++ b/skills/diary_writer/prompt.md",
+      "@@ -8,4 +8,5 @@",
+      " - 用第一人称",
+      "-- 不要列出当天所有事件",
+      "+- 优先记述对你触动最深的一件事，其余略写",
+    ].join("\n"),
+    reasoning:
+      "情感密度提升 +0.18, 长度 -22%; 影子评估在 prompt.eval.failed 维持持平。",
+    risk: "medium",
+    status: "approved",
+    signal_ids: [4188, 4201, 4233],
+    trace_ids: ["t-2b04ee"],
+    created_at: NOW - 1000 * 60 * 60 * 4,
+    decided_at: NOW - 1000 * 60 * 12,
+    decided_by: "operator",
+    eval_run_id: "eval-2026-04-25-002",
+    baseline_metrics_json: snapshot("skills/diary_writer/prompt.md", {
+      "prompt.eval.failed": 5,
+      "tool.call.failed": 2,
+    }),
+    shadow_metrics: {
+      "prompt.eval.failed": 5,
+      "tool.call.failed": 2,
+      success_rate: 0.88,
+    },
+  },
+];
+
+/**
+ * History entries: one applied (clean), one auto-rolled-back (counts
+ * regressed past threshold), one manually rolled back (operator notes).
+ * Mirrors what `GET /admin/evolution/history` will serve once the
+ * gateway endpoint lands.
+ */
+export const MOCK_EVOLUTION_HISTORY: HistoryEntry[] = [
+  {
+    proposal_id: "evo_01HZAA",
+    kind: "memory_op",
+    target: "merge_chunks:7710,7711",
+    risk: "low",
+    status: "applied",
+    applied_at: NOW - 1000 * 60 * 60 * 2,
+    rolled_back_at: null,
+    rollback_reason: null,
+    auto_rollback_reason: null,
+    metrics_baseline: snapshot("merge_chunks:7710,7711", {
+      "tool.call.failed": 2,
+      "search.recall.dropped": 3,
+    }),
+    shadow_metrics: {
+      "tool.call.failed": 2,
+      "search.recall.dropped": 2,
+    },
+    baseline_metrics_json: snapshot("merge_chunks:7710,7711", {
+      "tool.call.failed": 2,
+      "search.recall.dropped": 3,
+    }),
+    before_sha: "a1b2c3d4e5f6",
+    after_sha: "f6e5d4c3b2a1",
+    eval_run_id: "eval-2026-04-25-101",
+    reasoning: "两条 chunk 接近重复，合并后召回更稳。",
+  },
+  {
+    proposal_id: "evo_01HZ99",
+    kind: "memory_op",
+    target: "delete_chunk:5530",
+    risk: "medium",
+    status: "rolled_back",
+    applied_at: NOW - 1000 * 60 * 60 * 9,
+    rolled_back_at: NOW - 1000 * 60 * 60 * 7,
+    rollback_reason: null,
+    auto_rollback_reason:
+      "err_signal_count: 4 -> 14 (+250%) breaches threshold +50%",
+    metrics_baseline: snapshot("delete_chunk:5530", {
+      "tool.call.failed": 4,
+      "search.recall.dropped": 0,
+    }),
+    shadow_metrics: {
+      "tool.call.failed": 14,
+      "search.recall.dropped": 2,
+    },
+    baseline_metrics_json: snapshot("delete_chunk:5530", {
+      "tool.call.failed": 4,
+      "search.recall.dropped": 0,
+    }),
+    before_sha: "01a1b1c1d1e1",
+    after_sha: "f1e1d1c1b1a1",
+    eval_run_id: "eval-2026-04-25-099",
+    reasoning:
+      "删除候选 chunk; 灰度期内监测到 tool.call.failed 显著上升, 自动回滚。",
+  },
+  {
+    proposal_id: "evo_01HZ88",
+    kind: "skill_update",
+    target: "skills/topic_tagger/rules.toml",
+    risk: "high",
+    status: "rolled_back",
+    applied_at: NOW - 1000 * 60 * 60 * 24,
+    rolled_back_at: NOW - 1000 * 60 * 60 * 20,
+    rollback_reason: "operator: tagging hallucinated novel categories",
+    auto_rollback_reason: null,
+    metrics_baseline: snapshot("skills/topic_tagger/rules.toml", {
+      "prompt.eval.failed": 3,
+    }),
+    shadow_metrics: null,
+    baseline_metrics_json: null,
+    before_sha: "9988aa776655",
+    after_sha: "5566778899aa",
+    eval_run_id: null,
+    reasoning:
+      "更激进的标签合并规则; 上线后用户反馈出现凭空合成的类别，运维手动回滚。",
   },
 ];

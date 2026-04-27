@@ -766,6 +766,10 @@ mod tests {
             decided_by: Some("operator".into()),
             applied_at: None,
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();
@@ -903,6 +907,10 @@ mod tests {
             decided_by: None,
             applied_at: None,
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();
@@ -939,6 +947,10 @@ mod tests {
             decided_by: Some("op".into()),
             applied_at: None,
             rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
         })
         .await
         .unwrap();
@@ -1106,6 +1118,10 @@ mod tests {
                 decided_by: Some("op".into()),
                 applied_at: Some(3_000),
                 rollback_of: None,
+                eval_run_id: None,
+                baseline_metrics_json: None,
+                auto_rollback_at: None,
+                auto_rollback_reason: None,
             })
             .await
             .unwrap();
