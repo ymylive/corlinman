@@ -760,7 +760,7 @@ impl EvolutionApplier {
         self.proposals
             .mark_auto_rolled_back(id, now, reason)
             .await
-            .map_err(|e| ApplyError::Repo(e))?;
+            .map_err(ApplyError::Repo)?;
 
         EVOLUTION_PROPOSALS_ROLLED_BACK
             .with_label_values(&[proposal.kind.as_str()])

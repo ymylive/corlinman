@@ -101,6 +101,12 @@ pub struct Config {
     #[serde(default)]
     #[validate(nested)]
     pub memory: MemoryConfig,
+    /// Phase 3 W3-C: persona decay knobs. Pure config — the runtime
+    /// state lives in `agent_state.sqlite`, owned by the Python
+    /// `corlinman-persona` package; this struct only mirrors the TOML
+    /// shape so `docs/config.example.toml` round-trips through serde.
+    #[serde(default)]
+    pub persona: PersonaConfig,
     pub meta: Meta,
 }
 
@@ -1205,7 +1211,7 @@ impl Default for EvolutionObserverConfig {
 /// proposals whose `risk` is `medium` or `high`, runs them through an
 /// in-process eval set, captures `shadow_metrics` + `baseline_metrics_json`
 /// + `eval_run_id`, and transitions the row from `shadow_running` to
-/// `shadow_done` so the operator sees a measured delta before approving.
+///   `shadow_done` so the operator sees a measured delta before approving.
 ///
 /// * `enabled` — master switch. When `false` the ShadowTester job is not
 ///   scheduled; medium/high-risk proposals stay in `pending` and are
@@ -1477,6 +1483,40 @@ impl Default for MemoryConsolidationConfig {
             schedule: "0 0 5 * * * *".into(),
             promotion_threshold: 0.65,
             max_promotions_per_run: 50,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [persona] — Phase 3 W3-C
+// ---------------------------------------------------------------------------
+//
+// Decay knobs for the Python `corlinman-persona` package. Runtime state
+// (mood / fatigue / recent_topics) lives in `agent_state.sqlite`; this
+// struct only mirrors the TOML shape so `docs/config.example.toml`
+// round-trips through serde and `Config`'s `deny_unknown_fields` doesn't
+// reject the section.
+//
+// All fields default to the Phase 3 roadmap §6 [persona] values; an
+// absent section deserialises into `PersonaConfig::default()` (enabled
+// = true, the documented decay rates).
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PersonaConfig {
+    pub enabled: bool,
+    pub mood_decay_per_hour: f64,
+    pub fatigue_recovery_per_hour: f64,
+    pub recent_topics_decay_per_day: u32,
+}
+
+impl Default for PersonaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mood_decay_per_hour: 0.05,
+            fatigue_recovery_per_hour: 0.1,
+            recent_topics_decay_per_day: 1,
         }
     }
 }
