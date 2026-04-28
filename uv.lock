@@ -17,6 +17,7 @@ members = [
     "corlinman-providers",
     "corlinman-server",
     "corlinman-tagmemo",
+    "corlinman-user-model",
 ]
 
 [[package]]
@@ -250,6 +251,7 @@ dependencies = [
     { name = "corlinman-providers" },
     { name = "corlinman-server" },
     { name = "corlinman-tagmemo" },
+    { name = "corlinman-user-model" },
 ]
 
 [package.dev-dependencies]
@@ -276,6 +278,7 @@ requires-dist = [
     { name = "corlinman-providers", editable = "python/packages/corlinman-providers" },
     { name = "corlinman-server", editable = "python/packages/corlinman-server" },
     { name = "corlinman-tagmemo", editable = "python/packages/corlinman-tagmemo" },
+    { name = "corlinman-user-model", editable = "python/packages/corlinman-user-model" },
 ]
 
 [package.metadata.requires-dev]
@@ -444,6 +447,21 @@ dependencies = [
 requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "scikit-learn", specifier = ">=1.4" },
+]
+
+[[package]]
+name = "corlinman-user-model"
+version = "0.1.0"
+source = { editable = "python/packages/corlinman-user-model" }
+dependencies = [
+    { name = "aiosqlite" },
+    { name = "corlinman-providers" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.20" },
+    { name = "corlinman-providers", editable = "python/packages/corlinman-providers" },
 ]
 
 [[package]]
