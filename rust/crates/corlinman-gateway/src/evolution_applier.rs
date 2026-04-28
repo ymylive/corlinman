@@ -276,6 +276,10 @@ impl EvolutionApplier {
             match plan {
                 MemoryOp::MergeChunks { .. } => EVOLUTION_CHUNKS_MERGED.inc(),
                 MemoryOp::DeleteChunk { .. } => EVOLUTION_CHUNKS_DELETED.inc(),
+                // Phase 3 W3-A: ConsolidateChunk has no dedicated
+                // counter — `EVOLUTION_PROPOSALS_APPLIED` below covers
+                // it via the `kind=memory_op` label.
+                MemoryOp::ConsolidateChunk { .. } => {}
             }
         }
         EVOLUTION_PROPOSALS_APPLIED
@@ -369,6 +373,55 @@ impl EvolutionApplier {
                     return Err(ApplyError::ChunkNotFound(*id));
                 }
 
+                Ok(MutationOutcome {
+                    before_sha,
+                    after_sha,
+                    inverse_diff,
+                })
+            }
+            MemoryOp::ConsolidateChunk { id } => {
+                // Snapshot the prior decay state into `inverse_diff` so
+                // revert can restore the chunk byte-for-byte without
+                // guessing what its namespace/decay_score were before
+                // promotion.
+                let prior = self
+                    .kb_store
+                    .get_chunk_decay_state(*id)
+                    .await
+                    .map_err(ApplyError::Kb)?
+                    .ok_or(ApplyError::ChunkNotFound(*id))?;
+                if prior.namespace == corlinman_vector::CONSOLIDATED_NAMESPACE {
+                    // Already consolidated — surface the mismatch so a
+                    // buggy proposer becomes noticeable instead of
+                    // silently flipping a no-op into the audit trail.
+                    return Err(ApplyError::InvalidTarget(format!(
+                        "consolidate_chunk:{id} already consolidated"
+                    )));
+                }
+                let promoted = self
+                    .kb_store
+                    .promote_to_consolidated(&[*id])
+                    .await
+                    .map_err(ApplyError::Kb)?;
+                if promoted == 0 {
+                    return Err(ApplyError::ChunkNotFound(*id));
+                }
+
+                let before_sha = sha256_hex(
+                    format!(
+                        "ns={};decay={};consolidated_at={:?}",
+                        prior.namespace, prior.decay_score, prior.consolidated_at
+                    )
+                    .as_bytes(),
+                );
+                let after_sha = sha256_hex(format!("ns=consolidated;chunk_id={id}").as_bytes());
+                let inverse_diff = json!({
+                    "action": "demote_chunk",
+                    "chunk_id": id,
+                    "prior_namespace": prior.namespace,
+                    "prior_decay_score": prior.decay_score,
+                })
+                .to_string();
                 Ok(MutationOutcome {
                     before_sha,
                     after_sha,
@@ -737,19 +790,39 @@ impl EvolutionApplier {
             .get("action")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ApplyError::MalformedInverseDiff("missing 'action'".into()))?;
-        if action != "restore_chunk" {
-            return Err(ApplyError::MalformedInverseDiff(format!(
-                "unknown action: {action}"
-            )));
+        match action {
+            "restore_chunk" => {
+                // Forward path emits two shapes: `merge_chunks` keys
+                // are prefixed `loser_*` (winner stays put);
+                // `delete_chunk` uses bare `content/file_id/...`.
+                // Discriminate on `loser_id`.
+                let plan = ChunkRestore::parse(&raw).map_err(ApplyError::MalformedInverseDiff)?;
+                plan.execute(self.kb_store.pool())
+                    .await
+                    .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+            }
+            "demote_chunk" => {
+                let chunk_id =
+                    pick_i64(&raw, "chunk_id").map_err(ApplyError::MalformedInverseDiff)?;
+                let prior_ns =
+                    pick_str(&raw, "prior_namespace").map_err(ApplyError::MalformedInverseDiff)?;
+                let prior_decay = raw
+                    .get("prior_decay_score")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| {
+                        ApplyError::MalformedInverseDiff("missing 'prior_decay_score'".into())
+                    })? as f32;
+                self.kb_store
+                    .demote_from_consolidated(chunk_id, &prior_ns, prior_decay)
+                    .await
+                    .map_err(ApplyError::Kb)?;
+            }
+            other => {
+                return Err(ApplyError::MalformedInverseDiff(format!(
+                    "unknown action: {other}"
+                )));
+            }
         }
-
-        // Forward path emits two shapes: `merge_chunks` keys are
-        // prefixed `loser_*` (winner stays put); `delete_chunk` uses
-        // bare `content/file_id/...`. Discriminate on `loser_id`.
-        let plan = ChunkRestore::parse(&raw).map_err(ApplyError::MalformedInverseDiff)?;
-        plan.execute(self.kb_store.pool())
-            .await
-            .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
         Ok(())
     }
 
@@ -1033,6 +1106,12 @@ enum MemoryOp {
     MergeChunks { winner: i64, loser: i64 },
     /// `delete_chunk:<id>` — drop one chunk.
     DeleteChunk { id: i64 },
+    /// Phase 3 W3-A: `consolidate_chunk:<id>` — flip the chunk's
+    /// namespace to `consolidated`, stamp `consolidated_at`, and freeze
+    /// `decay_score = 1.0` so the read-time decay multiplier collapses
+    /// to 1.0 forever. Filed by the consolidation job; revert restores
+    /// the prior namespace + decay_score from `inverse_diff`.
+    ConsolidateChunk { id: i64 },
 }
 
 impl MemoryOp {
@@ -1068,6 +1147,12 @@ impl MemoryOp {
                 .parse()
                 .map_err(|_| ApplyError::InvalidTarget(target.into()))?;
             Ok(Self::DeleteChunk { id })
+        } else if let Some(rest) = target.strip_prefix("consolidate_chunk:") {
+            let id: i64 = rest
+                .trim()
+                .parse()
+                .map_err(|_| ApplyError::InvalidTarget(target.into()))?;
+            Ok(Self::ConsolidateChunk { id })
         } else {
             Err(ApplyError::InvalidTarget(target.into()))
         }
@@ -1968,5 +2053,134 @@ mod tests {
             }
             other => panic!("expected SkillFileMissing, got {other:?}"),
         }
+    }
+
+    // ---- Phase 3 W3-A: consolidate_chunk -----------------------------------
+
+    #[test]
+    fn parse_consolidate_chunk_round_trip() {
+        let plan = MemoryOp::parse("consolidate_chunk:42").unwrap();
+        assert_eq!(plan, MemoryOp::ConsolidateChunk { id: 42 });
+    }
+
+    #[test]
+    fn parse_consolidate_chunk_rejects_garbage() {
+        for bad in [
+            "consolidate_chunk:",
+            "consolidate_chunk:abc",
+            "consolidate_chunk: 1 2",
+        ] {
+            assert!(
+                matches!(MemoryOp::parse(bad), Err(ApplyError::InvalidTarget(_))),
+                "expected InvalidTarget for {bad:?}"
+            );
+        }
+    }
+
+    /// Phase 3 W3-A: a `consolidate_chunk:<id>` proposal flips the
+    /// chunk's namespace to `consolidated`, stamps `consolidated_at`,
+    /// and resets `decay_score` to 1.0. The `inverse_diff` records
+    /// the prior namespace + decay_score so revert can restore them.
+    #[tokio::test]
+    async fn apply_consolidate_chunk_promotes_and_records_inverse_diff() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let id = seed_chunk(&kb, "/c", "important fact").await;
+
+        // Pull the prior decay_score into a known non-default value
+        // so we can verify the inverse_diff captures it.
+        sqlx::query("UPDATE chunks SET decay_score = 0.72 WHERE id = ?1")
+            .bind(id)
+            .execute(kb.pool())
+            .await
+            .unwrap();
+
+        let target = format!("consolidate_chunk:{id}");
+        let pid = seed_approved(&evol, "evol-cons-001", &target).await;
+
+        let history = applier.apply(&pid).await.unwrap();
+        assert_eq!(history.kind, EvolutionKind::MemoryOp);
+        assert_eq!(history.target, target);
+
+        // Chunk now lives in `consolidated` with decay_score reset to 1.0.
+        let state = kb.get_chunk_decay_state(id).await.unwrap().unwrap();
+        assert_eq!(state.namespace, corlinman_vector::CONSOLIDATED_NAMESPACE);
+        assert_eq!(state.decay_score, 1.0);
+        assert!(state.consolidated_at.is_some());
+
+        // inverse_diff captures the original namespace + decay_score.
+        let inverse: serde_json::Value = serde_json::from_str(&history.inverse_diff).unwrap();
+        assert_eq!(inverse["action"], "demote_chunk");
+        assert_eq!(inverse["chunk_id"], id);
+        assert_eq!(inverse["prior_namespace"], "general");
+        assert!(
+            (inverse["prior_decay_score"].as_f64().unwrap() - 0.72).abs() < 1e-5,
+            "got {}",
+            inverse["prior_decay_score"]
+        );
+    }
+
+    /// Already-consolidated chunks must not be re-promoted — the
+    /// applier surfaces InvalidTarget so a buggy proposer becomes
+    /// noticeable instead of silently flipping a no-op into the audit
+    /// trail.
+    #[tokio::test]
+    async fn apply_consolidate_chunk_rejects_already_consolidated() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let id = seed_chunk(&kb, "/c", "already locked in").await;
+        // Pre-consolidate the chunk so the second apply hits the gate.
+        kb.promote_to_consolidated(&[id]).await.unwrap();
+
+        let target = format!("consolidate_chunk:{id}");
+        let pid = seed_approved(&evol, "evol-cons-twice-001", &target).await;
+        match applier.apply(&pid).await {
+            Err(ApplyError::InvalidTarget(s)) => {
+                assert!(s.contains(&format!("{id}")));
+                assert!(s.contains("already consolidated"));
+            }
+            other => panic!("expected InvalidTarget, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_consolidate_chunk_chunk_not_found() {
+        let (_tmp, applier, _kb, evol) = fresh_applier().await;
+        let pid = seed_approved(&evol, "evol-cons-missing-001", "consolidate_chunk:99999").await;
+        assert!(matches!(
+            applier.apply(&pid).await,
+            Err(ApplyError::ChunkNotFound(99999))
+        ));
+    }
+
+    /// Forward apply followed by a revert must restore the prior
+    /// namespace + decay_score byte-for-byte.
+    #[tokio::test]
+    async fn revert_consolidate_chunk_restores_prior_state() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let id = seed_chunk(&kb, "/c", "rollback me").await;
+        sqlx::query("UPDATE chunks SET decay_score = 0.42 WHERE id = ?1")
+            .bind(id)
+            .execute(kb.pool())
+            .await
+            .unwrap();
+        let target = format!("consolidate_chunk:{id}");
+        let pid = seed_approved(&evol, "evol-cons-revert-001", &target).await;
+
+        applier.apply(&pid).await.unwrap();
+        let after_apply = kb.get_chunk_decay_state(id).await.unwrap().unwrap();
+        assert_eq!(
+            after_apply.namespace,
+            corlinman_vector::CONSOLIDATED_NAMESPACE
+        );
+        assert_eq!(after_apply.decay_score, 1.0);
+
+        applier.revert(&pid, "rollback test").await.unwrap();
+        let after_revert = kb.get_chunk_decay_state(id).await.unwrap().unwrap();
+        assert_eq!(after_revert.namespace, "general");
+        assert!(after_revert.consolidated_at.is_none());
+        assert!(
+            (after_revert.decay_score - 0.42).abs() < 1e-5,
+            "got {}",
+            after_revert.decay_score
+        );
     }
 }

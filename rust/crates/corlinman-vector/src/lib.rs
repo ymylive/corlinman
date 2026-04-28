@@ -28,6 +28,7 @@
 //! - [`header`]: read-only `.usearch` header probe used by the migration
 //!   runner to detect embedding-dimension drift.
 
+pub mod decay;
 pub mod header;
 pub mod hybrid;
 pub mod migration;
@@ -36,6 +37,7 @@ pub mod rerank;
 pub mod sqlite;
 pub mod usearch_index;
 
+pub use decay::{apply_decay, boosted_score, DecayConfig, CONSOLIDATED_NAMESPACE};
 pub use header::{probe_and_convert_if_needed, probe_usearch_header, UsearchHeader};
 pub use hybrid::{
     CandidateBoost, EpaBoost, HitSource, HybridParams, HybridSearcher, RagHit, TagFilter,
@@ -46,7 +48,9 @@ pub use migration::{
 };
 pub use query::VectorStore;
 pub use rerank::{GrpcReranker, NoopReranker, Reranker};
-pub use sqlite::{ChunkEpaRow, ChunkRow, FileRow, PendingApproval, SqliteStore, TagNodeRow};
+pub use sqlite::{
+    ChunkDecayState, ChunkEpaRow, ChunkRow, FileRow, PendingApproval, SqliteStore, TagNodeRow,
+};
 pub use usearch_index::UsearchIndex;
 
 /// Current corlinman schema version written to `kv_store('schema_version')`.

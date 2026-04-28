@@ -1,7 +1,9 @@
 """``corlinman-evolution-engine`` CLI entry point.
 
-Phase 2 ships exactly one subcommand: ``run-once``. Scheduler integration
-(``corlinman-scheduler`` calling this on a cron) is intentionally deferred.
+Phase 2 shipped ``run-once``; Phase 3 W3-A adds ``consolidate-once``
+which drives the chunk decay → consolidation pipeline (decay-score
+threshold sweep → file ``memory_op`` proposals targeting
+``consolidate_chunk:<id>`` → operator review path).
 """
 
 from __future__ import annotations
@@ -16,6 +18,11 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
+from corlinman_evolution_engine.consolidation import (
+    ConsolidationConfig,
+    ConsolidationSummary,
+    consolidation_run_once,
+)
 from corlinman_evolution_engine.engine import (
     BudgetConfig,
     EngineConfig,
@@ -74,6 +81,49 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable INFO logging.",
     )
+
+    cons = sub.add_parser(
+        "consolidate-once",
+        help=(
+            "Phase 3 W3-A: scan kb.sqlite for chunks above the "
+            "promotion threshold and file memory_op proposals "
+            "targeting consolidate_chunk:<id>."
+        ),
+    )
+    cons.add_argument(
+        "--evolution-db",
+        type=Path,
+        default=Path("/data/evolution.sqlite"),
+        help="Path to evolution.sqlite (default: %(default)s).",
+    )
+    cons.add_argument(
+        "--kb-db",
+        type=Path,
+        default=Path("/data/kb.sqlite"),
+        help="Path to kb.sqlite (default: %(default)s).",
+    )
+    cons.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the workspace TOML config containing "
+            "[memory.consolidation]. When omitted, the built-in "
+            "defaults are used (enabled=true, threshold=0.65, "
+            "max_promotions_per_run=50)."
+        ),
+    )
+    cons.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the run summary as JSON on stdout.",
+    )
+    cons.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable INFO logging.",
+    )
     return parser
 
 
@@ -121,6 +171,47 @@ def _config_from_args(args: argparse.Namespace) -> EngineConfig:
     )
 
 
+def _load_consolidation_config(path: Path | None) -> ConsolidationConfig:
+    """Parse ``[memory.consolidation]`` out of the workspace TOML.
+
+    Missing file or missing section → default ``ConsolidationConfig``.
+    Same passthrough shape the engine uses for ``--budget-config`` so
+    operators only juggle one TOML.
+    """
+    if path is None:
+        return ConsolidationConfig()
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except FileNotFoundError:
+        return ConsolidationConfig()
+    section = data.get("memory", {}).get("consolidation", {})
+    if not isinstance(section, dict):
+        return ConsolidationConfig()
+    return ConsolidationConfig(
+        enabled=bool(section.get("enabled", True)),
+        promotion_threshold=float(section.get("promotion_threshold", 0.65)),
+        max_promotions_per_run=int(section.get("max_promotions_per_run", 50)),
+    )
+
+
+def _print_consolidation_summary(
+    summary: ConsolidationSummary,
+    *,
+    as_json: bool,
+) -> None:
+    if as_json:
+        print(json.dumps(asdict(summary), indent=2, default=str))
+        return
+    if summary.skipped_disabled:
+        print("consolidation: master switch disabled; nothing to do")
+        return
+    print(f"candidates_found:   {summary.candidates_found}")
+    print(f"proposals_written:  {summary.proposals_written}")
+    print(f"skipped_existing:   {summary.skipped_existing}")
+    print(f"elapsed_seconds:    {summary.elapsed_seconds:.2f}")
+
+
 def _print_summary(summary: RunSummary, *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(asdict(summary), indent=2, default=str))
@@ -152,6 +243,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         engine = EvolutionEngine(_config_from_args(args))
         summary = asyncio.run(engine.run_once())
         _print_summary(summary, as_json=args.json)
+        return 0
+
+    if args.command == "consolidate-once":
+        logging.basicConfig(
+            level=logging.INFO if args.verbose else logging.WARNING,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+        cfg = _load_consolidation_config(args.config)
+        summary = asyncio.run(
+            consolidation_run_once(
+                config=cfg,
+                kb_db_path=args.kb_db,
+                evolution_db_path=args.evolution_db,
+            )
+        )
+        _print_consolidation_summary(summary, as_json=args.json)
         return 0
 
     parser.error(f"unknown command: {args.command}")

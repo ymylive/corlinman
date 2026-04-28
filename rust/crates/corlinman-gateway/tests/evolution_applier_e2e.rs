@@ -236,3 +236,114 @@ async fn apply_runs_real_delete_chunk_pipeline() {
     let after = repo.get(&pid).await.unwrap();
     assert_eq!(after.status, EvolutionStatus::Applied);
 }
+
+/// Phase 3 W3-A: a `consolidate_chunk:<id>` proposal flows through
+/// the same admin route. After apply the kb row's namespace flips to
+/// `consolidated`, `consolidated_at` is stamped, and `decay_score`
+/// resets to 1.0 — pinning the consolidate → apply → check
+/// `consolidated_at` written contract end-to-end.
+#[tokio::test]
+async fn apply_runs_real_consolidate_chunk_pipeline() {
+    let tmp = TempDir::new().unwrap();
+    let kb = Arc::new(
+        SqliteStore::open(&tmp.path().join("kb.sqlite"))
+            .await
+            .unwrap(),
+    );
+    let file_id = kb
+        .insert_file("/keep.md", "diary", "checksum", 0, 64)
+        .await
+        .unwrap();
+    let chunk_id = kb
+        .insert_chunk(file_id, 0, "high-signal fact", None, "general")
+        .await
+        .unwrap();
+    // Pre-set decay_score to a non-default value so we can verify the
+    // applier resets it back to 1.0 on promotion.
+    sqlx::query("UPDATE chunks SET decay_score = 0.81 WHERE id = ?1")
+        .bind(chunk_id)
+        .execute(kb.pool())
+        .await
+        .unwrap();
+
+    let evol = Arc::new(
+        EvolutionStore::open(&tmp.path().join("evolution.sqlite"))
+            .await
+            .unwrap(),
+    );
+    let repo = ProposalsRepo::new(evol.pool().clone());
+    let pid = ProposalId::new("evol-e2e-cons-001");
+    let target = format!("consolidate_chunk:{chunk_id}");
+    repo.insert(&EvolutionProposal {
+        id: pid.clone(),
+        kind: EvolutionKind::MemoryOp,
+        target: target.clone(),
+        diff: String::new(),
+        reasoning: "decay_score=0.81 sustained; promote".into(),
+        risk: EvolutionRisk::Low,
+        budget_cost: 0,
+        status: EvolutionStatus::Approved,
+        shadow_metrics: None,
+        signal_ids: vec![],
+        trace_ids: vec![],
+        created_at: 1_000,
+        decided_at: Some(2_000),
+        decided_by: Some("op".into()),
+        applied_at: None,
+        rollback_of: None,
+        eval_run_id: None,
+        baseline_metrics_json: None,
+        auto_rollback_at: None,
+        auto_rollback_reason: None,
+    })
+    .await
+    .unwrap();
+
+    let applier = Arc::new(EvolutionApplier::new(
+        evol.clone(),
+        kb.clone(),
+        corlinman_core::config::AutoRollbackThresholds::default(),
+        tmp.path().join("skills"),
+    ));
+    let state = AdminState::new(
+        Arc::new(PluginRegistry::default()),
+        Arc::new(ArcSwap::from_pointee(Config::default())),
+    )
+    .with_evolution_store(evol.clone())
+    .with_evolution_applier(applier);
+    let app = evolution_routes::router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/admin/evolution/{}/apply", pid.as_str()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // kb side: namespace flipped, consolidated_at stamped, decay_score reset.
+    let state = kb.get_chunk_decay_state(chunk_id).await.unwrap().unwrap();
+    assert_eq!(state.namespace, corlinman_vector::CONSOLIDATED_NAMESPACE);
+    assert!(state.consolidated_at.is_some());
+    assert_eq!(state.decay_score, 1.0);
+
+    // evolution side: proposal flipped to applied, history row carries
+    // the demote_chunk inverse diff.
+    let after = repo.get(&pid).await.unwrap();
+    assert_eq!(after.status, EvolutionStatus::Applied);
+    let inverse_diff: String =
+        sqlx::query_scalar("SELECT inverse_diff FROM evolution_history WHERE proposal_id = ?")
+            .bind(pid.as_str())
+            .fetch_one(evol.pool())
+            .await
+            .unwrap();
+    let inverse: serde_json::Value = serde_json::from_str(&inverse_diff).unwrap();
+    assert_eq!(inverse["action"], "demote_chunk");
+    assert_eq!(inverse["chunk_id"], chunk_id);
+    assert_eq!(inverse["prior_namespace"], "general");
+    assert!((inverse["prior_decay_score"].as_f64().unwrap() - 0.81).abs() < 1e-5);
+}

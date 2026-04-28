@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     content TEXT NOT NULL,
     vector BLOB,
     namespace TEXT NOT NULL DEFAULT 'general',
+    decay_score REAL NOT NULL DEFAULT 1.0,
+    consolidated_at INTEGER,
+    last_recalled_at INTEGER,
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 );
 """

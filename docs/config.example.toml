@@ -239,6 +239,16 @@ name = "auto_rollback"
 cron = "0 0 4 * * * *"
 action = { type = "subprocess", command = "corlinman-auto-rollback", args = ["run-once", "--config", "/data/config.toml"], timeout_secs = 600, working_dir = "/data", env = { CORLINMAN_DATA_DIR = "/data" } }
 
+# Phase 3 wave 3-A: chunk-decay consolidation job. Runs another hour
+# after the auto_rollback monitor so any in-flight reverts are settled
+# before we file new memory_op proposals targeting `consolidate_chunk:<id>`.
+# The CLI is a no-op (clear log line, exit 0) when
+# `[memory.consolidation].enabled = false`.
+[[scheduler.jobs]]
+name = "memory_consolidation"
+cron = "0 0 5 * * * *"
+action = { type = "subprocess", command = "corlinman-evolution-engine", args = ["consolidate-once", "--config", "/data/config.toml"], timeout_secs = 600, working_dir = "/data", env = { CORLINMAN_DATA_DIR = "/data" } }
+
 # Phase 3 wave 1-C: per-week / per-kind cap on EvolutionEngine proposal
 # filing. The Python engine reads this same TOML via `--budget-config`
 # (passed by the scheduler). When `enabled = false` the engine behaves
@@ -264,6 +274,29 @@ retry_tuning    = 3
 # name = "weekly-reindex"
 # cron = "0 0 3 * * 0 *"
 # action = { type = "run_tool", plugin = "vector", tool = "vector.reindex", args = { collection = "docs" } }
+
+# ---------------------------------------------------------------------------
+# [memory] — Phase 3 W3-A chunk decay + consolidation pipeline.
+#
+# Decay applies a half-life multiplier to chunk scores at read time —
+# `last_recalled_at` is the age zero-point, `decay_score` is the stored
+# multiplier the recall path boosts. Consolidation is the periodic job
+# that promotes chunks whose decay_score has stayed above
+# `promotion_threshold` into the immune `consolidated` namespace via
+# the EvolutionApplier (so every kb mutation flows through the same
+# audit pipeline as merge_chunks / delete_chunk).
+# ---------------------------------------------------------------------------
+[memory.decay]
+enabled         = true
+half_life_hours = 168.0   # 1 week
+floor_score     = 0.05    # never decay below this multiplier
+recall_boost    = 0.3     # bump on recall, capped at 1.0
+
+[memory.consolidation]
+enabled                = true
+schedule               = "0 0 5 * * * *"  # 05:00 UTC daily
+promotion_threshold    = 0.65
+max_promotions_per_run = 50
 
 # ---------------------------------------------------------------------------
 # [logging] — tracing subscriber. file_rolling emits daily files under

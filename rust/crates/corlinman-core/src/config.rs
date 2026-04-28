@@ -94,6 +94,13 @@ pub struct Config {
     #[serde(default)]
     #[validate(nested)]
     pub evolution: EvolutionConfig,
+    /// Phase 3 W3-A: chunk-decay + consolidation knobs. Defaults are
+    /// already useful (decay on / consolidation on with 05:00 UTC
+    /// schedule), so an unset section deserialises into the documented
+    /// shape.
+    #[serde(default)]
+    #[validate(nested)]
+    pub memory: MemoryConfig,
     pub meta: Meta,
 }
 
@@ -1368,6 +1375,108 @@ impl Default for EvolutionBudgetConfig {
             enabled: false,
             weekly_total: 15,
             per_kind,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [memory] — Phase 3 W3-A: chunk decay + consolidation pipeline.
+// ---------------------------------------------------------------------------
+
+/// Tunables for the memory subsystem (chunk decay + consolidation).
+///
+/// The two sub-sections are independent: decay is purely the read-time
+/// score multiplier on `chunks` (driven by `last_recalled_at` +
+/// `decay_score`), while consolidation is the periodic job that
+/// promotes high-scoring chunks into the immune `consolidated`
+/// namespace via the EvolutionApplier so every kb mutation still flows
+/// through the audit trail.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryConfig {
+    #[validate(nested)]
+    pub decay: MemoryDecayConfig,
+    #[validate(nested)]
+    pub consolidation: MemoryConsolidationConfig,
+}
+
+/// `[memory.decay]` — knobs for the read-time exponential half-life
+/// applied to chunk scores. Matches the in-code defaults on
+/// `corlinman_vector::DecayConfig` so the read path can hydrate
+/// directly from this struct.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryDecayConfig {
+    /// Master switch. When `false` the SqliteStore returns scores
+    /// unchanged and `record_recall` is a no-op.
+    pub enabled: bool,
+    /// Hours since last recall at which the multiplier hits 0.5.
+    /// 168h = one week, matching the design doc.
+    #[validate(range(min = 1.0, max = 8760.0))]
+    pub half_life_hours: f64,
+    /// Floor below which the read-time decayed score is clamped — keeps
+    /// long-untouched chunks visible enough to participate in RRF
+    /// fusion instead of vanishing entirely.
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub floor_score: f32,
+    /// Bump added to `decay_score` on every recall (capped at 1.0).
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub recall_boost: f32,
+}
+
+impl Default for MemoryDecayConfig {
+    fn default() -> Self {
+        // Mirrors `corlinman_vector::DecayConfig::default`. Keep them
+        // in lockstep — the gateway hydrates the vector struct from
+        // this one at startup.
+        Self {
+            enabled: true,
+            half_life_hours: 168.0,
+            floor_score: 0.05,
+            recall_boost: 0.3,
+        }
+    }
+}
+
+/// `[memory.consolidation]` — periodic-job knobs for promoting
+/// high-scoring chunks into the immune `consolidated` namespace.
+///
+/// The job itself runs as a Python CLI subcommand
+/// (`corlinman-evolution-engine consolidate-once`) wired through the
+/// scheduler; this section is what the CLI reads to decide which
+/// chunks to file `memory_op` proposals for.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryConsolidationConfig {
+    /// Master switch. When `false` the CLI exits with a clear log line
+    /// and no proposals are filed; flipping this on later doesn't
+    /// require touching the scheduler.
+    pub enabled: bool,
+    /// Cron expression (6-field corlinman-scheduler dialect) the
+    /// scheduler runs the CLI on. Default 05:00 UTC daily lands well
+    /// after the 03:00 evolution_engine + 03:30 shadow_tester pair so
+    /// any merge proposals from the day's clustering are out of the
+    /// way before consolidation files its own.
+    pub schedule: String,
+    /// Minimum stored `decay_score` for a chunk to qualify for
+    /// promotion. 0.65 ≈ "recalled at least twice (0.7 ramp) in the
+    /// last week without much decay".
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub promotion_threshold: f32,
+    /// Hard cap on candidates emitted per run — prevents a flood of
+    /// memory_op proposals from drowning the operator queue when the
+    /// threshold is set too low.
+    #[validate(range(min = 1, max = 10_000))]
+    pub max_promotions_per_run: u32,
+}
+
+impl Default for MemoryConsolidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            schedule: "0 0 5 * * * *".into(),
+            promotion_threshold: 0.65,
+            max_promotions_per_run: 50,
         }
     }
 }
