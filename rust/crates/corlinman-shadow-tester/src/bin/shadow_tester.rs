@@ -16,6 +16,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use corlinman_core::config::{Config, ShadowSandboxKind};
 use corlinman_evolution::{EvolutionStore, ProposalsRepo};
+use corlinman_shadow_tester::sandbox::{sha256_hex, SelfTestResult};
 use corlinman_shadow_tester::simulator::MemoryOpSimulator;
 use corlinman_shadow_tester::ShadowRunner;
 use tracing::{error, info};
@@ -41,6 +42,12 @@ enum Cmd {
     /// `eval_run_id`, then exit. Designed for cron invocation by
     /// `corlinman-scheduler`.
     RunOnce(RunOnceArgs),
+    /// Phase 4 W1 4-1C: deterministic self-test workload exercised by
+    /// the docker sandbox integration test. Hashes the supplied
+    /// payload via SHA-256 and emits the result as JSON on stdout.
+    /// Idempotent and side-effect-free — safe to run inside the
+    /// network-isolated, read-only-fs `corlinman-sandbox` container.
+    SandboxSelfTest(SandboxSelfTestArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -57,6 +64,14 @@ struct RunOnceArgs {
     max_proposals: Option<usize>,
 }
 
+#[derive(Debug, Parser)]
+struct SandboxSelfTestArgs {
+    /// UTF-8 payload to hash. Empty string is allowed (the SHA-256
+    /// of zero bytes is a fixed value).
+    #[arg(long, default_value = "")]
+    payload: String,
+}
+
 /// Single-threaded tokio runtime — this is a short-lived job; no need
 /// to pay the multi-threaded scheduler tax.
 #[tokio::main(flavor = "current_thread")]
@@ -65,7 +80,22 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Cmd::RunOnce(args) => run_once(args).await,
+        Cmd::SandboxSelfTest(args) => sandbox_self_test(args),
     }
+}
+
+/// `sandbox-self-test` flow: SHA-256 the payload and print
+/// `{"hash": "..."}` to stdout. No filesystem writes, no network,
+/// no config — the workload is pure compute so the docker sandbox
+/// can run it under `--read-only --network=none` without scratch-
+/// dir setup.
+fn sandbox_self_test(args: SandboxSelfTestArgs) -> anyhow::Result<()> {
+    let result = SelfTestResult {
+        hash: sha256_hex(args.payload.as_bytes()),
+    };
+    let json = serde_json::to_string(&result)?;
+    println!("{json}");
+    Ok(())
 }
 
 /// Wire `tracing_subscriber` with a `RUST_LOG` env-filter (default

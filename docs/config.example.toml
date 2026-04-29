@@ -278,6 +278,19 @@ action = { type = "subprocess", command = "corlinman-user-model", args = ["disti
 # operator review time. If your environment hasn't trued up
 # `weekly_total` to its actual signal volume yet, set this back to
 # `false` for a week of observation, then commit a real ceiling.
+# Phase 4 W1 4-1C: docker-backed sandbox tunables. Only consulted
+# when `[evolution.shadow].sandbox_kind = "docker"`; the default
+# `in_process` mode reads neither this section nor the `image` tag.
+# The image is built from `docker/Dockerfile.shadow-sandbox` and
+# pinned to `ghcr.io/ymylive/corlinman-sandbox:v1` once published;
+# operators running before that publish must override `image` to a
+# locally-built tag (e.g. `corlinman-sandbox:dev`).
+[evolution.shadow.sandbox]
+image         = "ghcr.io/ymylive/corlinman-sandbox:v1"
+network       = "none"
+mem_mb        = 512
+timeout_secs  = 60
+
 [evolution.budget]
 enabled       = true
 weekly_total  = 15

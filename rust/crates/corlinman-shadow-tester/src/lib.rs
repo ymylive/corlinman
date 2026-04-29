@@ -28,7 +28,11 @@
 
 pub mod eval;
 pub mod runner;
+pub mod sandbox;
 pub mod simulator;
 
 pub use runner::{RunSummary, ShadowRunner};
+pub use sandbox::{
+    sha256_hex, DockerBackend, InProcessBackend, SandboxBackend, SandboxError, SelfTestResult,
+};
 pub use simulator::{KindSimulator, SimulatorError, SimulatorOutput};

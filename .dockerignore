@@ -1,0 +1,43 @@
+# Phase 4 W1 4-1C: keep the Docker build context small. Without this
+# file `docker build .` would upload the entire repo (target/ alone
+# can be tens of GB after a full workspace build). The Dockerfile
+# only needs Cargo manifests + the Rust source tree, so everything
+# else is excluded.
+
+# Build artifacts
+target/
+**/target/
+
+# Python virtualenvs / bytecode
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Editor / OS / VCS
+.git/
+.gitignore
+.github/
+.claude/
+.idea/
+.vscode/
+.DS_Store
+
+# Documentation + design artifacts (not needed for the build)
+_design/
+docs/
+
+# Node modules (if any frontend tooling lands)
+node_modules/
+**/node_modules/
+
+# Logs and tmp
+*.log
+tmp/
+.tmp/
+
+# Existing image build outputs
+**/*.tar
+**/*.tar.gz

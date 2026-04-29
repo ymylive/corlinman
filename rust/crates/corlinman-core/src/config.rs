@@ -1234,11 +1234,22 @@ pub struct EvolutionShadowConfig {
     pub enabled: bool,
     pub eval_set_dir: PathBuf,
     pub sandbox_kind: ShadowSandboxKind,
+    /// Phase 4 W1 4-1C: tunables for the docker-backed sandbox. Only
+    /// consulted when `sandbox_kind = "docker"`. The defaults pin the
+    /// reserved image tag and conservative resource caps; operators
+    /// who run the sandbox in production should pin to a SHA-tagged
+    /// image rather than `:v1` once the build pipeline publishes
+    /// reproducible digests.
+    #[serde(default)]
+    pub sandbox: SandboxBackendConfig,
 }
 
 /// Which sandbox the ShadowTester runs proposals in. `InProcess` is the
-/// only Phase 3 variant; `Docker` is reserved for Phase 4 (prompt /
-/// tool-policy kinds need stronger isolation than in-process gives).
+/// Phase 3 default. `Docker` is the Phase 4 W1 4-1C addition; required
+/// for the high-risk EvolutionKinds (`prompt_template`, `tool_policy`,
+/// `new_skill`) whose evals can call out to a live LLM and therefore
+/// need network / cgroup / drop-all-caps isolation that an in-process
+/// simulator can't provide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ShadowSandboxKind {
@@ -1255,6 +1266,40 @@ impl Default for EvolutionShadowConfig {
             enabled: false,
             eval_set_dir: PathBuf::from("/data/eval/evolution"),
             sandbox_kind: ShadowSandboxKind::InProcess,
+            sandbox: SandboxBackendConfig::default(),
+        }
+    }
+}
+
+/// Phase 4 W1 4-1C: tunables for the docker-backed sandbox.
+///
+/// `image` is the tag the docker backend spawns. v1 ships
+/// `ghcr.io/ymylive/corlinman-sandbox:v1` as the placeholder;
+/// operators who want a SHA-pinned reference can override it (the
+/// `corlinman-sandbox` binary is the only thing in the image, so
+/// rebuilds are deterministic).
+///
+/// `mem_mb` and `timeout_secs` map directly to `docker run`'s
+/// `--memory` and the per-call wall clock. `network` is reserved
+/// for the future `--network=host` opt-out — v1 always uses
+/// `--network=none` regardless of this value, so the field is
+/// declarative documentation only.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxBackendConfig {
+    pub image: String,
+    pub network: String,
+    pub mem_mb: u64,
+    pub timeout_secs: u64,
+}
+
+impl Default for SandboxBackendConfig {
+    fn default() -> Self {
+        Self {
+            image: "ghcr.io/ymylive/corlinman-sandbox:v1".to_string(),
+            network: "none".to_string(),
+            mem_mb: 512,
+            timeout_secs: 60,
         }
     }
 }
