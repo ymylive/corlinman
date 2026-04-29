@@ -54,11 +54,21 @@ class ConsolidationConfig:
     ``--config`` flag on the CLI. ``enabled=false`` short-circuits the
     run with a clear log line so flipping the master switch off doesn't
     require touching the scheduler entry.
+
+    Phase 3.1 (B-4): ``cooling_period_hours`` defends against the
+    cold-start cliff. After the W3-A migration every legacy row sits
+    at ``decay_score = 1.0`` (the column default), so a naive
+    "decay_score >= threshold" filter would promote the first 50
+    chunks the SELECT returns on the very first cron tick. The
+    cooling period requires a chunk to have been recalled at least
+    once AND for that recall to be older than the cooling window
+    before it qualifies — burst-read material gets time to settle.
     """
 
     enabled: bool = True
     promotion_threshold: float = 0.65
     max_promotions_per_run: int = 50
+    cooling_period_hours: float = 24.0
 
 
 @dataclass
@@ -99,10 +109,13 @@ async def consolidation_run_once(
         logger.info("consolidation: master switch disabled; nothing to do")
         return summary
 
+    now_ms = int(time.time() * 1_000)
     candidates = await _list_promotion_candidates(
         kb_db_path,
         threshold=config.promotion_threshold,
         limit=config.max_promotions_per_run,
+        cooling_period_hours=config.cooling_period_hours,
+        now_ms=now_ms,
     )
     summary.candidates_found = len(candidates)
     if not candidates:
@@ -113,7 +126,6 @@ async def consolidation_run_once(
         )
         return summary
 
-    now_ms = int(time.time() * 1_000)
     day_prefix = _format_day_prefix(now_ms)
 
     async with aiosqlite.connect(evolution_db_path) as conn:
@@ -175,6 +187,8 @@ async def _list_promotion_candidates(
     *,
     threshold: float,
     limit: int,
+    cooling_period_hours: float,
+    now_ms: int,
 ) -> list[tuple[int, float]]:
     """Query the kb for rows whose decay_score >= threshold and whose
     namespace is not yet ``consolidated``. Ordered by decay_score desc.
@@ -182,34 +196,66 @@ async def _list_promotion_candidates(
     Returns ``[(chunk_id, decay_score), ...]``. Uses ``mode=ro`` because
     the consolidation job never writes to kb.sqlite — the
     EvolutionApplier owns that mutation.
+
+    Phase 3.1 (B-4): a chunk must have been recalled at least once
+    AND the recall must be older than ``cooling_period_hours`` to
+    qualify. Mirrors the Rust-side
+    ``SqliteStore::list_promotion_candidates`` guard so both consumer
+    paths behave identically (the Rust path is what tests exercise
+    directly; this Python path is what the scheduler hits).
     """
     if limit <= 0:
         return []
+    cooling_ms = (
+        int(cooling_period_hours * 3_600_000)
+        if cooling_period_hours and cooling_period_hours > 0
+        else 0
+    )
+    cutoff_ms = max(0, now_ms - cooling_ms)
     uri = f"file:{kb_path}?mode=ro"
     async with aiosqlite.connect(uri, uri=True) as conn:
         cursor = await conn.execute(
             """SELECT id, decay_score FROM chunks
-               WHERE decay_score >= ? AND namespace != ?
+               WHERE decay_score >= ?
+                 AND namespace != ?
+                 AND last_recalled_at IS NOT NULL
+                 AND last_recalled_at <= ?
                ORDER BY decay_score DESC, id ASC
                LIMIT ?""",
-            (float(threshold), CONSOLIDATED_NAMESPACE, int(limit)),
+            (float(threshold), CONSOLIDATED_NAMESPACE, int(cutoff_ms), int(limit)),
         )
         rows = await cursor.fetchall()
         await cursor.close()
     return [(int(r[0]), float(r[1])) for r in rows]
 
 
+# Statuses that should keep blocking a re-proposal of the same chunk.
+# `denied` and `rolled_back` are intentionally excluded so an operator
+# decision can be revisited once the chunk's signal recovers — Phase 3
+# W3-A's status-agnostic dedup permanently silenced any chunk an
+# operator had ever rejected, which makes "类人 forgetting" a one-way
+# door.
+_DEDUP_BLOCKING_STATUSES: tuple[str, ...] = ("pending", "approved", "applied")
+
+
 async def _existing_consolidate_targets(conn: aiosqlite.Connection) -> set[str]:
-    """Pull every ``memory_op`` target that's a ``consolidate_chunk:`` —
-    used for dedup so a second run doesn't double-file proposals on the
-    same chunks. Status-agnostic on purpose: an in-flight ``pending``
-    proposal still counts.
+    """Pull every in-flight ``memory_op`` target that's a
+    ``consolidate_chunk:`` — used for dedup so a second run doesn't
+    double-file proposals on the same chunks.
+
+    Phase 3.1 (B-2): only ``pending`` / ``approved`` / ``applied``
+    proposals block re-filing. A ``denied`` or ``rolled_back`` target
+    becomes eligible again on the next run, so an operator's reject
+    isn't a permanent ban — the chunk has to re-clear the score +
+    cooling guards before it gets back into the candidate set anyway.
     """
-    cursor = await conn.execute(
+    placeholders = ",".join("?" for _ in _DEDUP_BLOCKING_STATUSES)
+    sql = (
         "SELECT target FROM evolution_proposals "
-        "WHERE kind = ? AND target LIKE 'consolidate_chunk:%'",
-        (KIND_MEMORY_OP,),
+        "WHERE kind = ? AND target LIKE 'consolidate_chunk:%' "
+        f"AND status IN ({placeholders})"
     )
+    cursor = await conn.execute(sql, (KIND_MEMORY_OP, *_DEDUP_BLOCKING_STATUSES))
     rows = await cursor.fetchall()
     await cursor.close()
     return {str(r[0]) for r in rows}

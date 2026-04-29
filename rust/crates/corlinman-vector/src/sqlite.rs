@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     decay_score REAL NOT NULL DEFAULT 1.0,
     consolidated_at INTEGER,
     last_recalled_at INTEGER,
+    created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 );
 
@@ -1033,17 +1034,21 @@ impl SqliteStore {
     // ---- decay + consolidation (Phase 3 W3-A) ----------------------------
 
     /// Apply read-time exponential decay to a list of `(chunk_id, score)`
-    /// pairs. Looks up `decay_score`, `last_recalled_at`, and `namespace`
-    /// for each id, computes the multiplicative decay factor via
-    /// [`crate::decay::apply_decay`], and returns scores multiplied by the
-    /// chunk's stored `decay_score` and the decay factor.
+    /// pairs. Looks up `decay_score`, `last_recalled_at`, `created_at`,
+    /// and `namespace` for each id, computes the multiplicative decay
+    /// factor via [`crate::decay::apply_decay`], and returns scores
+    /// multiplied by the chunk's stored `decay_score` and the decay factor.
     ///
     /// Semantics:
     /// - Unknown ids are passed through unchanged (defensive — the search
     ///   path may still hold the id from a prior over-fetch).
-    /// - `last_recalled_at IS NULL` ⇒ age = 0 ⇒ factor = 1.0. The first
-    ///   recall stamps `last_recalled_at` so subsequent decay is measured
-    ///   from that point.
+    /// - Phase 3.1 (B-1): age zero-point is
+    ///   `COALESCE(last_recalled_at, created_at)`. A chunk that was
+    ///   inserted but never recalled still ages from its insertion
+    ///   timestamp — without this, a sleeping row's stored
+    ///   `decay_score = 1.0` would never decay and `list_promotion_candidates`
+    ///   would happily flag it for consolidation despite no one ever
+    ///   reading it.
     /// - `namespace = 'consolidated'` ⇒ factor = 1.0 (immune), per the
     ///   decay-module contract.
     ///
@@ -1063,7 +1068,7 @@ impl SqliteStore {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT id, namespace, decay_score, last_recalled_at \
+            "SELECT id, namespace, decay_score, last_recalled_at, created_at \
              FROM chunks WHERE id IN ({placeholders})"
         );
         let mut q = sqlx::query(&sql);
@@ -1074,6 +1079,11 @@ impl SqliteStore {
             .fetch_all(&self.pool)
             .await
             .context("apply_decay_to_scored: fetch metadata")?;
+        // Per-id metadata: (namespace, stored_decay, age_anchor_ms). The
+        // anchor is `COALESCE(last_recalled_at, created_at)` resolved
+        // here in Rust rather than SQL so the legacy-NULL-created_at
+        // fallback (extremely rare post-migration; only races) stays
+        // visible to tracing.
         let mut meta: std::collections::HashMap<i64, (String, f32, Option<i64>)> =
             std::collections::HashMap::with_capacity(rows.len());
         for r in rows {
@@ -1081,18 +1091,24 @@ impl SqliteStore {
             let ns: String = r.get("namespace");
             let stored: f32 = r.get::<f64, _>("decay_score") as f32;
             let last: Option<i64> = r.get("last_recalled_at");
-            meta.insert(id, (ns, stored, last));
+            let created: Option<i64> = r.get("created_at");
+            meta.insert(id, (ns, stored, last.or(created)));
         }
 
         let mut out: Vec<(i64, f32)> = Vec::with_capacity(scored.len());
         for (id, score) in scored {
             match meta.get(id) {
-                Some((ns, stored_decay, last_recalled_at)) => {
-                    let age_hours = match last_recalled_at {
-                        Some(last) => {
-                            let delta_ms = (now_ms - *last).max(0);
+                Some((ns, stored_decay, anchor_ms)) => {
+                    let age_hours = match anchor_ms {
+                        Some(anchor) => {
+                            let delta_ms = (now_ms - *anchor).max(0);
                             (delta_ms as f64) / 3_600_000.0
                         }
+                        // Both `last_recalled_at` and `created_at` NULL
+                        // ⇒ legacy row that escaped backfill (only
+                        // possible if a writer raced ALTER TABLE).
+                        // Treat as age=0 to avoid panicking the read
+                        // path; the next migration boot will fix it.
                         None => 0.0,
                     };
                     let factor = crate::decay::apply_decay(*stored_decay, age_hours, ns, cfg);
@@ -1182,27 +1198,33 @@ impl SqliteStore {
     }
 
     /// Reverse of [`Self::promote_to_consolidated`]: restore the chunk's
-    /// prior namespace and clear `consolidated_at`. Used by the
-    /// EvolutionApplier's revert path so a `consolidate_chunk` proposal
-    /// can be undone byte-for-byte.
+    /// prior namespace, prior `consolidated_at`, and prior decay score.
+    /// Used by the EvolutionApplier's revert path so a `consolidate_chunk`
+    /// proposal can be undone byte-for-byte.
     ///
-    /// Caller supplies the prior namespace captured at apply time
-    /// (carried in `inverse_diff`). Returns the rowcount actually
-    /// flipped.
+    /// Phase 3.1 (B-3): callers supply `prior_consolidated_at` so a
+    /// chunk that was previously promoted, then demoted, then promoted
+    /// again still keeps its first-promotion timestamp on the second
+    /// demote. The previous signature unconditionally NULL'd the column,
+    /// which silently dropped that audit-trail bit. Pass `None` for
+    /// chunks that had never been consolidated before this revert
+    /// (the common case).
     pub async fn demote_from_consolidated(
         &self,
         chunk_id: i64,
         prior_namespace: &str,
         prior_decay_score: f32,
+        prior_consolidated_at: Option<i64>,
     ) -> Result<u32> {
         let res = sqlx::query(
             "UPDATE chunks SET \
                 namespace = ?, \
-                consolidated_at = NULL, \
+                consolidated_at = ?, \
                 decay_score = ? \
              WHERE id = ?",
         )
         .bind(prior_namespace)
+        .bind(prior_consolidated_at)
         .bind(prior_decay_score as f64)
         .bind(chunk_id)
         .execute(&self.pool)
@@ -1216,22 +1238,52 @@ impl SqliteStore {
     /// strongest candidates land first when the consolidation job caps
     /// `limit`.
     ///
+    /// Phase 3.1 (B-4): a chunk is only eligible once it has actually
+    /// been recalled (`last_recalled_at IS NOT NULL`) AND the recall is
+    /// older than `cooling_period_hours`. Without these guards, the
+    /// first cron tick after the W3-A migration would promote up to
+    /// `max_promotions_per_run` random chunks — every legacy row gets
+    /// `decay_score = 1.0` from the column default, and 1.0 ≥ 0.65 by
+    /// definition. The cooling period also avoids consolidating a
+    /// burst-recalled chunk before its score has settled.
+    ///
     /// Used by the consolidation job to assemble the candidate list it
     /// then files as `memory_op` proposals — the actual promotion goes
     /// through the EvolutionApplier so the audit trail stays in lockstep
     /// with every other kb mutation.
-    pub async fn list_promotion_candidates(&self, threshold: f32, limit: i64) -> Result<Vec<i64>> {
+    pub async fn list_promotion_candidates(
+        &self,
+        threshold: f32,
+        limit: i64,
+        cooling_period_hours: f64,
+        now_ms: i64,
+    ) -> Result<Vec<i64>> {
         if limit <= 0 {
             return Ok(Vec::new());
         }
+        // Negative / non-finite cooling periods would let a buggy
+        // config bypass the cold-start guard. Clamp to 0 so callers
+        // always get the "must have been recalled at least once"
+        // floor — operators turning the cooling period off entirely
+        // is fine, but going negative is never intended.
+        let cooling_ms = if cooling_period_hours.is_finite() && cooling_period_hours > 0.0 {
+            (cooling_period_hours * 3_600_000.0) as i64
+        } else {
+            0
+        };
+        let cutoff_ms = now_ms.saturating_sub(cooling_ms);
         let rows = sqlx::query(
             "SELECT id FROM chunks \
-             WHERE decay_score >= ? AND namespace != ? \
+             WHERE decay_score >= ? \
+               AND namespace != ? \
+               AND last_recalled_at IS NOT NULL \
+               AND last_recalled_at <= ? \
              ORDER BY decay_score DESC, id ASC \
              LIMIT ?",
         )
         .bind(threshold as f64)
         .bind(crate::decay::CONSOLIDATED_NAMESPACE)
+        .bind(cutoff_ms)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -1279,13 +1331,28 @@ pub struct ChunkDecayState {
 /// columns on legacy v6 DBs. Uses `pragma_table_info` to skip rows
 /// that are already there so a re-open of an already-migrated file
 /// is a no-op.
+///
+/// Phase 3.1 (B-1): added `created_at` so the read-time decay age
+/// has a non-NULL fallback for chunks that have never been recalled —
+/// otherwise `apply_decay_to_scored` reads a NULL `last_recalled_at`
+/// as age=0, which makes a freshly-inserted chunk's score stick at
+/// 1.0 forever and lets `list_promotion_candidates` promote material
+/// nobody has ever read.
 async fn ensure_decay_columns(pool: &SqlitePool) -> Result<()> {
     // (column_name, type + default fragment)
     let columns: &[(&str, &str)] = &[
         ("decay_score", "REAL NOT NULL DEFAULT 1.0"),
         ("consolidated_at", "INTEGER"),
         ("last_recalled_at", "INTEGER"),
+        // SQLite ALTER TABLE ADD COLUMN can't take a non-constant
+        // DEFAULT, so we add the column nullable and backfill below.
+        // Fresh DBs land via SCHEMA_SQL with the strftime-based
+        // default in place; legacy v6 rows get populated with
+        // `last_recalled_at` (preferred) or "now" (for chunks that
+        // have never been recalled either).
+        ("created_at", "INTEGER"),
     ];
+    let mut backfill_created_at = false;
     for (name, type_decl) in columns {
         let exists: Option<i64> =
             sqlx::query_scalar("SELECT 1 FROM pragma_table_info('chunks') WHERE name = ?1")
@@ -1301,6 +1368,24 @@ async fn ensure_decay_columns(pool: &SqlitePool) -> Result<()> {
             .execute(pool)
             .await
             .with_context(|| format!("ALTER TABLE chunks ADD COLUMN {name}"))?;
+        if *name == "created_at" {
+            backfill_created_at = true;
+        }
+    }
+    if backfill_created_at {
+        // Backfill legacy rows. `last_recalled_at` is the best proxy
+        // for "when did this chunk last have a real signal"; for rows
+        // that never were recalled either, anchor to "now" so the
+        // decay age starts from migration time rather than 1970.
+        let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+        sqlx::query(
+            "UPDATE chunks SET created_at = COALESCE(last_recalled_at, ?1) \
+             WHERE created_at IS NULL",
+        )
+        .bind(now_ms)
+        .execute(pool)
+        .await
+        .context("backfill chunks.created_at on legacy rows")?;
     }
     Ok(())
 }
@@ -1716,13 +1801,15 @@ mod tests {
 
     #[tokio::test]
     async fn schema_carries_decay_columns_on_fresh_db() {
-        // Freshly opened DB exposes the three new columns; migration
-        // path doesn't fire (column already in SCHEMA_SQL) but the
-        // assertion still pins the public surface.
+        // Freshly opened DB exposes the four decay-related columns
+        // (Phase 3.1 added `created_at` so age has a non-NULL fallback
+        // when last_recalled_at IS NULL). Migration path doesn't fire
+        // (columns already in SCHEMA_SQL) but the assertion still pins
+        // the public surface.
         let (store, _tmp) = fresh_store().await;
         let row = sqlx::query(
             "SELECT name FROM pragma_table_info('chunks') \
-             WHERE name IN ('decay_score', 'consolidated_at', 'last_recalled_at') \
+             WHERE name IN ('decay_score', 'consolidated_at', 'last_recalled_at', 'created_at') \
              ORDER BY name",
         )
         .fetch_all(store.pool())
@@ -1736,6 +1823,7 @@ mod tests {
             names,
             vec![
                 "consolidated_at".to_string(),
+                "created_at".to_string(),
                 "decay_score".to_string(),
                 "last_recalled_at".to_string()
             ]
@@ -1753,8 +1841,9 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_decay_columns_backfills_legacy_v6_db() {
-        // Simulate a pre-W3-A v6 file: drop the three columns, re-run
-        // `ensure_decay_columns`, confirm they reappear.
+        // Simulate a pre-W3-A v6 file: drop the decay columns, re-run
+        // `ensure_decay_columns`, confirm they reappear (Phase 3.1
+        // added `created_at` to the set, so we now check four).
         let (store, _tmp) = fresh_store().await;
         sqlx::raw_sql(
             "DROP TABLE chunks_fts; \
@@ -1777,7 +1866,7 @@ mod tests {
         .unwrap();
         let cnt: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pragma_table_info('chunks') \
-             WHERE name IN ('decay_score', 'consolidated_at', 'last_recalled_at')",
+             WHERE name IN ('decay_score', 'consolidated_at', 'last_recalled_at', 'created_at')",
         )
         .fetch_one(store.pool())
         .await
@@ -1788,12 +1877,115 @@ mod tests {
 
         let cnt: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pragma_table_info('chunks') \
-             WHERE name IN ('decay_score', 'consolidated_at', 'last_recalled_at')",
+             WHERE name IN ('decay_score', 'consolidated_at', 'last_recalled_at', 'created_at')",
         )
         .fetch_one(store.pool())
         .await
         .unwrap();
-        assert_eq!(cnt, 3, "all three columns added");
+        assert_eq!(cnt, 4, "all four columns added");
+    }
+
+    /// Phase 3.1 (B-1): legacy rows that existed before the migration
+    /// must end up with a sane `created_at` so the decay age zero-point
+    /// has a non-NULL fallback. The backfill prefers `last_recalled_at`
+    /// when present; otherwise it stamps "now" (we anchor below to a
+    /// known timestamp so the assertion is deterministic).
+    #[tokio::test]
+    async fn ensure_decay_columns_backfills_created_at_on_legacy_rows() {
+        let (store, _tmp) = fresh_store().await;
+        // Strip created_at while keeping the other Phase 3 W3-A columns
+        // — that's the realistic upgrade scenario from the W3-A drop.
+        sqlx::raw_sql(
+            "DROP TABLE chunks_fts; \
+             CREATE TABLE chunks_legacy AS SELECT id, file_id, chunk_index, content, vector, namespace, decay_score, consolidated_at, last_recalled_at FROM chunks; \
+             DROP TABLE chunks; \
+             CREATE TABLE chunks ( \
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                 file_id INTEGER NOT NULL, \
+                 chunk_index INTEGER NOT NULL, \
+                 content TEXT NOT NULL, \
+                 vector BLOB, \
+                 namespace TEXT NOT NULL DEFAULT 'general', \
+                 decay_score REAL NOT NULL DEFAULT 1.0, \
+                 consolidated_at INTEGER, \
+                 last_recalled_at INTEGER, \
+                 FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE \
+             ); \
+             INSERT INTO chunks SELECT * FROM chunks_legacy; \
+             DROP TABLE chunks_legacy;",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        // Two legacy rows: one with last_recalled_at, one without.
+        sqlx::query(
+            "INSERT INTO files(path, diary_name, checksum, mtime, size) \
+             VALUES ('/legacy.md', 'd', 'h', 0, 0)",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunks(file_id, chunk_index, content, namespace, last_recalled_at) \
+             VALUES (1, 0, 'recalled', 'general', 12345), \
+                    (1, 1, 'never', 'general', NULL)",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        ensure_decay_columns(store.pool()).await.unwrap();
+
+        let row: (i64, Option<i64>) =
+            sqlx::query_as("SELECT id, created_at FROM chunks WHERE chunk_index = 0")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            row.1,
+            Some(12345),
+            "recalled row: created_at = last_recalled_at"
+        );
+
+        let row: (i64, Option<i64>) =
+            sqlx::query_as("SELECT id, created_at FROM chunks WHERE chunk_index = 1")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert!(
+            row.1.is_some(),
+            "never-recalled row: created_at filled with now()"
+        );
+    }
+
+    /// Phase 3.1 (B-1): the read-time decay path must use `created_at`
+    /// as the age zero-point when `last_recalled_at IS NULL`. Without
+    /// this, a never-recalled chunk's score sticks at 1.0 forever and
+    /// the "类人 forgetting" promise breaks for fresh material.
+    #[tokio::test]
+    async fn apply_decay_to_scored_uses_created_at_when_never_recalled() {
+        let (store, _tmp) = fresh_store().await;
+        let id = seed_decayable_chunk(&store, "general").await;
+        let cfg = crate::decay::DecayConfig::default();
+        // Anchor created_at to "one half-life ago" so the expected
+        // factor is exactly 0.5.
+        let half_life_ms = (cfg.half_life_hours * 3_600_000.0) as i64;
+        let now_ms = 10_000_000_000_i64;
+        sqlx::query("UPDATE chunks SET created_at = ?1, last_recalled_at = NULL WHERE id = ?2")
+            .bind(now_ms - half_life_ms)
+            .bind(id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let out = store
+            .apply_decay_to_scored(&[(id, 0.8)], &cfg, now_ms)
+            .await
+            .unwrap();
+        assert!(
+            (out[0].1 - 0.4).abs() < 1e-3,
+            "expected ~0.4 (0.8 * 0.5), got {}",
+            out[0].1
+        );
     }
 
     #[tokio::test]
@@ -1987,6 +2179,19 @@ mod tests {
         assert_eq!(first, after, "consolidated_at must be sticky");
     }
 
+    /// Helper: stamp `last_recalled_at` so a chunk satisfies the
+    /// Phase 3.1 (B-4) cooling-period guard. Tests that pre-date that
+    /// guard used to assume every fresh chunk was eligible — wiring the
+    /// stamp explicitly keeps the assertion intent obvious.
+    async fn stamp_recalled(store: &SqliteStore, id: i64, recalled_ms: i64) {
+        sqlx::query("UPDATE chunks SET last_recalled_at = ?1 WHERE id = ?2")
+            .bind(recalled_ms)
+            .bind(id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn list_promotion_candidates_filters_by_threshold_and_namespace() {
         let (store, _tmp) = fresh_store().await;
@@ -2004,18 +2209,81 @@ mod tests {
             .await
             .unwrap();
 
-        let ids = store.list_promotion_candidates(0.65, 50).await.unwrap();
+        // Stamp recalls in the distant past so cooling period (24h
+        // default) is satisfied for every candidate.
+        let recalled = 1_000_i64;
+        let now_ms = recalled + (24 + 1) * 3_600_000;
+        for id in [high, low, consolidated] {
+            stamp_recalled(&store, id, recalled).await;
+        }
+        let ids = store
+            .list_promotion_candidates(0.65, 50, 24.0, now_ms)
+            .await
+            .unwrap();
         assert_eq!(ids, vec![high]);
     }
 
     #[tokio::test]
     async fn list_promotion_candidates_respects_limit() {
         let (store, _tmp) = fresh_store().await;
+        let mut ids = Vec::new();
         for _ in 0..5 {
-            seed_decayable_chunk(&store, "general").await;
+            ids.push(seed_decayable_chunk(&store, "general").await);
         }
-        let out = store.list_promotion_candidates(0.0, 3).await.unwrap();
+        let recalled = 1_000_i64;
+        let now_ms = recalled + (24 + 1) * 3_600_000;
+        for id in &ids {
+            stamp_recalled(&store, *id, recalled).await;
+        }
+        let out = store
+            .list_promotion_candidates(0.0, 3, 24.0, now_ms)
+            .await
+            .unwrap();
         assert_eq!(out.len(), 3);
+    }
+
+    /// Phase 3.1 (B-4): chunks that have never been recalled must NOT
+    /// be promotion candidates, no matter how high their default
+    /// decay_score. Pins the cold-start guard against the post-migration
+    /// scenario where every legacy row sits at decay_score=1.0.
+    #[tokio::test]
+    async fn list_promotion_candidates_excludes_never_recalled() {
+        let (store, _tmp) = fresh_store().await;
+        let _id = seed_decayable_chunk(&store, "general").await;
+        // No stamp_recalled — last_recalled_at IS NULL.
+        let out = store
+            .list_promotion_candidates(0.0, 50, 24.0, 1_000_000_000_000)
+            .await
+            .unwrap();
+        assert!(
+            out.is_empty(),
+            "never-recalled chunks must not be promotion candidates, got {out:?}"
+        );
+    }
+
+    /// Phase 3.1 (B-4): chunks recalled inside the cooling period must
+    /// stay out of the candidate list. Lets a burst-read chunk's score
+    /// settle before consolidation locks it in.
+    #[tokio::test]
+    async fn list_promotion_candidates_respects_cooling_period() {
+        let (store, _tmp) = fresh_store().await;
+        let id = seed_decayable_chunk(&store, "general").await;
+        let now_ms: i64 = 100 * 3_600_000;
+        // Recalled 5 hours ago, cooling = 24h ⇒ ineligible.
+        stamp_recalled(&store, id, now_ms - 5 * 3_600_000).await;
+        let out = store
+            .list_promotion_candidates(0.0, 50, 24.0, now_ms)
+            .await
+            .unwrap();
+        assert!(out.is_empty());
+
+        // Recalled 25h ago ⇒ now eligible.
+        stamp_recalled(&store, id, now_ms - 25 * 3_600_000).await;
+        let out = store
+            .list_promotion_candidates(0.0, 50, 24.0, now_ms)
+            .await
+            .unwrap();
+        assert_eq!(out, vec![id]);
     }
 
     #[tokio::test]
@@ -2031,7 +2299,12 @@ mod tests {
 
         store.promote_to_consolidated(&[id]).await.unwrap();
         let n = store
-            .demote_from_consolidated(id, &prior.namespace, prior.decay_score)
+            .demote_from_consolidated(
+                id,
+                &prior.namespace,
+                prior.decay_score,
+                prior.consolidated_at,
+            )
             .await
             .unwrap();
         assert_eq!(n, 1);
@@ -2040,5 +2313,42 @@ mod tests {
         assert_eq!(state.namespace, "general");
         assert!(state.consolidated_at.is_none());
         assert!((state.decay_score - 0.55).abs() < 1e-5);
+    }
+
+    /// Phase 3.1 (B-3): a chunk that was previously promoted, demoted,
+    /// then promoted again must keep its original first-promotion
+    /// timestamp on the second demote. Pins the new
+    /// `prior_consolidated_at` parameter end-to-end at the SQL layer.
+    #[tokio::test]
+    async fn demote_from_consolidated_preserves_prior_consolidated_at() {
+        let (store, _tmp) = fresh_store().await;
+        let id = seed_decayable_chunk(&store, "general").await;
+        // First promotion stamps consolidated_at.
+        store.promote_to_consolidated(&[id]).await.unwrap();
+        let first_promotion = store
+            .get_chunk_decay_state(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .consolidated_at
+            .unwrap();
+        // Demote, then re-promote — second promotion COALESCEs to the
+        // existing consolidated_at, no change. Demote a second time
+        // and feed the captured first_promotion ts back in.
+        store
+            .demote_from_consolidated(id, "general", 1.0, None)
+            .await
+            .unwrap();
+        store.promote_to_consolidated(&[id]).await.unwrap();
+        store
+            .demote_from_consolidated(id, "general", 1.0, Some(first_promotion))
+            .await
+            .unwrap();
+        let after = store.get_chunk_decay_state(id).await.unwrap().unwrap();
+        assert_eq!(
+            after.consolidated_at,
+            Some(first_promotion),
+            "prior_consolidated_at must round-trip"
+        );
     }
 }

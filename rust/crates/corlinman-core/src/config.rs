@@ -1474,6 +1474,17 @@ pub struct MemoryConsolidationConfig {
     /// threshold is set too low.
     #[validate(range(min = 1, max = 10_000))]
     pub max_promotions_per_run: u32,
+    /// Phase 3.1 (B-4): minimum age (in hours since the last recall)
+    /// before a chunk is eligible for promotion. Defends against the
+    /// post-W3-A cold-start cliff — every legacy row sits at
+    /// `decay_score = 1.0` from the column default, so without this
+    /// guard the first cron tick after the migration would promote
+    /// `max_promotions_per_run` random chunks. The cooling window
+    /// also lets a burst-read chunk's score settle before
+    /// consolidation freezes it. 24h matches the typical "diurnal
+    /// recall pattern" — anything still hot tomorrow is real signal.
+    #[validate(range(min = 0.0, max = 8760.0))]
+    pub cooling_period_hours: f64,
 }
 
 impl Default for MemoryConsolidationConfig {
@@ -1483,6 +1494,7 @@ impl Default for MemoryConsolidationConfig {
             schedule: "0 0 5 * * * *".into(),
             promotion_threshold: 0.65,
             max_promotions_per_run: 50,
+            cooling_period_hours: 24.0,
         }
     }
 }

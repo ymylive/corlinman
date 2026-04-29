@@ -30,19 +30,26 @@ def _seed_chunk_with_decay(
     content: str,
     decay_score: float,
     namespace: str = "general",
+    last_recalled_at: int | None = 1,
 ) -> int:
     """Insert one chunk and stamp its ``decay_score`` to a fixed value.
 
     Uses the public ``insert_chunk`` from conftest (which writes a
     placeholder ``files`` row and namespace-default chunk row) then
     flips ``decay_score`` directly. Returns the chunk id.
+
+    Phase 3.1 (B-4): also stamps ``last_recalled_at`` (default: 1ms
+    after the epoch, comfortably outside the 24h cooling window for
+    any sensible ``now_ms``). Pass ``last_recalled_at=None`` to
+    simulate a chunk that has never been recalled and therefore
+    must NOT show up as a promotion candidate.
     """
     chunk_id = insert_chunk(kb_path, content=content, namespace=namespace)
     conn = sqlite3.connect(kb_path)
     try:
         conn.execute(
-            "UPDATE chunks SET decay_score = ? WHERE id = ?",
-            (decay_score, chunk_id),
+            "UPDATE chunks SET decay_score = ?, last_recalled_at = ? WHERE id = ?",
+            (decay_score, last_recalled_at, chunk_id),
         )
         conn.commit()
     finally:
@@ -256,6 +263,123 @@ def test_consolidation_zero_max_returns_empty(
     )
     assert summary.candidates_found == 0
     assert summary.proposals_written == 0
+
+
+def test_consolidation_excludes_never_recalled_chunks(
+    kb_db: Path,
+    evolution_db: Path,
+) -> None:
+    """Phase 3.1 (B-4): a chunk with ``last_recalled_at IS NULL`` must
+    NOT be a candidate even though its decay_score is >= threshold —
+    otherwise the very first cron tick after the W3-A migration would
+    promote up to ``max_promotions_per_run`` random chunks (every
+    legacy row defaulted to decay_score=1.0).
+    """
+    _seed_chunk_with_decay(
+        kb_db,
+        content="never read but high default score",
+        decay_score=1.0,
+        last_recalled_at=None,
+    )
+    summary = asyncio.run(
+        consolidation_run_once(
+            config=ConsolidationConfig(),
+            kb_db_path=kb_db,
+            evolution_db_path=evolution_db,
+        )
+    )
+    assert summary.candidates_found == 0
+    assert summary.proposals_written == 0
+    assert _list_proposals(evolution_db) == []
+
+
+def test_consolidation_respects_cooling_period(
+    kb_db: Path,
+    evolution_db: Path,
+) -> None:
+    """Phase 3.1 (B-4): a chunk recalled inside the cooling window must
+    stay out of the candidate list. Lets a burst-read chunk's score
+    settle before consolidation locks it in.
+    """
+    import time as _time
+
+    now_ms = int(_time.time() * 1_000)
+    fresh = _seed_chunk_with_decay(
+        kb_db,
+        content="just-now recall",
+        decay_score=0.9,
+        last_recalled_at=now_ms - 60_000,  # 1 minute ago
+    )
+    cold = _seed_chunk_with_decay(
+        kb_db,
+        content="day-old recall",
+        decay_score=0.9,
+        last_recalled_at=now_ms - 30 * 3_600_000,  # 30h ago
+    )
+    cfg = ConsolidationConfig(cooling_period_hours=24.0)
+    summary = asyncio.run(
+        consolidation_run_once(
+            config=cfg,
+            kb_db_path=kb_db,
+            evolution_db_path=evolution_db,
+        )
+    )
+    assert summary.candidates_found == 1
+    targets = {p[2] for p in _list_proposals(evolution_db)}
+    assert targets == {f"consolidate_chunk:{cold}"}
+    # Sanity: the freshly-recalled chunk is NOT in the proposal set.
+    assert f"consolidate_chunk:{fresh}" not in targets
+
+
+def test_consolidation_dedup_skips_denied_proposals(
+    kb_db: Path,
+    evolution_db: Path,
+) -> None:
+    """Phase 3.1 (B-2): a previously-denied (or rolled-back) consolidate
+    proposal must NOT permanently lock the chunk out. The dedup query
+    only counts in-flight statuses (pending / approved / applied) so a
+    chunk whose previous proposal was rejected can re-enter the
+    candidate set when its score recovers.
+    """
+    cid = _seed_chunk_with_decay(kb_db, content="contested", decay_score=0.9)
+    # Hand-craft a denied proposal at the dedup key the run would use.
+    conn = sqlite3.connect(evolution_db)
+    try:
+        conn.execute(
+            """INSERT INTO evolution_proposals
+                 (id, kind, target, diff, reasoning, risk, budget_cost, status,
+                  shadow_metrics, signal_ids, trace_ids,
+                  created_at, decided_at, decided_by, applied_at, rollback_of)
+               VALUES ('evol-old-denied', 'memory_op', ?, '', 'old', 'low', 0,
+                       'denied', NULL, '[]', '[]', 1, 2, 'op', NULL, NULL)""",
+            (f"consolidate_chunk:{cid}",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = asyncio.run(
+        consolidation_run_once(
+            config=ConsolidationConfig(),
+            kb_db_path=kb_db,
+            evolution_db_path=evolution_db,
+        )
+    )
+    assert summary.proposals_written == 1, "denied proposal must not block re-filing"
+    assert summary.skipped_existing == 0
+    targets = [p[2] for p in _list_proposals(evolution_db)]
+    assert targets.count(f"consolidate_chunk:{cid}") == 2
+
+    # Sanity: a pending proposal still blocks.
+    summary = asyncio.run(
+        consolidation_run_once(
+            config=ConsolidationConfig(),
+            kb_db_path=kb_db,
+            evolution_db_path=evolution_db,
+        )
+    )
+    assert summary.proposals_written == 0
+    assert summary.skipped_existing == 1
 
 
 @pytest.mark.parametrize("threshold", [0.0, 0.5, 0.99])

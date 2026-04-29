@@ -415,11 +415,18 @@ impl EvolutionApplier {
                     .as_bytes(),
                 );
                 let after_sha = sha256_hex(format!("ns=consolidated;chunk_id={id}").as_bytes());
+                // Phase 3.1 (B-3): persist `prior_consolidated_at` so a
+                // demote→re-promote→demote cycle keeps the original
+                // first-promotion timestamp. The previous
+                // `inverse_diff` shape lost it (revert hard-coded NULL),
+                // which silently corrupted the audit trail any time a
+                // chunk bounced through consolidation more than once.
                 let inverse_diff = json!({
                     "action": "demote_chunk",
                     "chunk_id": id,
                     "prior_namespace": prior.namespace,
                     "prior_decay_score": prior.decay_score,
+                    "prior_consolidated_at": prior.consolidated_at,
                 })
                 .to_string();
                 Ok(MutationOutcome {
@@ -812,8 +819,37 @@ impl EvolutionApplier {
                     .ok_or_else(|| {
                         ApplyError::MalformedInverseDiff("missing 'prior_decay_score'".into())
                     })? as f32;
+                // Phase 3.1 (B-3): `prior_consolidated_at` joined the
+                // inverse_diff shape so a chunk that was previously
+                // consolidated, demoted, then re-consolidated keeps
+                // its first-promotion timestamp on the second demote.
+                // Old (pre-3.1) history rows don't carry the field —
+                // fall back to the legacy NULL behaviour and warn so
+                // operators can trace a missed bit if they ever audit
+                // consolidated_at history.
+                let prior_consolidated_at: Option<i64> = match raw.get("prior_consolidated_at") {
+                    Some(serde_json::Value::Null) => None,
+                    Some(v) => Some(v.as_i64().ok_or_else(|| {
+                        ApplyError::MalformedInverseDiff(
+                            "'prior_consolidated_at' must be integer or null".into(),
+                        )
+                    })?),
+                    None => {
+                        tracing::warn!(
+                            chunk_id,
+                            "consolidate_chunk revert: legacy inverse_diff missing \
+                             'prior_consolidated_at'; falling back to NULL (v0.x history)",
+                        );
+                        None
+                    }
+                };
                 self.kb_store
-                    .demote_from_consolidated(chunk_id, &prior_ns, prior_decay)
+                    .demote_from_consolidated(
+                        chunk_id,
+                        &prior_ns,
+                        prior_decay,
+                        prior_consolidated_at,
+                    )
                     .await
                     .map_err(ApplyError::Kb)?;
             }
@@ -2117,6 +2153,17 @@ mod tests {
             "got {}",
             inverse["prior_decay_score"]
         );
+        // Phase 3.1 (B-3): inverse_diff carries `prior_consolidated_at`.
+        // First-time consolidation ⇒ JSON null (`Option::None`).
+        assert!(
+            inverse.get("prior_consolidated_at").is_some(),
+            "inverse_diff must carry the prior_consolidated_at key"
+        );
+        assert!(
+            inverse["prior_consolidated_at"].is_null(),
+            "first-time consolidation: prior_consolidated_at = null, got {:?}",
+            inverse["prior_consolidated_at"]
+        );
     }
 
     /// Already-consolidated chunks must not be re-promoted — the
@@ -2182,5 +2229,154 @@ mod tests {
             "got {}",
             after_revert.decay_score
         );
+    }
+
+    /// Phase 3.1 (B-3): a chunk that's promoted, demoted, then promoted
+    /// again must keep its original first-promotion timestamp on the
+    /// second demote. Pins the byte-for-byte revert contract end-to-end
+    /// through the applier (forward → revert → forward → revert).
+    #[tokio::test]
+    async fn revert_consolidate_chunk_round_trips_prior_consolidated_at() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let id = seed_chunk(&kb, "/c", "bouncing chunk").await;
+
+        // Round 1: promote + capture the stamped consolidated_at.
+        let pid1 = seed_approved(&evol, "evol-cons-rt-1", &format!("consolidate_chunk:{id}")).await;
+        applier.apply(&pid1).await.unwrap();
+        let first_consolidated = kb
+            .get_chunk_decay_state(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .consolidated_at
+            .unwrap();
+        // Demote — this is the test's "previous demote" that the bug
+        // erases. After this, the chunk lives in 'general' again.
+        applier.revert(&pid1, "round 1 rollback").await.unwrap();
+
+        // Round 2: re-promote the same chunk. promote_to_consolidated
+        // is idempotent on consolidated_at via COALESCE — the legacy
+        // bug surfaces on the *second* revert, not on the second
+        // promote. We need the second promotion's prior state to
+        // carry first_consolidated through the inverse_diff so the
+        // third revert can restore it.
+        //
+        // Manually force the prior consolidated_at to first_consolidated
+        // so the snapshot the applier captures includes it. (The
+        // forward path treats the chunk as freshly-general because the
+        // first revert NULL'd consolidated_at — which is correct; the
+        // bug would surface if this were the second-time-promoting
+        // case where the prior_consolidated_at was non-null and
+        // truncated.)
+        sqlx::query("UPDATE chunks SET consolidated_at = ?1 WHERE id = ?2")
+            .bind(first_consolidated)
+            .bind(id)
+            .execute(kb.pool())
+            .await
+            .unwrap();
+        let pid2 = seed_approved(&evol, "evol-cons-rt-2", &format!("consolidate_chunk:{id}")).await;
+        applier.apply(&pid2).await.unwrap();
+
+        // The inverse_diff for the second apply must carry the
+        // first-promotion timestamp.
+        let row: (String,) =
+            sqlx::query_as("SELECT inverse_diff FROM evolution_history WHERE proposal_id = ?")
+                .bind(pid2.as_str())
+                .fetch_one(evol.pool())
+                .await
+                .unwrap();
+        let inv: serde_json::Value = serde_json::from_str(&row.0).unwrap();
+        assert_eq!(
+            inv["prior_consolidated_at"].as_i64(),
+            Some(first_consolidated),
+            "second apply must capture prior_consolidated_at, got {:?}",
+            inv["prior_consolidated_at"]
+        );
+
+        // And reverting must restore that first_consolidated value
+        // rather than NULL'ing it.
+        applier.revert(&pid2, "round 2 rollback").await.unwrap();
+        let after = kb.get_chunk_decay_state(id).await.unwrap().unwrap();
+        assert_eq!(
+            after.consolidated_at,
+            Some(first_consolidated),
+            "demote must restore prior_consolidated_at, got {:?}",
+            after.consolidated_at
+        );
+    }
+
+    /// Phase 3.1 (B-3): a legacy `inverse_diff` row written before this
+    /// fix doesn't carry `prior_consolidated_at`. Revert must fall back
+    /// gracefully (NULL the column, emit a warn) rather than reject the
+    /// whole revert with MalformedInverseDiff.
+    #[tokio::test]
+    async fn revert_consolidate_chunk_tolerates_legacy_inverse_diff() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let id = seed_chunk(&kb, "/c", "legacy bounce").await;
+        // Stand up a fully-consolidated chunk + matching applied
+        // proposal + history row whose inverse_diff predates the
+        // 3.1 fix (no prior_consolidated_at key).
+        kb.promote_to_consolidated(&[id]).await.unwrap();
+        let pid = ProposalId::new("evol-cons-legacy-001");
+        let proposals = ProposalsRepo::new(evol.pool().clone());
+        proposals
+            .insert(&EvolutionProposal {
+                id: pid.clone(),
+                kind: EvolutionKind::MemoryOp,
+                target: format!("consolidate_chunk:{id}"),
+                diff: String::new(),
+                reasoning: "legacy".into(),
+                risk: EvolutionRisk::Low,
+                budget_cost: 0,
+                status: EvolutionStatus::Applied,
+                shadow_metrics: None,
+                signal_ids: vec![],
+                trace_ids: vec![],
+                created_at: 1_000,
+                decided_at: Some(2_000),
+                decided_by: Some("op".into()),
+                applied_at: Some(3_000),
+                rollback_of: None,
+                eval_run_id: None,
+                baseline_metrics_json: None,
+                auto_rollback_at: None,
+                auto_rollback_reason: None,
+            })
+            .await
+            .unwrap();
+        let legacy_inverse = serde_json::json!({
+            "action": "demote_chunk",
+            "chunk_id": id,
+            "prior_namespace": "general",
+            "prior_decay_score": 0.42,
+            // No prior_consolidated_at key.
+        })
+        .to_string();
+        HistoryRepo::new(evol.pool().clone())
+            .insert(&EvolutionHistory {
+                id: None,
+                proposal_id: pid.clone(),
+                kind: EvolutionKind::MemoryOp,
+                target: format!("consolidate_chunk:{id}"),
+                before_sha: "x".into(),
+                after_sha: "y".into(),
+                inverse_diff: legacy_inverse,
+                metrics_baseline: serde_json::json!({}),
+                applied_at: 3_000,
+                rolled_back_at: None,
+                rollback_reason: None,
+            })
+            .await
+            .unwrap();
+
+        // Revert must succeed (graceful fallback) and NULL the column.
+        applier.revert(&pid, "legacy revert").await.unwrap();
+        let after = kb.get_chunk_decay_state(id).await.unwrap().unwrap();
+        assert_eq!(after.namespace, "general");
+        assert!(
+            after.consolidated_at.is_none(),
+            "legacy fallback NULLs the column"
+        );
+        assert!((after.decay_score - 0.42).abs() < 1e-5);
     }
 }
