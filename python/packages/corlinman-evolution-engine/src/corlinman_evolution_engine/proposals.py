@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from corlinman_evolution_engine.store import DEFAULT_TENANT_ID
+
 if TYPE_CHECKING:
     from corlinman_evolution_engine.clustering import SignalCluster
 
@@ -35,6 +37,11 @@ class EvolutionProposal:
     The engine itself owns id minting + database insertion, so handlers
     return these in-memory and never touch SQLite directly. ``id`` is filled
     in by the engine right before the INSERT — handlers leave it empty.
+
+    ``tenant_id`` propagates the tenant of the originating signal cluster
+    onto the proposal so the Rust applier (and the operator UI) can route
+    the proposal back to the right tenant queue. Single-tenant deployments
+    leave it at ``"default"``.
     """
 
     kind: str
@@ -46,6 +53,7 @@ class EvolutionProposal:
     signal_ids: list[int]
     trace_ids: list[str]
     id: str = ""
+    tenant_id: str = DEFAULT_TENANT_ID
 
     def with_id(self, proposal_id: str) -> EvolutionProposal:
         """Return a copy with ``id`` set. Used by the engine at persist time."""
@@ -59,6 +67,7 @@ class EvolutionProposal:
             signal_ids=list(self.signal_ids),
             trace_ids=list(self.trace_ids),
             id=proposal_id,
+            tenant_id=self.tenant_id,
         )
 
 
@@ -129,12 +138,19 @@ class KindHandler(Protocol):
         """The ``EvolutionKind`` wire string this handler emits (e.g. ``"memory_op"``)."""
         ...
 
-    async def existing_targets(self, conn: object) -> set[str]:
-        """Return targets already proposed for this kind, used for dedup.
+    async def existing_targets(self, conn: object) -> set[tuple[str, str]]:
+        """Return ``(target, tenant_id)`` pairs already proposed for this kind.
 
         Receives the engine's ``aiosqlite`` connection (typed as ``object``
         here so the protocol stays small and import-free); concrete
         handlers can cast inside.
+
+        Phase 4 W1 4-1D: the dedup key is ``(target, tenant_id)`` rather
+        than bare ``target`` so two tenants with the same target string
+        (e.g. both editing ``agent.greeting``) get independent proposals.
+        Pre-4-1A schemas that lack the ``tenant_id`` column materialise
+        every row with ``tenant_id="default"`` — single-tenant
+        deployments behave identically to Phase 2 / 3.
         """
         ...
 

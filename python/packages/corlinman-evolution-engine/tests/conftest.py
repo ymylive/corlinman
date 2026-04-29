@@ -17,6 +17,14 @@ from pathlib import Path
 import pytest
 
 # Mirrors rust/crates/corlinman-evolution/src/schema.rs SCHEMA_SQL.
+#
+# Phase 4 W1 4-1A added a ``tenant_id`` column to both ``evolution_signals``
+# and ``evolution_proposals`` (default ``'default'`` for legacy single-tenant
+# rows). The Python plane reads + writes the column when present and falls
+# back to ``'default'`` when it isn't (older test fixtures / pre-4-1A
+# deployments). The 4-1D handlers (``prompt_template`` / ``tool_policy``)
+# rely on this fidelity so a multi-tenant deployment doesn't accidentally
+# cross-pollinate proposals.
 EVOLUTION_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS evolution_signals (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,12 +34,15 @@ CREATE TABLE IF NOT EXISTS evolution_signals (
     payload_json TEXT NOT NULL,
     trace_id     TEXT,
     session_id   TEXT,
-    observed_at  INTEGER NOT NULL
+    observed_at  INTEGER NOT NULL,
+    tenant_id    TEXT NOT NULL DEFAULT 'default'
 );
 CREATE INDEX IF NOT EXISTS idx_evol_signals_kind_target
     ON evolution_signals(event_kind, target);
 CREATE INDEX IF NOT EXISTS idx_evol_signals_observed
     ON evolution_signals(observed_at);
+CREATE INDEX IF NOT EXISTS idx_evol_signals_tenant
+    ON evolution_signals(tenant_id);
 
 CREATE TABLE IF NOT EXISTS evolution_proposals (
     id              TEXT PRIMARY KEY,
@@ -49,8 +60,11 @@ CREATE TABLE IF NOT EXISTS evolution_proposals (
     decided_at      INTEGER,
     decided_by      TEXT,
     applied_at      INTEGER,
-    rollback_of     TEXT REFERENCES evolution_proposals(id)
+    rollback_of     TEXT REFERENCES evolution_proposals(id),
+    tenant_id       TEXT NOT NULL DEFAULT 'default'
 );
+CREATE INDEX IF NOT EXISTS idx_evol_proposals_tenant
+    ON evolution_proposals(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_evol_proposals_status
     ON evolution_proposals(status);
 CREATE INDEX IF NOT EXISTS idx_evol_proposals_created
@@ -134,16 +148,32 @@ def insert_signal(
     trace_id: str | None = None,
     session_id: str | None = None,
     observed_at: int = 0,
+    tenant_id: str = "default",
 ) -> int:
-    """Synchronously insert one ``evolution_signals`` row. Returns its id."""
+    """Synchronously insert one ``evolution_signals`` row. Returns its id.
+
+    ``tenant_id`` defaults to the legacy single-tenant value so existing
+    fixtures don't change behaviour. Phase 4 W1 4-1D tests pass a
+    non-default value explicitly to verify the new handlers preserve it
+    on the proposal they emit.
+    """
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.execute(
             """INSERT INTO evolution_signals
                  (event_kind, target, severity, payload_json,
-                  trace_id, session_id, observed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (event_kind, target, severity, payload_json, trace_id, session_id, observed_at),
+                  trace_id, session_id, observed_at, tenant_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event_kind,
+                target,
+                severity,
+                payload_json,
+                trace_id,
+                session_id,
+                observed_at,
+                tenant_id,
+            ),
         )
         conn.commit()
         return int(cur.lastrowid or 0)

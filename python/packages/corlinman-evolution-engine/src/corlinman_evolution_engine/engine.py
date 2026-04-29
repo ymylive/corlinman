@@ -36,6 +36,10 @@ from pathlib import Path
 
 from corlinman_evolution_engine.clustering import SignalCluster, cluster_signals
 from corlinman_evolution_engine.memory_op import KIND_MEMORY_OP, MemoryOpHandler
+from corlinman_evolution_engine.prompt_template import (
+    KIND_PROMPT_TEMPLATE,
+    PromptTemplateHandler,
+)
 from corlinman_evolution_engine.proposals import (
     EvolutionProposal,
     KindHandler,
@@ -51,6 +55,10 @@ from corlinman_evolution_engine.store import EvolutionStore
 from corlinman_evolution_engine.tag_rebalance import (
     KIND_TAG_REBALANCE,
     TagRebalanceHandler,
+)
+from corlinman_evolution_engine.tool_policy import (
+    KIND_TOOL_POLICY,
+    ToolPolicyHandler,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,6 +76,11 @@ DEFAULT_HANDLERS: dict[str, KindHandler] = {
     KIND_MEMORY_OP: MemoryOpHandler(),
     KIND_TAG_REBALANCE: TagRebalanceHandler(),
     KIND_SKILL_UPDATE: SkillUpdateHandler(),
+    # Phase 4 W1 4-1D: high-risk kinds gated by the docker shadow
+    # sandbox (4-1C). The engine still emits the proposals; the
+    # ShadowTester decides whether they reach the operator queue.
+    KIND_PROMPT_TEMPLATE: PromptTemplateHandler(),
+    KIND_TOOL_POLICY: ToolPolicyHandler(),
 }
 
 
@@ -112,12 +125,18 @@ class EngineConfig:
         KIND_MEMORY_OP,
         KIND_TAG_REBALANCE,
         KIND_SKILL_UPDATE,
+        KIND_PROMPT_TEMPLATE,
+        KIND_TOOL_POLICY,
     )
     """Which ``KindHandler`` registrations to run, in order.
 
-    Phase 3-2B Step 1 default: all three Phase-3 handlers enabled. The
-    safety net (W1-A shadow / W1-B rollback) gates application of these
-    kinds; the engine itself just emits the proposals.
+    Phase 4 W1 4-1D default: the three Phase-3 handlers plus the two
+    new high-risk Phase-4 handlers. All three Phase-3 kinds are
+    medium / low risk; the two new Phase-4 kinds are always
+    ``risk="high"`` so the W1-A ShadowTester routes them through the
+    docker sandbox (W1-C) before they reach the operator queue. The
+    engine itself just emits the proposals; the safety net does the
+    gating.
     """
 
     budget: BudgetConfig = field(default_factory=BudgetConfig)
@@ -291,7 +310,13 @@ class EvolutionEngine:
                             cfg.max_proposals_per_run,
                         )
                         break
-                    if proposal.target in existing:
+                    # Phase 4 W1 4-1D: dedup key is ``(target, tenant_id)``
+                    # so two tenants with the same target string each
+                    # land their own proposal. Single-tenant deployments
+                    # see no behaviour change (every row carries
+                    # ``tenant_id="default"``).
+                    dedup_key = (proposal.target, proposal.tenant_id)
+                    if dedup_key in existing:
                         summary.skipped_existing += 1
                         continue
 
@@ -322,7 +347,7 @@ class EvolutionEngine:
                         proposal=proposal.with_id(proposal_id),
                         created_at=now_ms,
                     )
-                    existing.add(proposal.target)
+                    existing.add(dedup_key)
                     written += 1
                     kind_written += 1
 
@@ -363,7 +388,13 @@ async def _persist(
     proposal: EvolutionProposal,
     created_at: int,
 ) -> None:
-    """Write one ``EvolutionProposal`` to ``evolution_proposals``."""
+    """Write one ``EvolutionProposal`` to ``evolution_proposals``.
+
+    ``tenant_id`` flows from the proposal (which got it from the
+    originating signal cluster) into the row. Single-tenant deployments
+    keep using ``"default"`` and the store skips the column on schemas
+    that haven't yet adopted Phase 4 W1 4-1A.
+    """
     await evolution.insert_proposal(
         proposal_id=proposal.id,
         kind=proposal.kind,
@@ -375,6 +406,7 @@ async def _persist(
         signal_ids=proposal.signal_ids,
         trace_ids=proposal.trace_ids,
         created_at=created_at,
+        tenant_id=proposal.tenant_id,
     )
 
 

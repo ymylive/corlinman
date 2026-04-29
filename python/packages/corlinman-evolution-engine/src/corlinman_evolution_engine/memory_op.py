@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from corlinman_evolution_engine.proposals import EvolutionProposal, ProposalContext
-from corlinman_evolution_engine.store import ChunkRow, KbStore
+from corlinman_evolution_engine.store import ChunkRow, KbStore, fetch_existing_targets
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -134,18 +134,12 @@ class MemoryOpHandler:
     def kind(self) -> str:
         return KIND_MEMORY_OP
 
-    async def existing_targets(self, conn: object) -> set[str]:
+    async def existing_targets(self, conn: object) -> set[tuple[str, str]]:
         # ``conn`` is the engine's ``aiosqlite.Connection``. Typed loosely
         # in the protocol so KindHandler doesn't drag aiosqlite into every
         # caller; cast here.
         sqlite_conn: aiosqlite.Connection = conn  # type: ignore[assignment]
-        cursor = await sqlite_conn.execute(
-            "SELECT target FROM evolution_proposals WHERE kind = ?",
-            (self.kind,),
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
-        return {str(r[0]) for r in rows}
+        return await fetch_existing_targets(sqlite_conn, self.kind)
 
     async def propose(self, ctx: ProposalContext) -> list[EvolutionProposal]:
         # Per-handler: open + close kb connection so the engine doesn't have
@@ -174,6 +168,12 @@ class MemoryOpHandler:
                     seen_traces.add(t)
                     trace_ids.append(t)
 
+        # The kb the chunks come from is itself per-tenant in Phase 4 W1
+        # 4-1A; every cluster gating this scan therefore shares one
+        # tenant. We grab it from the first cluster (clusters are
+        # presence-checked above).
+        tenant_id = ctx.clusters[0].tenant_id if ctx.clusters else "default"
+
         return [
             EvolutionProposal(
                 kind=self.kind,
@@ -184,6 +184,7 @@ class MemoryOpHandler:
                 budget_cost=0,
                 signal_ids=signal_ids,
                 trace_ids=trace_ids,
+                tenant_id=tenant_id,
             )
             for pair in pairs
         ]

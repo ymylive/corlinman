@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from corlinman_evolution_engine.clustering import SignalCluster
 from corlinman_evolution_engine.proposals import EvolutionProposal, ProposalContext
+from corlinman_evolution_engine.store import fetch_existing_targets
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -98,15 +99,9 @@ class SkillUpdateHandler:
     def kind(self) -> str:
         return KIND_SKILL_UPDATE
 
-    async def existing_targets(self, conn: object) -> set[str]:
+    async def existing_targets(self, conn: object) -> set[tuple[str, str]]:
         sqlite_conn: aiosqlite.Connection = conn  # type: ignore[assignment]
-        cursor = await sqlite_conn.execute(
-            "SELECT target FROM evolution_proposals WHERE kind = ?",
-            (self.kind,),
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
-        return {str(r[0]) for r in rows}
+        return await fetch_existing_targets(sqlite_conn, self.kind)
 
     async def propose(self, ctx: ProposalContext) -> list[EvolutionProposal]:
         relevant = [
@@ -130,6 +125,7 @@ class SkillUpdateHandler:
                 budget_cost=2,
                 signal_ids=cluster.signal_ids,
                 trace_ids=cluster.trace_ids,
+                tenant_id=cluster.tenant_id,
             )
             for cluster in relevant
         ]
