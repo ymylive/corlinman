@@ -8,4 +8,5 @@ pub mod admin_auth;
 pub mod admin_session;
 pub mod approval;
 pub mod auth;
+pub mod tenant_scope;
 pub mod trace;

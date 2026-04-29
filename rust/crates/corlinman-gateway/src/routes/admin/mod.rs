@@ -33,6 +33,7 @@ use crate::log_broadcast::LogRecord;
 use crate::middleware::admin_auth::{require_admin, AdminAuthState};
 use crate::middleware::admin_session::AdminSessionStore;
 use crate::middleware::approval::ApprovalGate;
+use crate::middleware::tenant_scope::{tenant_scope, TenantScopeState};
 
 use super::not_implemented;
 
@@ -304,11 +305,32 @@ pub fn router() -> Router {
 /// Production admin router: real handlers + auth guard (cookie first,
 /// Basic-auth fallback). Login/logout/me routes are merged *outside* the
 /// guard so unauthenticated callers can obtain a session.
+///
+/// Phase 4 W1 4-1A Item 3: a tenant-scoping layer sits *inside*
+/// `require_admin` (so anonymous callers see 401 before any tenant
+/// check) and *outside* the per-route handlers (so handlers always
+/// observe a resolved `TenantId` in axum extensions). The layer is a
+/// no-op when `[tenants].enabled = false`, in which case every
+/// request resolves to `TenantId::legacy_default()` — preserving the
+/// pre-Phase-4 behaviour.
 pub fn router_with_state(state: AdminState) -> Router {
     let mut auth_state = AdminAuthState::new(state.config.clone());
     if let Some(store) = state.session_store.as_ref() {
         auth_state = auth_state.with_session_store(store.clone());
     }
+
+    let cfg_snap = state.config.load();
+    let tenant_state = TenantScopeState {
+        enabled: cfg_snap.tenants.enabled,
+        allowed: Arc::new(state.allowed_tenants.clone()),
+        fallback: TenantId::new(&cfg_snap.tenants.default).unwrap_or_else(|_| {
+            tracing::warn!(
+                slug = %cfg_snap.tenants.default,
+                "[tenants].default rejected by TenantId::new; falling back to reserved 'default'",
+            );
+            TenantId::legacy_default()
+        }),
+    };
 
     let guarded = Router::new()
         .merge(plugins::router(state.clone()))
@@ -324,6 +346,10 @@ pub fn router_with_state(state: AdminState) -> Router {
         .merge(scheduler::router(state.clone()))
         .merge(evolution::router(state.clone()))
         .merge(memory::router(state.clone()))
+        .layer(axum::middleware::from_fn_with_state(
+            tenant_state,
+            tenant_scope,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             require_admin,
