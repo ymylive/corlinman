@@ -38,6 +38,10 @@ enum Cmd {
     /// Vector index: stats / query / rebuild (Sprint 3 T5).
     #[command(subcommand)]
     Vector(cmd::vector::Cmd),
+    /// Multi-tenant admin: create tenants and list the roster
+    /// (Phase 4 W1 4-1A Item 4).
+    #[command(subcommand)]
+    Tenant(cmd::tenant::Cmd),
 }
 
 #[tokio::main]
@@ -51,5 +55,6 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Dev(sub) => cmd::dev::run(sub).await,
         Cmd::Qa(sub) => cmd::qa::run(cmd::qa::Args { cmd: sub }).await,
         Cmd::Vector(sub) => cmd::vector::run(sub).await,
+        Cmd::Tenant(sub) => cmd::tenant::run(sub).await,
     }
 }

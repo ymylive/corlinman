@@ -681,6 +681,7 @@ dependencies = [
  "corlinman-gateway",
  "corlinman-plugins",
  "corlinman-proto",
+ "corlinman-tenant",
  "corlinman-vector",
  "cron",
  "dialoguer",

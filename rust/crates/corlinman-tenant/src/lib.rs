@@ -26,10 +26,12 @@
 //! `SCHEMA_SQL` + idempotent ALTER block. `TenantPool` only manages the
 //! `(tenant, name) -> pool` map.
 
+pub mod admin_schema;
 mod id;
 mod path;
 mod pool;
 
+pub use admin_schema::{AdminDb, AdminDbError, AdminRow, TenantRow};
 pub use id::{TenantId, TenantIdError, DEFAULT_TENANT_ID};
 pub use path::{tenant_db_path, tenant_root_dir};
 pub use pool::{TenantPool, TenantPoolError};

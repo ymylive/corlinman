@@ -18,6 +18,7 @@ corlinman-proto = { path = "../corlinman-proto" }
 corlinman-plugins = { path = "../corlinman-plugins" }
 corlinman-vector = { path = "../corlinman-vector" }
 corlinman-gateway = { path = "../corlinman-gateway" }
+corlinman-tenant = { path = "../corlinman-tenant" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
