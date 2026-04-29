@@ -15,6 +15,7 @@ use corlinman_core::config::Config;
 use corlinman_core::{SessionStore, SqliteSessionStore};
 use corlinman_evolution::{EvolutionStore, HistoryRepo, ProposalsRepo};
 use corlinman_plugins::{roots_from_env_var, Origin, PluginRegistry, SearchRoot};
+use corlinman_tenant::{TenantId, TenantPool};
 use corlinman_vector::SqliteStore;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -492,6 +493,52 @@ fn build_admin_state_with_config(
     if let Some(path) = py_config_path {
         admin = admin.with_py_config_path(path);
     }
+
+    // Phase 4 W1 4-1A: when `[tenants].enabled = true`, construct the
+    // multi-tenant SQLite pool and the operator-allowed tenant set.
+    // Both are consumed by the tenant-scoping middleware (Item 3) which
+    // routes admin requests through the per-tenant SQLite layout under
+    // `<data_dir>/tenants/<tenant_id>/`. When `enabled = false` (legacy
+    // single-tenant default) we leave both fields untouched: the
+    // `AdminState::default` shape is `tenant_pool = None,
+    // allowed_tenants = empty`, which the middleware reads as "no
+    // scoping, fall back to legacy unscoped DB paths".
+    let cfg_snap = admin.config.load();
+    if cfg_snap.tenants.enabled {
+        let data_dir = resolve_data_dir();
+        let pool = Arc::new(TenantPool::new(data_dir.clone()));
+
+        // Build the allowed-tenants set from `[tenants].allowed` plus
+        // the implicit reserved `default` slug. Invalid slugs are
+        // tracing::warn'd and dropped; the remaining set is what
+        // operators can hit. Future Item 4 will fold in tenants.sqlite
+        // rows here; for now config is the only source.
+        let mut allowed = std::collections::BTreeSet::new();
+        allowed.insert(TenantId::legacy_default());
+        for slug in &cfg_snap.tenants.allowed {
+            match TenantId::new(slug) {
+                Ok(t) => {
+                    allowed.insert(t);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        slug = %slug,
+                        error = %e,
+                        "[tenants].allowed entry rejected; skipping",
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            data_dir = %data_dir.display(),
+            allowed_count = allowed.len(),
+            "multi-tenant mode enabled; tenant pool and allowlist installed",
+        );
+
+        admin = admin.with_tenant_pool(pool).with_allowed_tenants(allowed);
+    }
+
     admin
 }
 
