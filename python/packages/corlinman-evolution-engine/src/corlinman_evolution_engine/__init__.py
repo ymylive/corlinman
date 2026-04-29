@@ -1,5 +1,6 @@
 """EvolutionEngine — signals → clustering → kind-handler proposals."""
 
+from corlinman_evolution_engine.agent_card import KIND_AGENT_CARD, AgentCardHandler
 from corlinman_evolution_engine.clustering import SignalCluster, cluster_signals
 from corlinman_evolution_engine.consolidation import (
     CONSOLIDATED_NAMESPACE,
@@ -49,11 +50,13 @@ __all__ = [
     "CONSOLIDATED_NAMESPACE",
     "DEFAULT_HANDLERS",
     "DEFAULT_TENANT_ID",
+    "KIND_AGENT_CARD",
     "KIND_MEMORY_OP",
     "KIND_PROMPT_TEMPLATE",
     "KIND_SKILL_UPDATE",
     "KIND_TAG_REBALANCE",
     "KIND_TOOL_POLICY",
+    "AgentCardHandler",
     "ConsolidationConfig",
     "ConsolidationSummary",
     "DuplicatePair",

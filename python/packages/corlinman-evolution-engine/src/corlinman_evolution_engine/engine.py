@@ -34,6 +34,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from corlinman_evolution_engine.agent_card import (
+    KIND_AGENT_CARD,
+    AgentCardHandler,
+)
 from corlinman_evolution_engine.clustering import SignalCluster, cluster_signals
 from corlinman_evolution_engine.memory_op import KIND_MEMORY_OP, MemoryOpHandler
 from corlinman_evolution_engine.prompt_template import (
@@ -81,6 +85,7 @@ DEFAULT_HANDLERS: dict[str, KindHandler] = {
     # ShadowTester decides whether they reach the operator queue.
     KIND_PROMPT_TEMPLATE: PromptTemplateHandler(),
     KIND_TOOL_POLICY: ToolPolicyHandler(),
+    KIND_AGENT_CARD: AgentCardHandler(),
 }
 
 
@@ -127,6 +132,7 @@ class EngineConfig:
         KIND_SKILL_UPDATE,
         KIND_PROMPT_TEMPLATE,
         KIND_TOOL_POLICY,
+        KIND_AGENT_CARD,
     )
     """Which ``KindHandler`` registrations to run, in order.
 

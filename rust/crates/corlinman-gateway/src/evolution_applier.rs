@@ -210,6 +210,12 @@ pub enum ApplyError {
     /// whitelist. Carries the rejected target.
     #[error("invalid tool name: {0}")]
     ToolNameInvalid(String),
+    /// Phase 4 W1 4-1D follow-up: `agent_card` `target` failed the
+    /// agent-name whitelist. Same shape as `PromptSegmentInvalid` /
+    /// `ToolNameInvalid` — distinct variant so the route layer can map
+    /// it to a precise error envelope.
+    #[error("invalid agent id: {0}")]
+    AgentIdInvalid(String),
     /// Phase 4 W1 4-1D: `tool_policy` `diff.after` (or `diff.before`
     /// during revert) was not one of `auto` / `prompt` / `deny`.
     /// Carries the rejected mode.
@@ -439,6 +445,10 @@ impl EvolutionApplier {
             }
             EvolutionKind::ToolPolicy => {
                 self.apply_tool_policy(&proposal.target, &proposal.diff)
+                    .await?
+            }
+            EvolutionKind::AgentCard => {
+                self.apply_agent_card(&proposal.target, &proposal.diff)
                     .await?
             }
             other => return Err(ApplyError::UnsupportedKind(other.as_str().to_string())),
@@ -993,6 +1003,103 @@ impl EvolutionApplier {
         })
     }
 
+    /// Phase 4 W1 4-1D follow-up: forward apply for `agent_card`.
+    /// Mirrors `apply_prompt_template` shape but writes to the
+    /// per-tenant `agent_cards/<name>.md` layout. The Python proposer
+    /// emits `target = "<agent_name>"` (optionally `<tenant>::<name>`)
+    /// and `diff = { before: "", after: <new_content>, rationale }`.
+    /// `before` is intentionally empty on the wire — this applier
+    /// reads the live agent-card file at apply time and stores the
+    /// resolved prior content in the inverse_diff.
+    ///
+    /// Layout decision: `<data_dir>/tenants/<tenant>/agent_cards/<name>.md`
+    /// — flat per-tenant directory, one file per agent. Mirrors
+    /// `prompt_segments/` from `apply_prompt_template`. The
+    /// `corlinman-persona` Python package will eventually read this
+    /// directory tree as a per-tenant character-card override layer.
+    async fn apply_agent_card(
+        &self,
+        target: &str,
+        diff: &str,
+    ) -> Result<MutationOutcome, ApplyError> {
+        let (tenant, agent) = split_target_with_tenant(target);
+        validate_tenant_id(tenant)?;
+        validate_agent_id(agent)?;
+
+        let parsed: serde_json::Value = serde_json::from_str(diff)
+            .map_err(|e| ApplyError::MalformedDiff(format!("agent_card parse: {e}")))?;
+        let after = parsed
+            .get("after")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApplyError::MalformedDiff("agent_card: missing 'after'".into()))?
+            .to_string();
+        if parsed.get("before").is_none() {
+            return Err(ApplyError::MalformedDiff(
+                "agent_card: missing 'before'".into(),
+            ));
+        }
+        if parsed.get("rationale").is_none() {
+            return Err(ApplyError::MalformedDiff(
+                "agent_card: missing 'rationale'".into(),
+            ));
+        }
+
+        let tenants_root = self.tenants_root_dir();
+        tokio::fs::create_dir_all(&tenants_root)
+            .await
+            .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+        let cards_dir = tenants_root.join(tenant).join("agent_cards");
+        tokio::fs::create_dir_all(&cards_dir)
+            .await
+            .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+        let path = cards_dir.join(format!("{agent}.md"));
+
+        // Pre-write canonicalise (Phase 3.1 / S-5 TOCTOU pattern).
+        assert_under_tenants_root(&cards_dir, &tenants_root)?;
+
+        let (prior_content, before_present) = match tokio::fs::read_to_string(&path).await {
+            Ok(s) => (s, true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
+            Err(e) => return Err(ApplyError::TenantStateIo(anyhow::Error::from(e))),
+        };
+
+        // Atomic tmp + rename, same as prompt_template.
+        let mut tmp = path.clone();
+        let mut name = tmp
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(".tmp");
+        tmp.set_file_name(name);
+        tokio::fs::write(&tmp, after.as_bytes())
+            .await
+            .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+
+        // Re-canonicalise post-tmp-write to defeat parent-dir swaps.
+        assert_under_tenants_root(&cards_dir, &tenants_root)?;
+
+        tokio::fs::rename(&tmp, &path)
+            .await
+            .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+
+        let before_sha = sha256_hex(prior_content.as_bytes());
+        let after_sha = sha256_hex(after.as_bytes());
+        let inverse_diff = json!({
+            "op": "agent_card",
+            "tenant": tenant,
+            "agent": agent,
+            "before": prior_content,
+            "before_present": before_present,
+        })
+        .to_string();
+
+        Ok(MutationOutcome {
+            before_sha,
+            after_sha,
+            inverse_diff,
+        })
+    }
+
     /// Phase 4 W1 4-1D: forward apply for `tool_policy`. `target` is
     /// optionally `<tenant>::<tool>`; `diff` is the JSON shape the
     /// Python proposer emits:
@@ -1071,11 +1178,11 @@ impl EvolutionApplier {
         let mut doc: toml::Table = if prior_text.is_empty() {
             toml::Table::new()
         } else {
-            prior_text
-                .parse()
-                .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::msg(format!(
+            prior_text.parse().map_err(|e| {
+                ApplyError::TenantStateIo(anyhow::Error::msg(format!(
                     "tool_policy.toml parse: {e}"
-                ))))?
+                )))
+            })?
         };
 
         // Drift-detect. Three cases:
@@ -1105,14 +1212,8 @@ impl EvolutionApplier {
 
         // Mutate doc in place — replace just the `[tool]` table.
         let mut tool_table = toml::Table::new();
-        tool_table.insert(
-            "mode".into(),
-            toml::Value::String(after_mode.clone()),
-        );
-        tool_table.insert(
-            "rule_id".into(),
-            toml::Value::String(rule_id.clone()),
-        );
+        tool_table.insert("mode".into(), toml::Value::String(after_mode.clone()));
+        tool_table.insert("rule_id".into(), toml::Value::String(rule_id.clone()));
         doc.insert(tool.to_string(), toml::Value::Table(tool_table));
 
         let new_text = toml::to_string_pretty(&doc).map_err(|e| {
@@ -1177,9 +1278,7 @@ impl EvolutionApplier {
         let before_present = raw
             .get("before_present")
             .and_then(|v| v.as_bool())
-            .ok_or_else(|| {
-                ApplyError::MalformedInverseDiff("missing 'before_present'".into())
-            })?;
+            .ok_or_else(|| ApplyError::MalformedInverseDiff("missing 'before_present'".into()))?;
 
         // Trust gates — the same revert-side validation the other
         // kinds run before binding untrusted history values to disk.
@@ -1229,6 +1328,68 @@ impl EvolutionApplier {
         Ok(())
     }
 
+    /// Phase 4 W1 4-1D follow-up: reverse handler for `agent_card`.
+    /// Mirrors `revert_prompt_template` — atomic tmp + rename when
+    /// the file existed before apply, otherwise removes the file.
+    async fn revert_agent_card(&self, history: &EvolutionHistory) -> Result<(), ApplyError> {
+        let raw: serde_json::Value = serde_json::from_str(&history.inverse_diff)
+            .map_err(|e| ApplyError::MalformedInverseDiff(format!("parse: {e}")))?;
+        let op = raw
+            .get("op")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApplyError::MalformedInverseDiff("missing 'op'".into()))?;
+        if op != "agent_card" {
+            return Err(ApplyError::MalformedInverseDiff(format!(
+                "unknown op: {op}"
+            )));
+        }
+        let tenant = pick_str(&raw, "tenant").map_err(ApplyError::MalformedInverseDiff)?;
+        let agent = pick_str(&raw, "agent").map_err(ApplyError::MalformedInverseDiff)?;
+        let before = pick_str(&raw, "before").map_err(ApplyError::MalformedInverseDiff)?;
+        let before_present = raw
+            .get("before_present")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| ApplyError::MalformedInverseDiff("missing 'before_present'".into()))?;
+
+        validate_tenant_id_revert(history, &tenant)?;
+        validate_agent_id_revert(history, &agent)?;
+
+        let tenants_root = self.tenants_root_dir();
+        tokio::fs::create_dir_all(&tenants_root)
+            .await
+            .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+        let cards_dir = tenants_root.join(&tenant).join("agent_cards");
+        tokio::fs::create_dir_all(&cards_dir)
+            .await
+            .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+        let path = cards_dir.join(format!("{agent}.md"));
+        assert_under_tenants_root(&cards_dir, &tenants_root)?;
+
+        if before_present {
+            let mut tmp = path.clone();
+            let mut name = tmp
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default();
+            name.push(".tmp");
+            tmp.set_file_name(name);
+            tokio::fs::write(&tmp, before.as_bytes())
+                .await
+                .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+            assert_under_tenants_root(&cards_dir, &tenants_root)?;
+            tokio::fs::rename(&tmp, &path)
+                .await
+                .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+        } else {
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(ApplyError::TenantStateIo(anyhow::Error::from(e))),
+            }
+        }
+        Ok(())
+    }
+
     /// Phase 4 W1 4-1D: reverse handler for `tool_policy`. Writes the
     /// captured `before_mode` back to the toml table for the tool. If
     /// the table didn't exist before apply (`before_present == false`),
@@ -1252,9 +1413,7 @@ impl EvolutionApplier {
         let before_present = raw
             .get("before_present")
             .and_then(|v| v.as_bool())
-            .ok_or_else(|| {
-                ApplyError::MalformedInverseDiff("missing 'before_present'".into())
-            })?;
+            .ok_or_else(|| ApplyError::MalformedInverseDiff("missing 'before_present'".into()))?;
         let rule_id = pick_str(&raw, "rule_id").map_err(ApplyError::MalformedInverseDiff)?;
 
         validate_tenant_id_revert(history, &tenant)?;
@@ -1290,19 +1449,16 @@ impl EvolutionApplier {
         let mut doc: toml::Table = if current_text.is_empty() {
             toml::Table::new()
         } else {
-            current_text
-                .parse()
-                .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::msg(format!(
+            current_text.parse().map_err(|e| {
+                ApplyError::TenantStateIo(anyhow::Error::msg(format!(
                     "tool_policy.toml parse: {e}"
-                ))))?
+                )))
+            })?
         };
 
         if before_present {
             let mut tool_table = toml::Table::new();
-            tool_table.insert(
-                "mode".into(),
-                toml::Value::String(before_mode.clone()),
-            );
+            tool_table.insert("mode".into(), toml::Value::String(before_mode.clone()));
             tool_table.insert("rule_id".into(), toml::Value::String(rule_id.clone()));
             doc.insert(tool.clone(), toml::Value::Table(tool_table));
         } else {
@@ -1456,6 +1612,7 @@ impl EvolutionApplier {
             EvolutionKind::SkillUpdate => self.revert_skill_update(&history_row).await?,
             EvolutionKind::PromptTemplate => self.revert_prompt_template(&history_row).await?,
             EvolutionKind::ToolPolicy => self.revert_tool_policy(&history_row).await?,
+            EvolutionKind::AgentCard => self.revert_agent_card(&history_row).await?,
             other => {
                 return Err(ApplyError::UnsupportedRevertKind(
                     other.as_str().to_string(),
@@ -1989,6 +2146,34 @@ fn validate_tool_name(tool: &str) -> Result<(), ApplyError> {
     Ok(())
 }
 
+/// Validate an agent id. Same shape as the existing `<data_dir>/agents/`
+/// directory uses: lowercase identifier, alphanumeric + underscore +
+/// dash, no leading dot, length-capped to defeat oversized targets.
+/// Mirrors `validate_tool_name` but enforces a leading lowercase
+/// letter so accidental dotfile-shaped writes can't escape into the
+/// agent_cards directory.
+fn validate_agent_id(agent: &str) -> Result<(), ApplyError> {
+    if agent.is_empty() || agent.len() > MAX_TENANT_PART_LEN {
+        return Err(ApplyError::AgentIdInvalid(format!(
+            "agent id length out of range: {agent:?}"
+        )));
+    }
+    let first = agent.chars().next().unwrap();
+    if !first.is_ascii_lowercase() {
+        return Err(ApplyError::AgentIdInvalid(format!(
+            "agent id must start with [a-z]: {agent:?}"
+        )));
+    }
+    for ch in agent.chars() {
+        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-') {
+            return Err(ApplyError::AgentIdInvalid(format!(
+                "agent id rejected character {ch:?} in {agent:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn is_valid_tool_mode(mode: &str) -> bool {
     ALLOWED_TOOL_MODES.contains(&mode)
 }
@@ -2019,24 +2204,23 @@ fn validate_rule_id(rule_id: &str) -> Result<(), ApplyError> {
 
 /// Read the current `[tool] mode` from a parsed toml document. Returns
 /// `(mode, present)`: `present` is true iff the table existed.
-fn read_existing_mode(
-    doc: &toml::Table,
-    tool: &str,
-) -> Result<(Option<String>, bool), ApplyError> {
+fn read_existing_mode(doc: &toml::Table, tool: &str) -> Result<(Option<String>, bool), ApplyError> {
     let Some(table_value) = doc.get(tool) else {
         return Ok((None, false));
     };
-    let table = table_value
-        .as_table()
-        .ok_or_else(|| ApplyError::TenantStateIo(anyhow::Error::msg(format!(
+    let table = table_value.as_table().ok_or_else(|| {
+        ApplyError::TenantStateIo(anyhow::Error::msg(format!(
             "tool_policy.toml: [{tool}] is not a table"
-        ))))?;
+        )))
+    })?;
     let mode = table
         .get("mode")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ApplyError::TenantStateIo(anyhow::Error::msg(format!(
-            "tool_policy.toml: [{tool}].mode missing or not a string"
-        ))))?
+        .ok_or_else(|| {
+            ApplyError::TenantStateIo(anyhow::Error::msg(format!(
+                "tool_policy.toml: [{tool}].mode missing or not a string"
+            )))
+        })?
         .to_string();
     Ok((Some(mode), true))
 }
@@ -2047,13 +2231,16 @@ fn read_existing_mode(
 /// re-canonicalising right before the rename closes the window where
 /// a racing process could have swapped the directory for a symlink
 /// pointing outside the tenant root.
-fn assert_under_tenants_root(dir: &std::path::Path, root: &std::path::Path) -> Result<(), ApplyError> {
-    let dir_canon = dir
-        .canonicalize()
-        .map_err(|e| ApplyError::TenantPathEscape(format!("canonicalize {}: {e}", dir.display())))?;
-    let root_canon = root
-        .canonicalize()
-        .map_err(|e| ApplyError::TenantPathEscape(format!("canonicalize {}: {e}", root.display())))?;
+fn assert_under_tenants_root(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+) -> Result<(), ApplyError> {
+    let dir_canon = dir.canonicalize().map_err(|e| {
+        ApplyError::TenantPathEscape(format!("canonicalize {}: {e}", dir.display()))
+    })?;
+    let root_canon = root.canonicalize().map_err(|e| {
+        ApplyError::TenantPathEscape(format!("canonicalize {}: {e}", root.display()))
+    })?;
     if !dir_canon.starts_with(&root_canon) {
         return Err(ApplyError::TenantPathEscape(format!(
             "{} resolved outside {}",
@@ -2069,10 +2256,7 @@ fn assert_under_tenants_root(dir: &std::path::Path, root: &std::path::Path) -> R
 /// [`ApplyError::Tampered`] (matching the existing inverse_diff trust
 /// pattern) so the AutoRollback monitor can degrade to "skip + alert"
 /// instead of looping a broken revert.
-fn validate_tenant_id_revert(
-    history: &EvolutionHistory,
-    tenant: &str,
-) -> Result<(), ApplyError> {
+fn validate_tenant_id_revert(history: &EvolutionHistory, tenant: &str) -> Result<(), ApplyError> {
     if let Err(ApplyError::TenantPathEscape(reason)) = validate_tenant_id(tenant) {
         return Err(tampered(history, reason));
     }
@@ -2091,11 +2275,22 @@ fn validate_prompt_segment_id_revert(
     Ok(())
 }
 
+/// Trust-gate variant of [`validate_agent_id`] for the revert path.
+/// Tampered values surface as `ApplyError::Tampered` instead of
+/// `AgentIdInvalid` so the AutoRollback monitor can pattern-match
+/// the corruption-skip path.
+fn validate_agent_id_revert(history: &EvolutionHistory, agent: &str) -> Result<(), ApplyError> {
+    if let Err(ApplyError::AgentIdInvalid(reason)) = validate_agent_id(agent) {
+        return Err(ApplyError::Tampered(format!(
+            "history#{}: {reason}",
+            history.id.unwrap_or(-1)
+        )));
+    }
+    Ok(())
+}
+
 /// Trust-gate variant of [`validate_tool_name`] for the revert path.
-fn validate_tool_name_revert(
-    history: &EvolutionHistory,
-    tool: &str,
-) -> Result<(), ApplyError> {
+fn validate_tool_name_revert(history: &EvolutionHistory, tool: &str) -> Result<(), ApplyError> {
     if let Err(ApplyError::ToolNameInvalid(reason)) = validate_tool_name(tool) {
         return Err(tampered(history, reason));
     }
@@ -3537,12 +3732,7 @@ mod tests {
     #[tokio::test]
     async fn apply_stamps_intent_log_failed_on_error() {
         let (_tmp, applier, _kb, evol) = fresh_applier().await;
-        let pid = seed_approved(
-            &evol,
-            "evol-intent-fail-001",
-            "delete_chunk:99999",
-        )
-        .await;
+        let pid = seed_approved(&evol, "evol-intent-fail-001", "delete_chunk:99999").await;
         let _ = applier.apply(&pid).await; // expected ChunkNotFound
 
         let row: (Option<i64>, Option<i64>, Option<String>) = sqlx::query_as(
@@ -3593,12 +3783,7 @@ mod tests {
     async fn revert_memory_op_rejects_tampered_namespace() {
         let (_tmp, applier, kb, evol) = fresh_applier().await;
         let id = seed_chunk(&kb, "/d", "tampered").await;
-        let pid = seed_approved(
-            &evol,
-            "evol-tamper-ns-001",
-            &format!("delete_chunk:{id}"),
-        )
-        .await;
+        let pid = seed_approved(&evol, "evol-tamper-ns-001", &format!("delete_chunk:{id}")).await;
         applier.apply(&pid).await.unwrap();
 
         // Tamper: rewrite namespace to something outside the whitelist.
@@ -3625,7 +3810,10 @@ mod tests {
         }
         // Proposal stays Applied — revert refused to run, so no
         // status flip.
-        let after = ProposalsRepo::new(evol.pool().clone()).get(&pid).await.unwrap();
+        let after = ProposalsRepo::new(evol.pool().clone())
+            .get(&pid)
+            .await
+            .unwrap();
         assert_eq!(after.status, EvolutionStatus::Applied);
     }
 
@@ -3638,8 +3826,7 @@ mod tests {
         let (_tmp, applier, kb, evol) = fresh_applier().await;
         let root = seed_tag_node(&kb, None, "root", "root", 0).await;
         let coding = seed_tag_node(&kb, Some(root), "coding", "coding", 1).await;
-        let _python =
-            seed_tag_node(&kb, Some(coding), "python", "coding/python", 2).await;
+        let _python = seed_tag_node(&kb, Some(coding), "python", "coding/python", 2).await;
         let pid = seed_approved_kind(
             &evol,
             "evol-tamper-path-001",
@@ -3686,11 +3873,7 @@ mod tests {
         tmp.path().join("tenants")
     }
 
-    fn prompt_segment_path(
-        tmp: &TempDir,
-        tenant: &str,
-        segment: &str,
-    ) -> std::path::PathBuf {
+    fn prompt_segment_path(tmp: &TempDir, tenant: &str, segment: &str) -> std::path::PathBuf {
         tenants_root_for(tmp)
             .join(tenant)
             .join("prompt_segments")
@@ -3765,10 +3948,7 @@ mod tests {
     fn validate_tool_name_rejects_bad_shapes() {
         for bad in ["", "with space", "with::colon", "with/slash"] {
             assert!(
-                matches!(
-                    validate_tool_name(bad),
-                    Err(ApplyError::ToolNameInvalid(_))
-                ),
+                matches!(validate_tool_name(bad), Err(ApplyError::ToolNameInvalid(_))),
                 "expected reject for {bad:?}",
             );
         }
@@ -3820,7 +4000,10 @@ mod tests {
         assert_eq!(inv["before"], "");
         assert_eq!(inv["before_present"], false);
 
-        let after = ProposalsRepo::new(evol.pool().clone()).get(&pid).await.unwrap();
+        let after = ProposalsRepo::new(evol.pool().clone())
+            .get(&pid)
+            .await
+            .unwrap();
         assert_eq!(after.status, EvolutionStatus::Applied);
     }
 
@@ -3918,7 +4101,10 @@ mod tests {
         applier.apply(&pid).await.unwrap();
         assert!(path.exists());
 
-        applier.revert(&pid, "rollback first creation").await.unwrap();
+        applier
+            .revert(&pid, "rollback first creation")
+            .await
+            .unwrap();
         assert!(
             !path.exists(),
             "segment file must be removed when before_present == false"
@@ -4046,10 +4232,7 @@ mod tests {
         // [web_search] flipped to deny; sibling [other_tool] kept.
         let written = std::fs::read_to_string(&path).unwrap();
         let parsed: toml::Table = written.parse().unwrap();
-        assert_eq!(
-            parsed["web_search"]["mode"].as_str(),
-            Some("deny")
-        );
+        assert_eq!(parsed["web_search"]["mode"].as_str(), Some("deny"));
         assert_eq!(
             parsed["other_tool"]["mode"].as_str(),
             Some("prompt"),
@@ -4088,10 +4271,7 @@ mod tests {
 
         let written = std::fs::read_to_string(&path).unwrap();
         let parsed: toml::Table = written.parse().unwrap();
-        assert_eq!(
-            parsed["web_search"]["mode"].as_str(),
-            Some("prompt")
-        );
+        assert_eq!(parsed["web_search"]["mode"].as_str(), Some("prompt"));
         // Default tenant must remain untouched.
         let default_path = tool_policy_path(&tmp, "default");
         assert!(
@@ -4120,13 +4300,11 @@ mod tests {
         )
         .await;
         applier.apply(&pid).await.unwrap();
-        let parsed: toml::Table =
-            std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        let parsed: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         assert_eq!(parsed["web_search"]["mode"].as_str(), Some("deny"));
 
         applier.revert(&pid, "metrics regression").await.unwrap();
-        let parsed: toml::Table =
-            std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        let parsed: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         assert_eq!(
             parsed["web_search"]["mode"].as_str(),
             Some("auto"),

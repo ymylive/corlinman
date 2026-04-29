@@ -170,13 +170,12 @@ async fn apply_prompt_template_writes_segment_file() {
     );
 
     // Audit row carries the inverse_diff.
-    let row: (String, String) = sqlx::query_as(
-        "SELECT target, inverse_diff FROM evolution_history WHERE proposal_id = ?",
-    )
-    .bind(pid.as_str())
-    .fetch_one(evol.pool())
-    .await
-    .unwrap();
+    let row: (String, String) =
+        sqlx::query_as("SELECT target, inverse_diff FROM evolution_history WHERE proposal_id = ?")
+            .bind(pid.as_str())
+            .fetch_one(evol.pool())
+            .await
+            .unwrap();
     assert_eq!(row.0, "agent.greeting");
     let inv: serde_json::Value = serde_json::from_str(&row.1).unwrap();
     assert_eq!(inv["op"], "prompt_template");
@@ -271,7 +270,10 @@ async fn apply_tool_policy_flips_mode_in_toml() {
         .parse()
         .unwrap();
     assert_eq!(parsed["web_search"]["mode"].as_str(), Some("deny"));
-    assert_eq!(parsed["web_search"]["rule_id"].as_str(), Some("rule-quarantine"));
+    assert_eq!(
+        parsed["web_search"]["rule_id"].as_str(),
+        Some("rule-quarantine")
+    );
     assert_eq!(
         parsed["other_tool"]["mode"].as_str(),
         Some("prompt"),
@@ -356,8 +358,7 @@ async fn rollback_tool_policy_restores_prior_mode() {
     )
     .await;
 
-    let (status, _body) =
-        post(app, &format!("/admin/evolution/{}/apply", pid.as_str())).await;
+    let (status, _body) = post(app, &format!("/admin/evolution/{}/apply", pid.as_str())).await;
     assert_eq!(status, StatusCode::OK);
     let parsed: toml::Table = std::fs::read_to_string(&toml_path)
         .unwrap()
@@ -406,8 +407,7 @@ async fn rollback_prompt_template_removes_created_segment() {
     )
     .await;
 
-    let (status, _body) =
-        post(app, &format!("/admin/evolution/{}/apply", pid.as_str())).await;
+    let (status, _body) = post(app, &format!("/admin/evolution/{}/apply", pid.as_str())).await;
     assert_eq!(status, StatusCode::OK);
     let segment_path = tmp
         .path()
@@ -424,5 +424,101 @@ async fn rollback_prompt_template_removes_created_segment() {
     assert!(
         !segment_path.exists(),
         "rollback must remove the segment file when before_present=false"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 W1 4-1D follow-up: agent_card kind
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn apply_agent_card_writes_card_file() {
+    let (tmp, _applier, evol, app) = boot().await;
+    let pid = seed_approved(
+        &evol,
+        "evol-ac-e2e-001",
+        EvolutionKind::AgentCard,
+        "casual",
+        &json!({
+            "before": "",
+            "after": "# Casual\n\nWarm, conversational, low-formality.",
+            "rationale": "voice drift cluster",
+        })
+        .to_string(),
+    )
+    .await;
+
+    let (status, body) = post(app, &format!("/admin/evolution/{}/apply", pid.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "apply returned {body}");
+    assert_eq!(body["status"], "applied");
+
+    let card_path = tmp
+        .path()
+        .join("tenants")
+        .join("default")
+        .join("agent_cards")
+        .join("casual.md");
+    assert!(card_path.exists(), "agent card written");
+    assert!(std::fs::read_to_string(&card_path)
+        .unwrap()
+        .contains("Warm, conversational"));
+
+    // Audit row carries the inverse_diff with op=agent_card.
+    let row: (String, String) =
+        sqlx::query_as("SELECT target, inverse_diff FROM evolution_history WHERE proposal_id = ?")
+            .bind(pid.as_str())
+            .fetch_one(evol.pool())
+            .await
+            .unwrap();
+    assert_eq!(row.0, "casual");
+    let inv: serde_json::Value = serde_json::from_str(&row.1).unwrap();
+    assert_eq!(inv["op"], "agent_card");
+    assert_eq!(inv["tenant"], "default");
+    assert_eq!(inv["agent"], "casual");
+    assert_eq!(inv["before_present"], false);
+}
+
+#[tokio::test]
+async fn rollback_agent_card_restores_prior_content() {
+    let (tmp, applier, evol, app) = boot().await;
+    let card_path = tmp
+        .path()
+        .join("tenants")
+        .join("default")
+        .join("agent_cards")
+        .join("default.md");
+    std::fs::create_dir_all(card_path.parent().unwrap()).unwrap();
+    std::fs::write(&card_path, "# Default\n\noriginal voice.").unwrap();
+
+    let pid = seed_approved(
+        &evol,
+        "evol-ac-e2e-rollback-001",
+        EvolutionKind::AgentCard,
+        "default",
+        &json!({
+            "before": "",
+            "after": "# Default\n\nrewritten voice.",
+            "rationale": "drift",
+        })
+        .to_string(),
+    )
+    .await;
+
+    let (status, _body) = post(app, &format!("/admin/evolution/{}/apply", pid.as_str())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(std::fs::read_to_string(&card_path)
+        .unwrap()
+        .contains("rewritten voice"));
+
+    applier
+        .revert(&pid, "voice was right the first time")
+        .await
+        .expect("revert succeeds");
+
+    assert!(
+        std::fs::read_to_string(&card_path)
+            .unwrap()
+            .contains("original voice"),
+        "revert restores prior content when before_present=true"
     );
 }
