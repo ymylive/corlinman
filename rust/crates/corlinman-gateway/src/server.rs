@@ -266,9 +266,6 @@ pub async fn build_runtime_full_with_evolution(
         "plugin registry loaded",
     );
 
-    // Open the session history store, keyed off `$CORLINMAN_DATA_DIR`.
-    let session_store = open_session_store().await;
-
     // Resolve config *once* so both the admin state and the /health probe
     // share the same `Arc<ArcSwap<Config>>` — live reloads propagate to
     // both surfaces at once. B5-BE3: when the caller passed in a
@@ -279,6 +276,30 @@ pub async fn build_runtime_full_with_evolution(
         Some(w) => w.arc_swap(),
         None => Arc::new(ArcSwap::from_pointee(cfg)),
     };
+
+    // Phase 4 W1 4-1A Item 5: rename legacy `<data_dir>/<name>.sqlite`
+    // files into `<data_dir>/tenants/default/<name>.sqlite` BEFORE any
+    // store is opened. Otherwise `open_session_store` and friends
+    // would happily open the legacy paths and the migration would
+    // race / be impossible mid-run. Idempotent and gated; see
+    // `crate::legacy_migration` for the rules.
+    {
+        let snap = config_handle.load();
+        if snap.tenants.enabled && snap.tenants.migrate_legacy_paths {
+            if let Err(err) =
+                crate::legacy_migration::migrate_legacy_data_files(&resolve_data_dir())
+            {
+                tracing::error!(
+                    error = %err,
+                    "phase 4 legacy data file migration failed; \
+                     gateway will continue but per-tenant routes may 503",
+                );
+            }
+        }
+    }
+
+    // Open the session history store, keyed off `$CORLINMAN_DATA_DIR`.
+    let session_store = open_session_store().await;
 
     // S7.T5: bundle the health probe state.
     let endpoint = resolve_endpoint();

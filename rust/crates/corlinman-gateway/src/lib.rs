@@ -8,6 +8,7 @@ pub mod config_watcher;
 pub mod evolution_applier;
 pub mod evolution_observer;
 pub mod grpc;
+pub mod legacy_migration;
 pub mod log_broadcast;
 pub mod log_retention;
 pub mod metrics;
