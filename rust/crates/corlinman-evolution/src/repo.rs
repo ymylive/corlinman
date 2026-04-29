@@ -1278,7 +1278,7 @@ mod tests {
         let (_tmp, store) = fresh_store().await;
         let repo = ProposalsRepo::new(store.pool().clone());
         let now: i64 = 100 * 3_600 * 1_000; // pick a base in the integer middle.
-        let in_window = now - 1 * 3_600 * 1_000;
+        let in_window = now - 3_600 * 1_000;
         let too_old = now - 100 * 3_600 * 1_000;
         let in_future = now + 5 * 60 * 1_000;
         insert_applied_at(&repo, "evol-grace-in", in_window).await;
@@ -1298,7 +1298,7 @@ mod tests {
         let (_tmp, store) = fresh_store().await;
         let repo = ProposalsRepo::new(store.pool().clone());
         let now: i64 = 100 * 3_600 * 1_000;
-        let applied_at = now - 1 * 3_600 * 1_000;
+        let applied_at = now - 3_600 * 1_000;
         let pid_rolled = insert_applied_at(&repo, "evol-grace-rolled", applied_at).await;
         let _pid_live = insert_applied_at(&repo, "evol-grace-live", applied_at).await;
         // Flip one row to rolled_back; it must drop out of the window list.

@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS evolution_signals (
     payload_json TEXT NOT NULL,
     trace_id     TEXT,
     session_id   TEXT,
-    observed_at  INTEGER NOT NULL
+    observed_at  INTEGER NOT NULL,
+    tenant_id    TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_evol_signals_kind_target
@@ -46,7 +47,8 @@ CREATE TABLE IF NOT EXISTS evolution_proposals (
     applied_at            INTEGER,
     auto_rollback_at      INTEGER,
     auto_rollback_reason  TEXT,
-    rollback_of           TEXT REFERENCES evolution_proposals(id)
+    rollback_of           TEXT REFERENCES evolution_proposals(id),
+    tenant_id             TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_evol_proposals_status
@@ -66,7 +68,8 @@ CREATE TABLE IF NOT EXISTS evolution_history (
     metrics_baseline TEXT NOT NULL,
     applied_at       INTEGER NOT NULL,
     rolled_back_at   INTEGER,
-    rollback_reason  TEXT
+    rollback_reason  TEXT,
+    tenant_id        TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_evol_history_proposal
@@ -96,14 +99,43 @@ CREATE TABLE IF NOT EXISTS apply_intent_log (
     intent_at       INTEGER NOT NULL,
     committed_at    INTEGER,
     failed_at       INTEGER,
-    failure_reason  TEXT
+    failure_reason  TEXT,
+    tenant_id       TEXT NOT NULL DEFAULT 'default'
 );
+"#;
 
--- Partial index only indexes uncommitted rows. The scan on startup is
--- the hot path; once a row is committed we never read it again so the
--- partial form keeps the index pages tiny on long-running deployments.
-CREATE INDEX IF NOT EXISTS idx_apply_intent_uncommitted
-    ON apply_intent_log(intent_at)
+/// DDL applied *after* `SCHEMA_SQL` and the `MIGRATIONS` loop, so it can
+/// safely reference columns that the migrations just added (e.g. the Phase
+/// 4 `tenant_id` column on legacy DBs that pre-date the multi-tenant
+/// schema). Splitting these out of `SCHEMA_SQL` is the only way to make
+/// `CREATE INDEX ... ON tbl(tenant_id, ...)` succeed against a legacy v0.3
+/// file: SQLite resolves index column names at index-creation time, so an
+/// index referencing a not-yet-added column would error on the first open.
+///
+/// Keep this section limited to:
+/// - composite indexes that include a migrated column
+/// - drop+create swaps of pre-existing indexes whose tenant-aware
+///   replacement supersedes them
+pub const POST_MIGRATIONS_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_evol_signals_tenant_observed
+    ON evolution_signals(tenant_id, observed_at);
+
+CREATE INDEX IF NOT EXISTS idx_evol_proposals_tenant_status
+    ON evolution_proposals(tenant_id, status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_evol_history_tenant_applied
+    ON evolution_history(tenant_id, applied_at);
+
+-- Phase 4 W1 4-1A: replace the pre-tenant `apply_intent_log` partial index
+-- with the tenant-aware version. Partial indexes are scoped by the
+-- predicate plus the indexed columns, so the only safe migration is
+-- DROP + CREATE (CREATE OR REPLACE INDEX is not a SQLite primitive).
+-- Both statements are idempotent: re-opening an already-migrated DB
+-- DROPs nothing and CREATE no-ops.
+DROP INDEX IF EXISTS idx_apply_intent_uncommitted;
+
+CREATE INDEX IF NOT EXISTS idx_apply_intent_tenant_uncommitted
+    ON apply_intent_log(tenant_id, intent_at)
     WHERE committed_at IS NULL AND failed_at IS NULL;
 "#;
 
@@ -142,5 +174,29 @@ pub const MIGRATIONS: &[(&str, &str, &str)] = &[
         "evolution_proposals",
         "auto_rollback_reason",
         "ALTER TABLE evolution_proposals ADD COLUMN auto_rollback_reason TEXT",
+    ),
+    // Phase 4 W1 4-1A — tenant_id introduction. Each migration is a
+    // single ADD COLUMN with NOT NULL DEFAULT 'default' so legacy rows
+    // backfill at ALTER time without a separate UPDATE. Pairs with the
+    // Phase 3.1 Tier 3 / S-2 precedent on user_traits + agent_persona_state.
+    (
+        "evolution_signals",
+        "tenant_id",
+        "ALTER TABLE evolution_signals ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+    ),
+    (
+        "evolution_proposals",
+        "tenant_id",
+        "ALTER TABLE evolution_proposals ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+    ),
+    (
+        "evolution_history",
+        "tenant_id",
+        "ALTER TABLE evolution_history ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+    ),
+    (
+        "apply_intent_log",
+        "tenant_id",
+        "ALTER TABLE apply_intent_log ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
     ),
 ];

@@ -49,15 +49,45 @@ CREATE TABLE IF NOT EXISTS sessions (
     tool_call_id TEXT,
     tool_calls_json TEXT,
     ts TEXT NOT NULL,
+    tenant_id TEXT NOT NULL DEFAULT 'default',
     PRIMARY KEY (session_key, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_key ON sessions(session_key);
+"#;
+
+/// Indexes that reference the Phase 4 W1 4-1A `tenant_id` column. Run
+/// *after* `ensure_tenant_column` so the column exists on legacy DBs
+/// before SQLite resolves index column names.
+const TENANT_INDEX_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_sessions_tenant_key
+    ON sessions(tenant_id, session_key, seq);
 "#;
 
 /// Storage error helper — wrap a sqlx error into `CorlinmanError::Storage` with
 /// a short operation tag so logs can distinguish failing queries.
 fn storage<E: std::fmt::Display>(op: &str, e: E) -> CorlinmanError {
     CorlinmanError::Storage(format!("sessions {op}: {e}"))
+}
+
+/// Phase 4 W1 4-1A: idempotent ALTER TABLE ADD COLUMN for `tenant_id`
+/// on the single `sessions` table. Probes via pragma_table_info to skip
+/// the ALTER on already-migrated DBs. Mirrors the
+/// `ensure_decay_columns` / `ensure_tenant_columns` pattern used by
+/// `corlinman-vector`.
+async fn ensure_tenant_column(pool: &SqlitePool) -> Result<(), CorlinmanError> {
+    let exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?1")
+            .bind("tenant_id")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| storage("probe_tenant", e))?;
+    if exists.is_none() {
+        sqlx::raw_sql("ALTER TABLE sessions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+            .execute(pool)
+            .await
+            .map_err(|e| storage("alter_tenant", e))?;
+    }
+    Ok(())
 }
 
 /// SQLite-backed session store. Cheap to clone; internally holds a pooled
@@ -90,6 +120,21 @@ impl SqliteSessionStore {
             .execute(&pool)
             .await
             .map_err(|e| storage("apply_schema", e))?;
+
+        // Phase 4 W1 4-1A: idempotent tenant_id column add for legacy
+        // pre-tenant DBs. Probes via pragma_table_info; on miss, ALTER
+        // adds the column with `NOT NULL DEFAULT 'default'` so legacy
+        // rows backfill at ALTER time. Re-open of an already-migrated
+        // file is a no-op.
+        ensure_tenant_column(&pool).await?;
+
+        // Indexes referencing `tenant_id` must run after the column
+        // exists on legacy DBs; SQLite resolves index column names at
+        // create time.
+        sqlx::raw_sql(TENANT_INDEX_SQL)
+            .execute(&pool)
+            .await
+            .map_err(|e| storage("apply_tenant_index", e))?;
 
         Ok(Self { pool })
     }
@@ -251,6 +296,106 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(idx.as_deref(), Some("idx_sessions_key"));
+    }
+
+    /// Phase 4 W1 4-1A: fresh DB lands with `tenant_id` on `sessions`
+    /// and the tenant-aware composite index from TENANT_INDEX_SQL is
+    /// present.
+    #[tokio::test]
+    async fn fresh_db_has_phase4_tenant_column_and_index() {
+        let (store, _tmp) = fresh_store().await;
+
+        let cnt: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='tenant_id'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(cnt, 1, "sessions.tenant_id missing on fresh DB");
+
+        let idx: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_tenant_key'",
+        )
+        .fetch_optional(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(idx.as_deref(), Some("idx_sessions_tenant_key"));
+    }
+
+    /// Phase 4 W1 4-1A: a legacy DB without `tenant_id` must converge
+    /// when opened through `SqliteSessionStore::open`. Bootstrap a
+    /// pre-Phase-4 file directly via `SqliteConnectOptions`, close,
+    /// reopen via the production path.
+    #[tokio::test]
+    async fn open_migrates_legacy_db_to_phase4_tenant_shape() {
+        use sqlx::sqlite::SqliteConnectOptions;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("sessions.sqlite");
+        let url = format!("sqlite://{}", path.display());
+
+        {
+            let opts = SqliteConnectOptions::from_str(&url)
+                .unwrap()
+                .create_if_missing(true);
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                r#"CREATE TABLE sessions (
+                    session_key TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    tool_call_id TEXT,
+                    tool_calls_json TEXT,
+                    ts TEXT NOT NULL,
+                    PRIMARY KEY (session_key, seq)
+                );
+                CREATE INDEX idx_sessions_key ON sessions(session_key);
+                INSERT INTO sessions(session_key, seq, role, content, ts)
+                    VALUES('legacy-s', 0, 'user', 'pre-tenant message', '2026-04-01T00:00:00Z');
+                "#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        // Production-path open → migration runs.
+        let store = SqliteSessionStore::open(&path).await.unwrap();
+
+        let cnt: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='tenant_id'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(cnt, 1, "open() must add sessions.tenant_id on legacy DB");
+
+        let idx: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_tenant_key'",
+        )
+        .fetch_optional(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(idx.as_deref(), Some("idx_sessions_tenant_key"));
+
+        // Legacy row backfilled to the reserved 'default' value.
+        let backfilled: String =
+            sqlx::query_scalar("SELECT tenant_id FROM sessions WHERE session_key='legacy-s'")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(backfilled, "default");
+
+        // Idempotent reopen: production path on already-migrated DB is
+        // a clean no-op.
+        drop(store);
+        let _store2 = SqliteSessionStore::open(&path).await.unwrap();
     }
 
     #[tokio::test]

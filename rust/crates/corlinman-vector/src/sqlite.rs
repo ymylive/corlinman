@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS files (
     checksum TEXT NOT NULL,
     mtime INTEGER NOT NULL,
     size INTEGER NOT NULL,
-    updated_at INTEGER
+    updated_at INTEGER,
+    tenant_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -60,13 +61,15 @@ CREATE TABLE IF NOT EXISTS chunks (
     consolidated_at INTEGER,
     last_recalled_at INTEGER,
     created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
+    tenant_id TEXT NOT NULL DEFAULT 'default',
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS kv_store (
     key TEXT PRIMARY KEY,
     value TEXT,
-    vector BLOB
+    vector BLOB,
+    tenant_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_diary ON files(diary_name);
@@ -100,11 +103,9 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     args_json TEXT NOT NULL,
     requested_at TEXT NOT NULL,
     decided_at TEXT,
-    decision TEXT
+    decision TEXT,
+    tenant_id TEXT NOT NULL DEFAULT 'default'
 );
-
-CREATE INDEX IF NOT EXISTS idx_pending_approvals_undecided
-    ON pending_approvals(decided_at) WHERE decided_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_requested
     ON pending_approvals(requested_at);
@@ -115,7 +116,8 @@ CREATE TABLE IF NOT EXISTS tag_nodes (
     name        TEXT NOT NULL,
     path        TEXT NOT NULL UNIQUE,
     depth       INTEGER NOT NULL,
-    created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    tenant_id   TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_tag_nodes_parent ON tag_nodes(parent_id);
@@ -139,6 +141,33 @@ CREATE TABLE IF NOT EXISTS chunk_epa (
     logic_depth  REAL    NOT NULL,
     computed_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+"#;
+
+/// Indexes that reference the Phase 4 W1 4-1A `tenant_id` column. Run
+/// *after* `ensure_tenant_columns` so the column exists on legacy v6
+/// DBs before SQLite tries to build an index on it.
+///
+/// Includes the DROP+CREATE swap for `idx_pending_approvals_undecided`:
+/// SQLite cannot ALTER an index, so the only path to a tenant-aware
+/// partial index is to drop the old one and recreate. Both statements
+/// are idempotent against an already-migrated DB (DROP IF EXISTS
+/// no-ops when the old index is already gone; CREATE IF NOT EXISTS
+/// no-ops when the new one already exists).
+const TENANT_INDEXES_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_files_tenant_diary
+    ON files(tenant_id, diary_name);
+CREATE INDEX IF NOT EXISTS idx_chunks_tenant_namespace
+    ON chunks(tenant_id, namespace, id);
+CREATE INDEX IF NOT EXISTS idx_kv_tenant
+    ON kv_store(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_tag_nodes_tenant_path
+    ON tag_nodes(tenant_id, path);
+
+DROP INDEX IF EXISTS idx_pending_approvals_undecided;
+
+CREATE INDEX IF NOT EXISTS idx_pending_approvals_tenant_undecided
+    ON pending_approvals(tenant_id, decided_at)
+    WHERE decided_at IS NULL;
 "#;
 
 /// Row from `files`.
@@ -257,6 +286,21 @@ impl SqliteStore {
         // and probing `pragma_table_info` keeps the call idempotent so a
         // re-open of an already-migrated file is a no-op.
         ensure_decay_columns(&pool).await?;
+
+        // Phase 4 W1 4-1A: idempotent tenant_id column additions for the
+        // five top-level tables. Same pragma-probe + ALTER pattern as the
+        // decay columns above; pre-Phase-4 DBs converge by adding the
+        // column with `DEFAULT 'default'` so legacy rows backfill at
+        // ALTER time without a separate UPDATE.
+        ensure_tenant_columns(&pool).await?;
+
+        // Indexes that reference `tenant_id` must be created *after* the
+        // ensure_tenant_columns call so legacy DBs have the column in
+        // place before SQLite resolves index column names.
+        sqlx::raw_sql(TENANT_INDEXES_SQL)
+            .execute(&pool)
+            .await
+            .context("apply TENANT_INDEXES_SQL")?;
 
         Ok(Self { pool })
     }
@@ -1418,6 +1462,45 @@ async fn ensure_decay_columns(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// Phase 4 W1 4-1A: idempotent ALTER TABLE ADD COLUMN for `tenant_id`
+/// on the five top-level tables. Uses `pragma_table_info` to skip
+/// tables that already have the column so a re-open of an
+/// already-migrated file is a no-op. Each ALTER carries
+/// `NOT NULL DEFAULT 'default'`, so legacy rows are backfilled to the
+/// reserved single-tenant value at ALTER time without a separate
+/// UPDATE pass.
+///
+/// Mirrors the Phase 3.1 Tier 3 / S-2 precedent on
+/// `user_traits` + `agent_persona_state`.
+async fn ensure_tenant_columns(pool: &SqlitePool) -> Result<()> {
+    const TABLES: &[&str] = &[
+        "files",
+        "chunks",
+        "kv_store",
+        "pending_approvals",
+        "tag_nodes",
+    ];
+    for table in TABLES {
+        let exists: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
+        ))
+        .bind("tenant_id")
+        .fetch_optional(pool)
+        .await
+        .with_context(|| format!("probe {table}.tenant_id"))?;
+        if exists.is_some() {
+            continue;
+        }
+        let sql =
+            format!("ALTER TABLE {table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'");
+        sqlx::raw_sql(&sql)
+            .execute(pool)
+            .await
+            .with_context(|| format!("ALTER TABLE {table} ADD COLUMN tenant_id"))?;
+    }
+    Ok(())
+}
+
 fn row_to_approval(r: sqlx::sqlite::SqliteRow) -> PendingApproval {
     PendingApproval {
         id: r.get::<String, _>("id"),
@@ -1856,6 +1939,196 @@ mod tests {
                 "last_recalled_at".to_string()
             ]
         );
+    }
+
+    /// Phase 4 W1 4-1A: fresh DB lands with `tenant_id` on all five
+    /// migrated tables and the tenant-aware indexes from
+    /// TENANT_INDEXES_SQL are present.
+    #[tokio::test]
+    async fn fresh_db_has_phase4_tenant_columns_and_indexes() {
+        let (store, _tmp) = fresh_store().await;
+        for table in [
+            "files",
+            "chunks",
+            "kv_store",
+            "pending_approvals",
+            "tag_nodes",
+        ] {
+            let exists: Option<i64> = sqlx::query_scalar(&format!(
+                "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
+            ))
+            .bind("tenant_id")
+            .fetch_optional(store.pool())
+            .await
+            .unwrap();
+            assert!(exists.is_some(), "{table}.tenant_id missing on fresh DB");
+        }
+
+        for idx in [
+            "idx_files_tenant_diary",
+            "idx_chunks_tenant_namespace",
+            "idx_kv_tenant",
+            "idx_tag_nodes_tenant_path",
+            "idx_pending_approvals_tenant_undecided",
+        ] {
+            let row: Option<String> =
+                sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='index' AND name=?1")
+                    .bind(idx)
+                    .fetch_optional(store.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(row.as_deref(), Some(idx), "missing index {idx}");
+        }
+
+        // Pre-tenant `idx_pending_approvals_undecided` should have been
+        // dropped by TENANT_INDEXES_SQL.
+        let stale: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_pending_approvals_undecided'",
+        )
+        .fetch_optional(store.pool())
+        .await
+        .unwrap();
+        assert!(
+            stale.is_none(),
+            "old idx_pending_approvals_undecided should be gone"
+        );
+    }
+
+    /// Phase 4 W1 4-1A: a legacy DB created with the pre-Phase-4
+    /// schema must converge to the tenant-aware shape when opened
+    /// through `SqliteStore::open`. Bootstrap a separate sqlite file
+    /// directly via `SqliteConnectOptions` (no FTS triggers, no FK
+    /// enforcement headaches), close it, then reopen via the
+    /// production path and assert tenant_id + tenant indexes appear.
+    #[tokio::test]
+    async fn open_migrates_legacy_db_to_phase4_tenant_shape() {
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("kb.sqlite");
+        let url = format!("sqlite://{}", path.display());
+
+        // Bootstrap a legacy v6 (post-W3-A, pre-Phase-4) shape: tables
+        // without tenant_id, plus the legacy `idx_pending_approvals_undecided`
+        // partial index. Use a separate connection so we close it cleanly
+        // before reopening through `open`.
+        {
+            let opts = SqliteConnectOptions::from_str(&url)
+                .unwrap()
+                .create_if_missing(true);
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                r#"CREATE TABLE files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT UNIQUE NOT NULL,
+                    diary_name TEXT NOT NULL,
+                    checksum TEXT NOT NULL,
+                    mtime INTEGER NOT NULL,
+                    size INTEGER NOT NULL,
+                    updated_at INTEGER
+                );
+                CREATE TABLE chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    vector BLOB,
+                    namespace TEXT NOT NULL DEFAULT 'general',
+                    decay_score REAL NOT NULL DEFAULT 1.0,
+                    consolidated_at INTEGER,
+                    last_recalled_at INTEGER,
+                    created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
+                    FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+                );
+                CREATE TABLE kv_store (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    vector BLOB
+                );
+                CREATE TABLE pending_approvals (
+                    id TEXT PRIMARY KEY,
+                    session_key TEXT NOT NULL,
+                    plugin TEXT NOT NULL,
+                    tool TEXT NOT NULL,
+                    args_json TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    decision TEXT
+                );
+                CREATE INDEX idx_pending_approvals_undecided
+                    ON pending_approvals(decided_at) WHERE decided_at IS NULL;
+                CREATE TABLE tag_nodes (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_id   INTEGER REFERENCES tag_nodes(id) ON DELETE CASCADE,
+                    name        TEXT NOT NULL,
+                    path        TEXT NOT NULL UNIQUE,
+                    depth       INTEGER NOT NULL,
+                    created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                );
+                "#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        // Open through the production path → tenant migrations apply.
+        let store = SqliteStore::open(&path).await.unwrap();
+
+        for table in [
+            "files",
+            "chunks",
+            "kv_store",
+            "pending_approvals",
+            "tag_nodes",
+        ] {
+            let cnt: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name='tenant_id'"
+            ))
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            assert_eq!(cnt, 1, "open() must add {table}.tenant_id on legacy DB");
+        }
+
+        for idx in [
+            "idx_files_tenant_diary",
+            "idx_chunks_tenant_namespace",
+            "idx_kv_tenant",
+            "idx_tag_nodes_tenant_path",
+            "idx_pending_approvals_tenant_undecided",
+        ] {
+            let row: Option<String> =
+                sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='index' AND name=?1")
+                    .bind(idx)
+                    .fetch_optional(store.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(row.as_deref(), Some(idx), "missing index {idx}");
+        }
+
+        // Legacy partial index swapped out by TENANT_INDEXES_SQL.
+        let stale: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_pending_approvals_undecided'",
+        )
+        .fetch_optional(store.pool())
+        .await
+        .unwrap();
+        assert!(
+            stale.is_none(),
+            "legacy idx_pending_approvals_undecided should be dropped"
+        );
+
+        // Idempotent reopen: production path on already-migrated DB
+        // must be a clean no-op.
+        drop(store);
+        let _store2 = SqliteStore::open(&path).await.unwrap();
     }
 
     #[tokio::test]

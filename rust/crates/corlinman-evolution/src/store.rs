@@ -11,7 +11,7 @@ use sqlx::{
     SqlitePool,
 };
 
-use crate::schema::{MIGRATIONS, SCHEMA_SQL};
+use crate::schema::{MIGRATIONS, POST_MIGRATIONS_SQL, SCHEMA_SQL};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
@@ -23,6 +23,8 @@ pub enum OpenError {
     ApplySchema(sqlx::Error),
     #[error("apply migration {0}.{1}: {2}")]
     ApplyMigration(&'static str, &'static str, sqlx::Error),
+    #[error("apply POST_MIGRATIONS_SQL: {0}")]
+    ApplyPostMigrations(sqlx::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +71,15 @@ impl EvolutionStore {
                     .map_err(|e| OpenError::ApplyMigration(table, column, e))?;
             }
         }
+
+        // Indexes that reference migrated columns must be created *after*
+        // the `MIGRATIONS` loop has added those columns to legacy DBs;
+        // putting them in `SCHEMA_SQL` would error against a pre-Phase-4
+        // file because SQLite resolves index column names at create time.
+        sqlx::raw_sql(POST_MIGRATIONS_SQL)
+            .execute(&pool)
+            .await
+            .map_err(OpenError::ApplyPostMigrations)?;
 
         Ok(Self { pool })
     }
@@ -251,5 +262,198 @@ mod tests {
     /// known at compile time; this leak is bounded to the test binary.
     fn leak(s: &str) -> &'static str {
         Box::leak(s.to_string().into_boxed_str())
+    }
+
+    /// Phase 4 W1 4-1A: fresh DB lands with `tenant_id` on every
+    /// migrated table and the post-migration tenant-aware indexes.
+    #[tokio::test]
+    async fn fresh_db_has_phase4_tenant_columns_and_indexes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("evolution.sqlite");
+        let store = EvolutionStore::open(&path).await.unwrap();
+
+        for table in [
+            "evolution_signals",
+            "evolution_proposals",
+            "evolution_history",
+            "apply_intent_log",
+        ] {
+            assert!(
+                column_exists(store.pool(), leak(table), "tenant_id")
+                    .await
+                    .unwrap(),
+                "{table}.tenant_id should exist on fresh DB"
+            );
+        }
+
+        // Tenant-aware indexes should be present after open() runs
+        // POST_MIGRATIONS_SQL.
+        for idx in [
+            "idx_evol_signals_tenant_observed",
+            "idx_evol_proposals_tenant_status",
+            "idx_evol_history_tenant_applied",
+            "idx_apply_intent_tenant_uncommitted",
+        ] {
+            let row: Option<String> =
+                sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='index' AND name=?1")
+                    .bind(idx)
+                    .fetch_optional(store.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(row.as_deref(), Some(idx), "missing index {idx}");
+        }
+
+        // The pre-tenant `idx_apply_intent_uncommitted` should have
+        // been dropped by POST_MIGRATIONS_SQL.
+        let stale: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_apply_intent_uncommitted'",
+        )
+        .fetch_optional(store.pool())
+        .await
+        .unwrap();
+        assert!(
+            stale.is_none(),
+            "old idx_apply_intent_uncommitted should be gone"
+        );
+    }
+
+    /// Phase 4 W1 4-1A: a pre-Phase-4 DB whose tables lack `tenant_id`
+    /// and whose `apply_intent_log` still carries the old partial index
+    /// must converge to the same end state when opened through the
+    /// production path. Mirrors `migration_adds_v0_3_columns_to_legacy_db`
+    /// for the new tenant_id migrations.
+    #[tokio::test]
+    async fn migration_adds_phase4_tenant_columns_to_legacy_db() {
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("evolution.sqlite");
+        let url = format!("sqlite://{}", path.display());
+
+        // Bootstrap a pre-Phase-4 (post-3.1) DB by hand: SCHEMA_SQL
+        // shape MINUS tenant_id columns, PLUS the old non-tenant
+        // partial index on apply_intent_log.
+        {
+            let opts = SqliteConnectOptions::from_str(&url)
+                .unwrap()
+                .create_if_missing(true);
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                r#"CREATE TABLE evolution_signals (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_kind   TEXT NOT NULL,
+                    target       TEXT,
+                    severity     TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    trace_id     TEXT,
+                    session_id   TEXT,
+                    observed_at  INTEGER NOT NULL
+                );
+                CREATE TABLE evolution_proposals (
+                    id                    TEXT PRIMARY KEY,
+                    kind                  TEXT NOT NULL,
+                    target                TEXT NOT NULL,
+                    diff                  TEXT NOT NULL,
+                    reasoning             TEXT NOT NULL,
+                    risk                  TEXT NOT NULL,
+                    budget_cost           INTEGER NOT NULL DEFAULT 1,
+                    status                TEXT NOT NULL,
+                    shadow_metrics        TEXT,
+                    eval_run_id           TEXT,
+                    baseline_metrics_json TEXT,
+                    signal_ids            TEXT NOT NULL,
+                    trace_ids             TEXT NOT NULL,
+                    created_at            INTEGER NOT NULL,
+                    decided_at            INTEGER,
+                    decided_by            TEXT,
+                    applied_at            INTEGER,
+                    auto_rollback_at      INTEGER,
+                    auto_rollback_reason  TEXT,
+                    rollback_of           TEXT
+                );
+                CREATE TABLE evolution_history (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    proposal_id      TEXT NOT NULL,
+                    kind             TEXT NOT NULL,
+                    target           TEXT NOT NULL,
+                    before_sha       TEXT NOT NULL,
+                    after_sha        TEXT NOT NULL,
+                    inverse_diff     TEXT NOT NULL,
+                    metrics_baseline TEXT NOT NULL,
+                    applied_at       INTEGER NOT NULL,
+                    rolled_back_at   INTEGER,
+                    rollback_reason  TEXT
+                );
+                CREATE TABLE apply_intent_log (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    proposal_id     TEXT NOT NULL,
+                    kind            TEXT NOT NULL,
+                    target          TEXT NOT NULL,
+                    intent_at       INTEGER NOT NULL,
+                    committed_at    INTEGER,
+                    failed_at       INTEGER,
+                    failure_reason  TEXT
+                );
+                CREATE INDEX idx_apply_intent_uncommitted
+                    ON apply_intent_log(intent_at)
+                    WHERE committed_at IS NULL AND failed_at IS NULL;
+                "#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        // Open through the production path → tenant migrations apply.
+        let store = EvolutionStore::open(&path).await.unwrap();
+
+        for table in [
+            "evolution_signals",
+            "evolution_proposals",
+            "evolution_history",
+            "apply_intent_log",
+        ] {
+            assert!(
+                column_exists(store.pool(), leak(table), "tenant_id")
+                    .await
+                    .unwrap(),
+                "migration must add {table}.tenant_id"
+            );
+        }
+
+        // The new tenant-aware partial index on apply_intent_log must
+        // be present, and the legacy index must have been dropped.
+        let new_idx: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_apply_intent_tenant_uncommitted'",
+        )
+        .fetch_optional(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            new_idx.as_deref(),
+            Some("idx_apply_intent_tenant_uncommitted")
+        );
+        let stale: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_apply_intent_uncommitted'",
+        )
+        .fetch_optional(store.pool())
+        .await
+        .unwrap();
+        assert!(
+            stale.is_none(),
+            "legacy partial index should be dropped post-migration"
+        );
+
+        // Idempotent reopen: running open() a second time must be a
+        // clean no-op (DROP IF EXISTS finds nothing, CREATE IF NOT
+        // EXISTS no-ops, ALTER guarded by pragma probe).
+        drop(store);
+        let _store2 = EvolutionStore::open(&path).await.unwrap();
     }
 }
