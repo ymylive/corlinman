@@ -191,6 +191,61 @@ async def test_list_filters_by_min_confidence(tmp_path: Path) -> None:
     assert [t.trait_value for t in default] == ["A", "B"]
 
 
+async def test_tenant_id_isolation_round_trip(tmp_path: Path) -> None:
+    """Phase 3.1: ``tenant_id`` defaults to ``'default'`` but a non-default
+    write must not leak into a default read.
+
+    Pins the contract that Phase 4 multi-tenant fan-out can flip the
+    parameter at the call site without retesting every store path.
+    """
+    db_path = tmp_path / "user_model.sqlite"
+    store = await UserModelStore.open_or_create(db_path)
+    async with store as s:
+        await s.upsert_trait(
+            user_id="qq:42",
+            trait_kind=TraitKind.INTEREST,
+            trait_value="default-tenant",
+            confidence=0.9,
+            session_id="s-d",
+            now_ms=1_000,
+        )  # default tenant
+        await s.upsert_trait(
+            user_id="qq:42",
+            trait_kind=TraitKind.INTEREST,
+            trait_value="t1-tenant",
+            confidence=0.9,
+            session_id="s-1",
+            now_ms=1_000,
+            tenant_id="tenant-1",
+        )
+
+        default_only = await s.list_traits_for_user("qq:42", min_confidence=0.0)
+        t1_only = await s.list_traits_for_user(
+            "qq:42", min_confidence=0.0, tenant_id="tenant-1"
+        )
+
+    assert {t.trait_value for t in default_only} == {"default-tenant"}
+    assert {t.trait_value for t in t1_only} == {"t1-tenant"}
+
+
+async def test_tenant_id_schema_has_index(tmp_path: Path) -> None:
+    """The composite ``(tenant_id, user_id)`` index must exist on a
+    fresh DB so Phase 4 multi-tenant queries don't full-scan."""
+    import sqlite3
+
+    db_path = tmp_path / "user_model.sqlite"
+    await UserModelStore.open_or_create(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'user_traits'"
+        ).fetchall()
+    finally:
+        conn.close()
+    names = {r[0] for r in rows}
+    assert "idx_user_traits_tenant_user" in names
+
+
 async def test_prune_low_confidence(tmp_path: Path) -> None:
     db_path = tmp_path / "user_model.sqlite"
     store = await UserModelStore.open_or_create(db_path)

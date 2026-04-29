@@ -164,7 +164,10 @@ async fn happy_path_list_approve_apply() {
     assert!(row.applied_at.is_some());
 
     // kb side: loser deleted, winner still present.
-    let kb_rows = kb.query_chunks_by_ids(&[winner_id, loser_id]).await.unwrap();
+    let kb_rows = kb
+        .query_chunks_by_ids(&[winner_id, loser_id])
+        .await
+        .unwrap();
     assert_eq!(kb_rows.len(), 1);
     assert_eq!(kb_rows[0].id, winner_id);
 }

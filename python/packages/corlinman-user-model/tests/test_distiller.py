@@ -64,6 +64,194 @@ def test_redact_handles_multiple_pii_in_one_string() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 3.1: expanded redaction surface
+# ---------------------------------------------------------------------------
+
+
+def test_redact_international_phone_with_separators() -> None:
+    """``+86 138-0013-8000`` is what real chats send; the v0 11-digit
+    regex missed it because of the separators."""
+    text = "联系我 +86 138-0013-8000"
+    out = redact_text(text)
+    assert "138" not in out or "[REDACTED]" in out
+    assert "[REDACTED]" in out
+
+
+def test_redact_chinese_id_x_check_digit() -> None:
+    """Chinese ID with ``X`` check digit (17 digits + X)."""
+    text = "ID 11010119900307875X 是测试"
+    out = redact_text(text)
+    assert "11010119900307875X" not in out
+    assert "[REDACTED]" in out
+
+
+def test_redact_bank_card_with_luhn() -> None:
+    """A 16-digit bank-card PAN that passes Luhn must be redacted."""
+    # 4111111111111111 — well-known Luhn-valid Visa test number.
+    text = "card 4111111111111111 expires next year"
+    out = redact_text(text)
+    assert "4111111111111111" not in out
+    assert "[REDACTED]" in out
+
+
+def test_redact_bank_card_keeps_invalid_luhn() -> None:
+    """Random 16-digit run that fails Luhn (e.g. an order id) is left
+    alone — that's the whole point of running Luhn instead of a bare
+    digit regex."""
+    # 1234567890123456 fails Luhn.
+    text = "order 1234567890123456 ships today"
+    out = redact_text(text)
+    assert "1234567890123456" in out, (
+        "Luhn-invalid run must NOT be redacted; out={out!r}"
+    )
+
+
+def test_redact_ipv4() -> None:
+    text = "see 192.168.1.1 for the gateway"
+    out = redact_text(text)
+    assert "192.168.1.1" not in out
+    assert "[REDACTED]" in out
+
+
+def test_redact_ipv6() -> None:
+    text = "v6 addr 2001:0db8:85a3:0000:0000:8a2e:0370:7334 right here"
+    out = redact_text(text)
+    assert "2001:0db8" not in out
+    assert "[REDACTED]" in out
+
+
+def test_redact_qq_number() -> None:
+    text = "QQ:1234567 加我聊聊"
+    out = redact_text(text)
+    assert "1234567" not in out
+    assert "[REDACTED]" in out
+
+
+def test_redact_url_with_ip_does_not_get_double_redacted() -> None:
+    """URL ordering: the URL pattern eats the whole thing first so the
+    embedded IP doesn't leak through as a half-redacted URL stub."""
+    text = "fetch http://192.168.1.1/health for status"
+    out = redact_text(text)
+    assert "192.168" not in out
+    # Exactly one [REDACTED] for the URL — not "[REDACTED]/health" or similar
+    # post-ip-redaction breakage.
+    assert out.count("[REDACTED]") == 1
+
+
+def test_redact_full_pii_battery_from_security_review() -> None:
+    """Every PII shape the Phase 3 security review flagged. One pass
+    must redact every entry — operators reading this test should be
+    able to copy the fixture into a real chat and see all six redact
+    cleanly without one masking another."""
+    fixture = (
+        "tel +86 138-0013-8000\n"
+        "id  11010119900307875X\n"
+        "card 4111111111111111\n"  # Luhn-valid Visa test
+        "ipv4 8.8.8.8\n"
+        "ipv6 2001:db8::1\n"
+        "QQ:1234567"
+    )
+    out = redact_text(fixture)
+    for token in [
+        "+86",
+        "11010119900307875X",
+        "4111111111111111",
+        "8.8.8.8",
+        "2001:db8",
+        "1234567",
+    ]:
+        assert token not in out, f"{token!r} survived redaction in {out!r}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.1: LLM output PII filter + evidence drop
+# ---------------------------------------------------------------------------
+
+
+async def test_distill_drops_traits_with_pii_in_value(
+    tmp_path: Path, sessions_db: Path
+) -> None:
+    """Even when the LLM ignores the prompt and stuffs an email into a
+    ``value`` field, the post-parse redaction filter drops that trait
+    rather than persisting it."""
+    _seed_long_session(sessions_db)
+    db_path = tmp_path / "user_model.sqlite"
+    config = DistillerConfig(
+        db_path=db_path,
+        sessions_db_path=sessions_db,
+        distill_after_session_turns=5,
+    )
+    caller = _make_llm_caller(
+        [
+            {
+                "kind": "interest",
+                "value": "Rust 异步运行时",
+                "confidence": 0.85,
+            },
+            # Simulated prompt-injection: value contains an email.
+            {
+                "kind": "tone",
+                "value": "user is admin@example.com",
+                "confidence": 0.9,
+            },
+        ]
+    )
+
+    traits = await distill_session(config, "qq:42", llm_caller=caller, now_ms=1)
+    # The clean trait survives; the PII-bearing one is dropped.
+    assert len(traits) == 1
+    assert traits[0].trait_value == "Rust 异步运行时"
+
+
+async def test_distill_does_not_persist_evidence_field(
+    tmp_path: Path, sessions_db: Path
+) -> None:
+    """An ``evidence`` field on the LLM response (legacy / regression)
+    must never reach the store. The store has no column for it, so
+    the smoke test is "the trait still lands but the JSON column body
+    doesn't carry the literal evidence string"."""
+    _seed_long_session(sessions_db)
+    db_path = tmp_path / "user_model.sqlite"
+    config = DistillerConfig(
+        db_path=db_path,
+        sessions_db_path=sessions_db,
+        distill_after_session_turns=5,
+    )
+    caller = _make_llm_caller(
+        [
+            {
+                "kind": "interest",
+                "value": "Rust",
+                "confidence": 0.85,
+                "evidence": "用户原文：联系我 13800138000",
+            },
+        ]
+    )
+
+    traits = await distill_session(config, "qq:42", llm_caller=caller, now_ms=1)
+    assert len(traits) == 1
+    # Round-trip via store: evidence must not show up in any column.
+    store = await UserModelStore.open_or_create(db_path)
+    async with store as s:
+        rows = await s.list_traits_for_user("qq:42", min_confidence=0.0)
+    assert len(rows) == 1
+    # Trait carries no evidence; the dataclass doesn't even have a
+    # field for it. Belt-and-suspenders: the captured trait_value is
+    # only the short phrase, never the evidence body.
+    assert "13800138000" not in rows[0].trait_value
+    assert "联系我" not in rows[0].trait_value
+
+
+async def test_distill_system_prompt_does_not_request_evidence() -> None:
+    """The new prompt drops the ``evidence`` field — pin it so a future
+    edit can't silently re-introduce the PII ingress."""
+    from corlinman_user_model.distiller import DISTILL_SYSTEM_PROMPT
+
+    assert "evidence" not in DISTILL_SYSTEM_PROMPT
+    assert "PII" in DISTILL_SYSTEM_PROMPT or "电话" in DISTILL_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
 # distill_session — wire test with a mocked LLM caller
 # ---------------------------------------------------------------------------
 

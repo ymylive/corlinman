@@ -50,8 +50,8 @@ use corlinman_core::metrics::{
     EVOLUTION_PROPOSALS_ROLLED_BACK,
 };
 use corlinman_evolution::{
-    EvolutionHistory, EvolutionKind, EvolutionStatus, EvolutionStore, HistoryRepo, ProposalId,
-    ProposalsRepo, RepoError,
+    EvolutionHistory, EvolutionKind, EvolutionStatus, EvolutionStore, HistoryRepo, IntentLogRepo,
+    ProposalId, ProposalsRepo, RepoError,
 };
 use corlinman_vector::SqliteStore;
 use serde_json::json;
@@ -123,6 +123,14 @@ pub enum ApplyError {
     /// missing required keys. Carries a short reason string.
     #[error("malformed inverse_diff: {0}")]
     MalformedInverseDiff(String),
+    /// Phase 3.1: `inverse_diff` parsed structurally but a field
+    /// failed the trust whitelist (unknown namespace, non-ASCII path,
+    /// out-of-range id, oversized string). Carries a short reason
+    /// string. Distinct from `MalformedInverseDiff` so the monitor
+    /// can downgrade tamper-suspect proposals to "skip + alert"
+    /// instead of retrying the revert in a tight loop.
+    #[error("tampered inverse_diff: {0}")]
+    Tampered(String),
 }
 
 /// Real applier for `memory_op` evolution proposals. Constructed at
@@ -132,6 +140,11 @@ pub enum ApplyError {
 pub struct EvolutionApplier {
     proposals: ProposalsRepo,
     history: HistoryRepo,
+    /// Phase 3.1: writes to `apply_intent_log` so a crash between the
+    /// kb mutation and the evolution audit row gets surfaced on
+    /// startup. Same pool as the other evolution repos — single
+    /// SQLite file, no extra connection budget.
+    intent_log: IntentLogRepo,
     kb_store: Arc<SqliteStore>,
     evolution_store: Arc<EvolutionStore>,
     /// AutoRollback thresholds (Phase 3 W1-B). Owned here so the applier
@@ -169,9 +182,11 @@ impl EvolutionApplier {
     ) -> Self {
         let proposals = ProposalsRepo::new(evolution_store.pool().clone());
         let history = HistoryRepo::new(evolution_store.pool().clone());
+        let intent_log = IntentLogRepo::new(evolution_store.pool().clone());
         Self {
             proposals,
             history,
+            intent_log,
             kb_store,
             evolution_store,
             auto_rollback_thresholds,
@@ -179,12 +194,49 @@ impl EvolutionApplier {
         }
     }
 
+    /// Phase 3.1 startup hook: scan `apply_intent_log` for half-
+    /// committed forward applies (a kb mutation that was started but
+    /// neither committed nor failed in the audit table). Each row
+    /// emits a `tracing::warn!` line so operators see them in the
+    /// boot log, plus the count is returned so the caller can wire a
+    /// metric / hook event without re-querying.
+    ///
+    /// We deliberately do **not** auto-revert: the kb may already
+    /// reflect the change, and the operator needs to decide whether
+    /// to retry forward, run a manual revert, or accept the partial
+    /// state. Auto-restoring without that human in the loop is the
+    /// scenario that turns a bug into a data-loss incident.
+    pub async fn scan_half_committed(&self) -> Result<usize, RepoError> {
+        let outstanding = self.intent_log.list_uncommitted().await?;
+        for intent in &outstanding {
+            tracing::warn!(
+                intent_id = intent.id,
+                proposal_id = %intent.proposal_id,
+                kind = %intent.kind,
+                target = %intent.target,
+                intent_at = intent.intent_at,
+                "evolution_apply.half_committed: forward apply did not stamp \
+                 committed_at/failed_at — manual inspection required"
+            );
+        }
+        Ok(outstanding.len())
+    }
+
     /// Apply an approved proposal. Returns the freshly-inserted history
     /// row (with autoincrement id populated). Failures leave the
     /// proposal in `approved` and write no history row — apart from the
     /// known two-DB partial-fail mode documented at the module level.
+    ///
+    /// Phase 3.1 wraps the entire forward path in an `apply_intent_log`
+    /// row: opened before the kb mutation, stamped `committed_at` after
+    /// the audit lands, stamped `failed_at` on any clean error. A crash
+    /// between the two writes leaves a row with both stamps NULL — the
+    /// gateway scans those at startup so operators see half-committed
+    /// applies in the boot log.
     pub async fn apply(&self, id: &ProposalId) -> Result<EvolutionHistory, ApplyError> {
-        // 1. Load + gate.
+        // 1. Load + gate. We do these *before* opening the intent log
+        //    so a NotFound / NotApproved doesn't litter the table with
+        //    rows that were never going to mutate the kb.
         let proposal = match self.proposals.get(id).await {
             Ok(p) => p,
             Err(RepoError::NotFound(_)) => return Err(ApplyError::NotFound(id.0.clone())),
@@ -196,12 +248,78 @@ impl EvolutionApplier {
             ));
         }
 
-        // 2. Dispatch per-kind. Each handler returns a `MutationOutcome`
-        //    so the audit/baseline path below stays kind-agnostic.
-        //    `memory_op` carries a parsed plan (`merge_chunks` or
-        //    `delete_chunk`) for the counter bump after the audit lands;
-        //    the new kinds bump no counters yet (Phase 3-2B doesn't ship
-        //    per-kind metrics — operator dashboards read history).
+        // 2. Open the intent log. Only proposals that survived the
+        //    gates above land here; the row carries enough info
+        //    (proposal_id + kind + target + intent_at) for the
+        //    half-committed scan to be useful without a join back
+        //    into evolution_proposals.
+        let intent_at = now_ms();
+        let intent_id = self
+            .intent_log
+            .record_intent(
+                id.as_str(),
+                proposal.kind.as_str(),
+                &proposal.target,
+                intent_at,
+            )
+            .await
+            .map_err(ApplyError::Repo)?;
+
+        // 3. Run the actual apply pipeline. On any error we stamp
+        //    `failed_at` and return — the partial-index-backed scan
+        //    will not surface this row, so operators only see the
+        //    truly-stuck applies. On success we stamp `committed_at`
+        //    via the same path.
+        match self.apply_inner(id, &proposal).await {
+            Ok(out) => {
+                if let Err(e) = self.intent_log.mark_committed(intent_id, now_ms()).await {
+                    // Log-only: the apply itself succeeded; failing to
+                    // stamp committed_at just means the half-committed
+                    // scan will surface this row at next boot. The
+                    // operator can clear it by inspecting the audit
+                    // trail, which is intact.
+                    tracing::warn!(
+                        intent_id,
+                        error = %e,
+                        "apply_intent_log.mark_committed failed; row will appear in next startup scan"
+                    );
+                }
+                Ok(out)
+            }
+            Err(err) => {
+                // Cheap reason string — keep it short, the column is
+                // operator-facing not a debugger trace.
+                let reason = format!("{err}");
+                if let Err(e) = self
+                    .intent_log
+                    .mark_failed(intent_id, now_ms(), &reason)
+                    .await
+                {
+                    tracing::warn!(
+                        intent_id,
+                        error = %e,
+                        "apply_intent_log.mark_failed failed; row will appear in next startup scan"
+                    );
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// The original Phase 2 apply pipeline, factored out so the
+    /// Phase 3.1 intent-log wrapper above can pin success/failure on
+    /// a single Result<...>.
+    async fn apply_inner(
+        &self,
+        id: &ProposalId,
+        proposal: &corlinman_evolution::EvolutionProposal,
+    ) -> Result<EvolutionHistory, ApplyError> {
+        // Dispatch per-kind. Each handler returns a `MutationOutcome`
+        // so the audit/baseline path below stays kind-agnostic.
+        // `memory_op` carries a parsed plan (`merge_chunks` or
+        // `delete_chunk`) for the counter bump after the audit lands;
+        // the new kinds bump no counters yet (Phase 3-2B doesn't ship
+        // per-kind metrics — operator dashboards read history).
         let mut memory_plan: Option<MemoryOp> = None;
         let mutation = match proposal.kind {
             EvolutionKind::MemoryOp => {
@@ -218,10 +336,10 @@ impl EvolutionApplier {
             other => return Err(ApplyError::UnsupportedKind(other.as_str().to_string())),
         };
 
-        // 3. Persist history + flip proposal.status atomically inside
-        //    evolution.sqlite. kb.sqlite is already mutated (single
-        //    DELETE statement, atomic by SQLite contract); a TX here
-        //    keeps the audit row + status flip in lockstep.
+        // Persist history + flip proposal.status atomically inside
+        // evolution.sqlite. kb.sqlite is already mutated (single
+        // DELETE statement, atomic by SQLite contract); a TX here
+        // keeps the audit row + status flip in lockstep.
         let now = now_ms();
 
         // W1-B Step 2: capture per-event-kind signal counts at apply
@@ -247,8 +365,7 @@ impl EvolutionApplier {
             )
             .await
             .map_err(|e| ApplyError::History(anyhow::Error::from(e)))?;
-            serde_json::to_value(&snap)
-                .map_err(|e| ApplyError::History(anyhow::Error::from(e)))?
+            serde_json::to_value(&snap).map_err(|e| ApplyError::History(anyhow::Error::from(e)))?
         };
 
         let history_row = EvolutionHistory {
@@ -269,9 +386,9 @@ impl EvolutionApplier {
             .await
             .map_err(|e| ApplyError::History(anyhow::Error::from(e)))?;
 
-        // 4. Bump kb-side counters only after the audit row landed.
-        //    `memory_op` has dedicated counters; other kinds rely on
-        //    EVOLUTION_PROPOSALS_APPLIED below for now.
+        // Bump kb-side counters only after the audit row landed.
+        // `memory_op` has dedicated counters; other kinds rely on
+        // EVOLUTION_PROPOSALS_APPLIED below for now.
         if let Some(plan) = memory_plan {
             match plan {
                 MemoryOp::MergeChunks { .. } => EVOLUTION_CHUNKS_MERGED.inc(),
@@ -437,10 +554,7 @@ impl EvolutionApplier {
     /// Captured `inverse_diff` records the deleted node's full row +
     /// the chunk_ids whose `tag_node_id` we rewrote, so revert can
     /// reinsert the node and point those rows back at it.
-    async fn apply_tag_rebalance(
-        &self,
-        target: &str,
-    ) -> Result<MutationOutcome, ApplyError> {
+    async fn apply_tag_rebalance(&self, target: &str) -> Result<MutationOutcome, ApplyError> {
         let path = target
             .strip_prefix("merge_tag:")
             .ok_or_else(|| ApplyError::InvalidTarget(target.into()))?;
@@ -468,14 +582,18 @@ impl EvolutionApplier {
         let src_path: String = row.get("path");
         let src_depth: i64 = row.get("depth");
         let src_created_at: i64 = row.get("created_at");
-        let parent_id =
-            parent_id.ok_or(ApplyError::CannotMergeRoot)?;
+        let parent_id = parent_id.ok_or(ApplyError::CannotMergeRoot)?;
 
         // 2. Compute before_sha from the row about to be deleted +
         //    its existing chunk_tags pairs. Locality-only — same
         //    convention the memory_op path follows.
         let before_sha = sha256_tag_state(
-            &src_path, src_id, parent_id, &src_name, src_depth, src_created_at,
+            &src_path,
+            src_id,
+            parent_id,
+            &src_name,
+            src_depth,
+            src_created_at,
         );
 
         // 3. If the kb has the v6 `chunk_tags` table, capture the
@@ -487,12 +605,11 @@ impl EvolutionApplier {
             .await
             .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
         if has_chunk_tags {
-            let rows =
-                sqlx::query("SELECT chunk_id FROM chunk_tags WHERE tag_node_id = ?1")
-                    .bind(src_id)
-                    .fetch_all(pool)
-                    .await
-                    .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+            let rows = sqlx::query("SELECT chunk_id FROM chunk_tags WHERE tag_node_id = ?1")
+                .bind(src_id)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
             for r in &rows {
                 moved_chunk_ids.push(r.get::<i64, _>("chunk_id"));
             }
@@ -727,9 +844,7 @@ impl EvolutionApplier {
             Err(other) => return Err(ApplyError::Repo(other)),
         };
         if proposal.status != EvolutionStatus::Applied {
-            return Err(ApplyError::NotApplied(
-                proposal.status.as_str().to_string(),
-            ));
+            return Err(ApplyError::NotApplied(proposal.status.as_str().to_string()));
         }
 
         // 2. Fetch the audit row's inverse_diff. Missing here is data
@@ -747,7 +862,11 @@ impl EvolutionApplier {
             EvolutionKind::MemoryOp => self.revert_memory_op(&history_row).await?,
             EvolutionKind::TagRebalance => self.revert_tag_rebalance(&history_row).await?,
             EvolutionKind::SkillUpdate => self.revert_skill_update(&history_row).await?,
-            other => return Err(ApplyError::UnsupportedRevertKind(other.as_str().to_string())),
+            other => {
+                return Err(ApplyError::UnsupportedRevertKind(
+                    other.as_str().to_string(),
+                ))
+            }
         }
 
         // 4. Audit + status flip. Two writes against evolution.sqlite —
@@ -783,6 +902,14 @@ impl EvolutionApplier {
     /// id — content is restored, the (file_id, chunk_index, namespace)
     /// metadata is intact, and the proposal status flip below prevents
     /// the monitor from firing the same revert twice.
+    ///
+    /// Phase 3.1 trust gate: every untrusted field read from
+    /// `inverse_diff` is validated against
+    /// [`validate_inverse_diff_namespace`] / [`validate_inverse_diff_id`]
+    /// before it touches sqlx::bind. The history table is shared with
+    /// every kind, and W2-C will let high-risk proposals slip through;
+    /// a tampered row must not become a "write any namespace" or
+    /// "write any chunk_id" primitive on the revert path.
     async fn revert_memory_op(&self, history: &EvolutionHistory) -> Result<(), ApplyError> {
         let raw: serde_json::Value = serde_json::from_str(&history.inverse_diff)
             .map_err(|e| ApplyError::MalformedInverseDiff(format!("parse: {e}")))?;
@@ -797,6 +924,7 @@ impl EvolutionApplier {
                 // `delete_chunk` uses bare `content/file_id/...`.
                 // Discriminate on `loser_id`.
                 let plan = ChunkRestore::parse(&raw).map_err(ApplyError::MalformedInverseDiff)?;
+                plan.validate(history)?;
                 plan.execute(self.kb_store.pool())
                     .await
                     .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
@@ -804,8 +932,10 @@ impl EvolutionApplier {
             "demote_chunk" => {
                 let chunk_id =
                     pick_i64(&raw, "chunk_id").map_err(ApplyError::MalformedInverseDiff)?;
+                validate_inverse_diff_id(history, "chunk_id", chunk_id)?;
                 let prior_ns =
                     pick_str(&raw, "prior_namespace").map_err(ApplyError::MalformedInverseDiff)?;
+                validate_inverse_diff_namespace(history, &prior_ns)?;
                 let prior_decay = raw
                     .get("prior_decay_score")
                     .and_then(|v| v.as_f64())
@@ -832,10 +962,7 @@ impl EvolutionApplier {
     /// captured `chunk_tags.chunk_id` rows back at it. Mirrors the
     /// memory_op contract — INSERT OR IGNORE everywhere a PK could
     /// collide so a re-run after a partial succeeds.
-    async fn revert_tag_rebalance(
-        &self,
-        history: &EvolutionHistory,
-    ) -> Result<(), ApplyError> {
+    async fn revert_tag_rebalance(&self, history: &EvolutionHistory) -> Result<(), ApplyError> {
         let raw: serde_json::Value = serde_json::from_str(&history.inverse_diff)
             .map_err(|e| ApplyError::MalformedInverseDiff(format!("parse: {e}")))?;
         let op = raw
@@ -851,19 +978,33 @@ impl EvolutionApplier {
             .get("src")
             .ok_or_else(|| ApplyError::MalformedInverseDiff("missing 'src'".into()))?;
         let id = pick_i64(src, "id").map_err(ApplyError::MalformedInverseDiff)?;
-        let parent_id =
-            pick_i64(src, "parent_id").map_err(ApplyError::MalformedInverseDiff)?;
+        let parent_id = pick_i64(src, "parent_id").map_err(ApplyError::MalformedInverseDiff)?;
         let name = pick_str(src, "name").map_err(ApplyError::MalformedInverseDiff)?;
         let path = pick_str(src, "path").map_err(ApplyError::MalformedInverseDiff)?;
         let depth = pick_i64(src, "depth").map_err(ApplyError::MalformedInverseDiff)?;
-        let created_at =
-            pick_i64(src, "created_at").map_err(ApplyError::MalformedInverseDiff)?;
+        let created_at = pick_i64(src, "created_at").map_err(ApplyError::MalformedInverseDiff)?;
+
+        // Phase 3.1 trust gate: every untrusted field read from the
+        // history row gets validated before sqlx binds it. A tampered
+        // row could otherwise turn this revert into a "write any
+        // tag_node row" primitive against kb.sqlite. We accept only
+        // ASCII path-like strings and positive 32-bit-ish ids — same
+        // shape the forward apply emits in practice.
+        validate_inverse_diff_id(history, "src.id", id)?;
+        validate_inverse_diff_id(history, "src.parent_id", parent_id)?;
+        validate_inverse_diff_id(history, "src.depth", depth)?;
+        validate_inverse_diff_id(history, "src.created_at", created_at)?;
+        validate_inverse_diff_path(history, "src.name", &name)?;
+        validate_inverse_diff_path(history, "src.path", &path)?;
 
         let moved_ids: Vec<i64> = raw
             .get("moved_chunk_tag_ids")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
             .unwrap_or_default();
+        for chunk_id in &moved_ids {
+            validate_inverse_diff_id(history, "moved_chunk_tag_ids[]", *chunk_id)?;
+        }
 
         let pool = self.kb_store.pool();
 
@@ -895,14 +1036,12 @@ impl EvolutionApplier {
             // pre-existing (chunk_id, src_id) rows so the UPDATE can't
             // hit the composite-PK uniqueness constraint.
             for chunk_id in &moved_ids {
-                sqlx::query(
-                    "DELETE FROM chunk_tags WHERE chunk_id = ?1 AND tag_node_id = ?2",
-                )
-                .bind(chunk_id)
-                .bind(id)
-                .execute(pool)
-                .await
-                .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+                sqlx::query("DELETE FROM chunk_tags WHERE chunk_id = ?1 AND tag_node_id = ?2")
+                    .bind(chunk_id)
+                    .bind(id)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
                 sqlx::query(
                     "UPDATE chunk_tags SET tag_node_id = ?1 \
                      WHERE chunk_id = ?2 AND tag_node_id = ?3",
@@ -922,10 +1061,7 @@ impl EvolutionApplier {
     /// captured `prior_content` back to disk via the same atomic
     /// tmp+rename dance the forward path uses. Skill files are small
     /// enough that a full snapshot is the simplest correct path.
-    async fn revert_skill_update(
-        &self,
-        history: &EvolutionHistory,
-    ) -> Result<(), ApplyError> {
+    async fn revert_skill_update(&self, history: &EvolutionHistory) -> Result<(), ApplyError> {
         let raw: serde_json::Value = serde_json::from_str(&history.inverse_diff)
             .map_err(|e| ApplyError::MalformedInverseDiff(format!("parse: {e}")))?;
         let op = raw
@@ -1016,6 +1152,40 @@ impl ChunkRestore {
         }
     }
 
+    /// Phase 3.1 trust gate: every untrusted field that the execute
+    /// path will bind against kb.sqlite must pass the inverse_diff
+    /// whitelist. Content is intentionally **not** validated here —
+    /// it's the chunk body, free-form text, and the worst it can do
+    /// is land in a sqlx-bound TEXT column. Namespaces, ids, and
+    /// path-shaped metadata are the dangerous fields.
+    fn validate(&self, history: &EvolutionHistory) -> Result<(), ApplyError> {
+        match self {
+            Self::WithId {
+                id,
+                file_id,
+                chunk_index,
+                namespace,
+                content: _,
+            } => {
+                validate_inverse_diff_id(history, "loser_id", *id)?;
+                validate_inverse_diff_id(history, "loser_file_id", *file_id)?;
+                validate_inverse_diff_id(history, "loser_chunk_index", *chunk_index)?;
+                validate_inverse_diff_namespace(history, namespace)?;
+            }
+            Self::WithoutId {
+                file_id,
+                chunk_index,
+                namespace,
+                content: _,
+            } => {
+                validate_inverse_diff_id(history, "file_id", *file_id)?;
+                validate_inverse_diff_id(history, "chunk_index", *chunk_index)?;
+                validate_inverse_diff_namespace(history, namespace)?;
+            }
+        }
+        Ok(())
+    }
+
     async fn execute(&self, pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         match self {
             // INSERT OR IGNORE: PK collision on re-insert is a no-op so
@@ -1078,6 +1248,130 @@ fn pick_i64(v: &serde_json::Value, key: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("missing '{key}'"))
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3.1 inverse_diff trust whitelist.
+//
+// `evolution_history.inverse_diff` is JSON written by `apply_*` and read
+// back by `revert_*`. The forward path is trusted (we control it), but
+// once `evolution_history` rows exist on disk anyone with a kb.sqlite
+// stomp can rewrite the JSON column and turn the revert path into a
+// "write arbitrary kb row" primitive. The functions below validate every
+// field the revert handlers bind against a deny-by-default whitelist
+// before the values reach sqlx.
+//
+// Constants kept conservative on purpose:
+// - `MAX_PATH_LEN`  — 256 chars covers the longest tag_node.path the
+//   forward apply emits in practice (deepest tree we've seen is ~60).
+// - Allowed namespaces — must mirror corlinman_vector. Hard-coded here
+//   rather than imported because the revert path depends on the *forward
+//   path's* namespace contract, not a future relaxation in the vector
+//   crate; keeping the list local makes that contract explicit.
+// ---------------------------------------------------------------------------
+
+const MAX_INVERSE_DIFF_STRING_LEN: usize = 256;
+
+const ALLOWED_INVERSE_DIFF_NAMESPACES: &[&str] = &["raw", "general", "consolidated"];
+
+/// Common log + error path for tampered inverse_diff fields. Logs with
+/// enough context for the operator to identify the proposal but no
+/// secrets — `target` lives next to it in the same row already.
+fn tampered(history: &EvolutionHistory, reason: String) -> ApplyError {
+    tracing::error!(
+        proposal_id = history.proposal_id.as_str(),
+        kind = history.kind.as_str(),
+        reason = %reason,
+        "evolution_history.inverse_diff failed trust check; \
+         skipping revert and surfacing as Tampered"
+    );
+    ApplyError::Tampered(reason)
+}
+
+/// Reject namespaces outside the kb's small known set.
+fn validate_inverse_diff_namespace(
+    history: &EvolutionHistory,
+    namespace: &str,
+) -> Result<(), ApplyError> {
+    if !ALLOWED_INVERSE_DIFF_NAMESPACES.contains(&namespace) {
+        return Err(tampered(
+            history,
+            format!("unknown namespace {namespace:?}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject path / name fields containing control characters, NULs,
+/// non-ASCII, traversal sequences, or oversized payloads. Paths the
+/// forward apply emits stay inside `[a-zA-Z0-9_./\-]`; we accept that
+/// exact set, plus we explicitly reject `..` segments (path traversal)
+/// and absolute-path forms — those characters individually pass the
+/// per-character check but the segment as a whole is unsafe.
+fn validate_inverse_diff_path(
+    history: &EvolutionHistory,
+    field: &str,
+    value: &str,
+) -> Result<(), ApplyError> {
+    if value.is_empty() {
+        return Err(tampered(history, format!("{field}: empty")));
+    }
+    if value.len() > MAX_INVERSE_DIFF_STRING_LEN {
+        return Err(tampered(
+            history,
+            format!(
+                "{field}: length {} exceeds limit {}",
+                value.len(),
+                MAX_INVERSE_DIFF_STRING_LEN
+            ),
+        ));
+    }
+    for ch in value.chars() {
+        let ok = ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '/' || ch == '-';
+        if !ok {
+            return Err(tampered(
+                history,
+                format!("{field}: rejected character {:?}", ch),
+            ));
+        }
+    }
+    if value.starts_with('/') {
+        return Err(tampered(
+            history,
+            format!("{field}: absolute path not allowed"),
+        ));
+    }
+    for segment in value.split('/') {
+        if segment == ".." {
+            return Err(tampered(
+                history,
+                format!("{field}: path traversal segment '..'"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject ids that are negative or beyond i32 range — chunk_id /
+/// tag_node_id are autoincrement keys; an i64 max-int landing here is
+/// either a bug or tampering, never legitimate kb data.
+fn validate_inverse_diff_id(
+    history: &EvolutionHistory,
+    field: &str,
+    value: i64,
+) -> Result<(), ApplyError> {
+    if value < 0 {
+        return Err(tampered(history, format!("{field}: negative id {value}")));
+    }
+    if value > i32::MAX as i64 {
+        // SQLite autoincrement counters never reach this in practice;
+        // a value here is a tamper signal, not a "we hit the cap" one.
+        return Err(tampered(
+            history,
+            format!("{field}: id {value} exceeds i32::MAX"),
+        ));
+    }
+    Ok(())
+}
+
 /// Adapter so the AutoRollback monitor can hold an
 /// `Arc<dyn AutoRollbackApplier>` without dragging the gateway crate
 /// into `corlinman-auto-rollback`. Maps the rich `ApplyError` set into
@@ -1091,6 +1385,14 @@ impl AutoRollbackApplier for EvolutionApplier {
             Err(ApplyError::NotApplied(s)) => Err(RevertError::NotApplied(s)),
             Err(ApplyError::HistoryMissing(s)) => Err(RevertError::HistoryMissing(s)),
             Err(ApplyError::UnsupportedRevertKind(s)) => Err(RevertError::UnsupportedKind(s)),
+            // Phase 3.1 Tampered → Internal: the monitor treats this
+            // the same way it would treat any other infra failure
+            // (skip + alert on the gateway-side error log). Future
+            // work could add a dedicated `RevertError::Tampered` so
+            // the monitor opens an incident instead of just retrying;
+            // we keep it as Internal here to avoid touching the
+            // monitor crate from this fix.
+            Err(other @ ApplyError::Tampered(_)) => Err(RevertError::Internal(format!("{other}"))),
             // Everything else (Kb, History, MalformedInverseDiff, Repo,
             // ...) collapses to Internal — operator inspects gateway
             // logs for the underlying cause.
@@ -1296,7 +1598,12 @@ mod tests {
 
     /// Stand up fresh kb + evolution stores in a tempdir. Returns the
     /// applier plus handles for assertion paths.
-    async fn fresh_applier() -> (TempDir, EvolutionApplier, Arc<SqliteStore>, Arc<EvolutionStore>) {
+    async fn fresh_applier() -> (
+        TempDir,
+        EvolutionApplier,
+        Arc<SqliteStore>,
+        Arc<EvolutionStore>,
+    ) {
         let tmp = TempDir::new().unwrap();
         let kb_path = tmp.path().join("kb.sqlite");
         let evol_path = tmp.path().join("evolution.sqlite");
@@ -1327,11 +1634,7 @@ mod tests {
     }
 
     /// Insert an `approved` `memory_op` proposal aimed at `target`.
-    async fn seed_approved(
-        evol: &EvolutionStore,
-        id: &str,
-        target: &str,
-    ) -> ProposalId {
+    async fn seed_approved(evol: &EvolutionStore, id: &str, target: &str) -> ProposalId {
         let pid = ProposalId::new(id);
         let repo = ProposalsRepo::new(evol.pool().clone());
         repo.insert(&EvolutionProposal {
@@ -1645,7 +1948,10 @@ mod tests {
         assert_eq!(loser.namespace, "general");
 
         // Proposal flipped applied → rolled_back with audit columns set.
-        let after = ProposalsRepo::new(evol.pool().clone()).get(&pid).await.unwrap();
+        let after = ProposalsRepo::new(evol.pool().clone())
+            .get(&pid)
+            .await
+            .unwrap();
         assert_eq!(after.status, EvolutionStatus::RolledBack);
         let row: (Option<i64>, Option<String>) = sqlx::query_as(
             "SELECT auto_rollback_at, auto_rollback_reason FROM evolution_proposals WHERE id = ?",
@@ -1857,12 +2163,11 @@ mod tests {
         assert_eq!(count, 0, "python node deleted");
 
         // chunk_tags re-pointed to coding.
-        let parent_links: Vec<(i64, i64)> = sqlx::query_as(
-            "SELECT chunk_id, tag_node_id FROM chunk_tags ORDER BY chunk_id ASC",
-        )
-        .fetch_all(kb.pool())
-        .await
-        .unwrap();
+        let parent_links: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT chunk_id, tag_node_id FROM chunk_tags ORDER BY chunk_id ASC")
+                .fetch_all(kb.pool())
+                .await
+                .unwrap();
         assert_eq!(parent_links, vec![(c1, coding), (c2, coding)]);
 
         // inverse_diff captures the deleted node + moved chunk_ids.
@@ -1900,30 +2205,34 @@ mod tests {
         )
         .await;
         applier.apply(&pid).await.unwrap();
-        let reverted = applier
-            .revert(&pid, "metrics regression")
-            .await
-            .unwrap();
+        let reverted = applier.revert(&pid, "metrics regression").await.unwrap();
         assert!(reverted.rolled_back_at.is_some());
 
         // python row back at original id.
-        let row: (i64, Option<i64>, String, String, i64) = sqlx::query_as(
-            "SELECT id, parent_id, name, path, depth FROM tag_nodes WHERE id = ?",
-        )
-        .bind(python)
-        .fetch_one(kb.pool())
-        .await
-        .unwrap();
-        assert_eq!(row, (python, Some(coding), "python".into(), "coding/python".into(), 2));
+        let row: (i64, Option<i64>, String, String, i64) =
+            sqlx::query_as("SELECT id, parent_id, name, path, depth FROM tag_nodes WHERE id = ?")
+                .bind(python)
+                .fetch_one(kb.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            row,
+            (
+                python,
+                Some(coding),
+                "python".into(),
+                "coding/python".into(),
+                2
+            )
+        );
 
         // chunk_tags re-pointed to python.
-        let link: (i64, i64) = sqlx::query_as(
-            "SELECT chunk_id, tag_node_id FROM chunk_tags WHERE chunk_id = ?",
-        )
-        .bind(c1)
-        .fetch_one(kb.pool())
-        .await
-        .unwrap();
+        let link: (i64, i64) =
+            sqlx::query_as("SELECT chunk_id, tag_node_id FROM chunk_tags WHERE chunk_id = ?")
+                .bind(c1)
+                .fetch_one(kb.pool())
+                .await
+                .unwrap();
         assert_eq!(link, (c1, python));
     }
 
@@ -2182,5 +2491,173 @@ mod tests {
             "got {}",
             after_revert.decay_score
         );
+    }
+
+    // ---- Phase 3.1: apply intent log + half-committed scan ----------------
+
+    /// A successful forward apply must stamp the intent row's
+    /// `committed_at`. The startup scan therefore sees nothing —
+    /// pins the contract that healthy apply runs leave no debris.
+    #[tokio::test]
+    async fn apply_stamps_intent_log_committed_on_success() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let id = seed_chunk(&kb, "/d", "doomed").await;
+        let pid = seed_approved(&evol, "evol-intent-ok-001", &format!("delete_chunk:{id}")).await;
+
+        applier.apply(&pid).await.unwrap();
+        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT committed_at, failed_at FROM apply_intent_log WHERE proposal_id = ?",
+        )
+        .bind(pid.as_str())
+        .fetch_one(evol.pool())
+        .await
+        .unwrap();
+        assert!(row.0.is_some(), "committed_at must be stamped");
+        assert!(row.1.is_none(), "failed_at must stay null");
+        assert_eq!(applier.scan_half_committed().await.unwrap(), 0);
+    }
+
+    /// A clean failure (e.g. ChunkNotFound) must stamp `failed_at` so
+    /// the row drops out of the half-committed scan. Without this the
+    /// scan would alarm on every benign-error apply attempt.
+    #[tokio::test]
+    async fn apply_stamps_intent_log_failed_on_error() {
+        let (_tmp, applier, _kb, evol) = fresh_applier().await;
+        let pid = seed_approved(
+            &evol,
+            "evol-intent-fail-001",
+            "delete_chunk:99999",
+        )
+        .await;
+        let _ = applier.apply(&pid).await; // expected ChunkNotFound
+
+        let row: (Option<i64>, Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT committed_at, failed_at, failure_reason \
+             FROM apply_intent_log WHERE proposal_id = ?",
+        )
+        .bind(pid.as_str())
+        .fetch_one(evol.pool())
+        .await
+        .unwrap();
+        assert!(row.0.is_none());
+        assert!(row.1.is_some());
+        assert!(row.2.unwrap_or_default().contains("chunk not found"));
+        assert_eq!(applier.scan_half_committed().await.unwrap(), 0);
+    }
+
+    /// Simulate a crash mid-apply by inserting an `apply_intent_log`
+    /// row with both stamps NULL — the scan must surface it. Mirrors
+    /// the gateway-startup contract: operators see half-committed
+    /// applies in the boot log instead of silently losing them.
+    #[tokio::test]
+    async fn scan_half_committed_surfaces_unstamped_intent_rows() {
+        let (_tmp, applier, _kb, evol) = fresh_applier().await;
+        // Insert by hand: simulates a crash *between* the kb mutation
+        // and either commit/fail stamp.
+        sqlx::query(
+            "INSERT INTO apply_intent_log \
+             (proposal_id, kind, target, intent_at, committed_at, failed_at) \
+             VALUES (?, ?, ?, ?, NULL, NULL)",
+        )
+        .bind("evol-intent-stuck-001")
+        .bind("memory_op")
+        .bind("delete_chunk:42")
+        .bind(1_000_000i64)
+        .execute(evol.pool())
+        .await
+        .unwrap();
+
+        let outstanding = applier.scan_half_committed().await.unwrap();
+        assert_eq!(outstanding, 1, "stuck intent row must surface");
+    }
+
+    /// `revert_memory_op` must reject a tampered `inverse_diff` whose
+    /// `prior_namespace` is outside the whitelist. The audit row was
+    /// written by the forward path with `general`; we hand-stomp it to
+    /// `consolidated_secret` to simulate post-write tampering.
+    #[tokio::test]
+    async fn revert_memory_op_rejects_tampered_namespace() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let id = seed_chunk(&kb, "/d", "tampered").await;
+        let pid = seed_approved(
+            &evol,
+            "evol-tamper-ns-001",
+            &format!("delete_chunk:{id}"),
+        )
+        .await;
+        applier.apply(&pid).await.unwrap();
+
+        // Tamper: rewrite namespace to something outside the whitelist.
+        sqlx::query(
+            r#"UPDATE evolution_history
+                 SET inverse_diff = json_replace(
+                     inverse_diff, '$.namespace', '/etc/passwd'
+                 )
+               WHERE proposal_id = ?"#,
+        )
+        .bind(pid.as_str())
+        .execute(evol.pool())
+        .await
+        .unwrap();
+
+        match applier.revert(&pid, "test").await {
+            Err(ApplyError::Tampered(reason)) => {
+                assert!(
+                    reason.contains("namespace") || reason.contains("rejected"),
+                    "expected tamper-shaped reason, got {reason:?}"
+                );
+            }
+            other => panic!("expected Tampered, got {other:?}"),
+        }
+        // Proposal stays Applied — revert refused to run, so no
+        // status flip.
+        let after = ProposalsRepo::new(evol.pool().clone()).get(&pid).await.unwrap();
+        assert_eq!(after.status, EvolutionStatus::Applied);
+    }
+
+    /// `revert_tag_rebalance` must reject a tampered path field. We
+    /// rewrite `src.path` to a value containing `..` — the deny
+    /// whitelist refuses anything outside `[a-zA-Z0-9_./\-]` after
+    /// length and emptiness checks.
+    #[tokio::test]
+    async fn revert_tag_rebalance_rejects_tampered_path() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let root = seed_tag_node(&kb, None, "root", "root", 0).await;
+        let coding = seed_tag_node(&kb, Some(root), "coding", "coding", 1).await;
+        let _python =
+            seed_tag_node(&kb, Some(coding), "python", "coding/python", 2).await;
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-tamper-path-001",
+            EvolutionKind::TagRebalance,
+            "merge_tag:coding/python",
+            "",
+        )
+        .await;
+        applier.apply(&pid).await.unwrap();
+
+        // Tamper: rewrite path to one carrying a non-allowed character.
+        sqlx::query(
+            r#"UPDATE evolution_history
+                 SET inverse_diff = json_replace(
+                     inverse_diff, '$.src.path',
+                     'coding/../../../etc/passwd'
+                 )
+               WHERE proposal_id = ?"#,
+        )
+        .bind(pid.as_str())
+        .execute(evol.pool())
+        .await
+        .unwrap();
+
+        match applier.revert(&pid, "test").await {
+            Err(ApplyError::Tampered(reason)) => {
+                assert!(
+                    reason.contains("path") || reason.contains("character"),
+                    "expected path-shaped reason, got {reason:?}"
+                );
+            }
+            other => panic!("expected Tampered, got {other:?}"),
+        }
     }
 }

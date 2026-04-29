@@ -121,7 +121,10 @@ impl ShadowRunner {
                 }
                 summary.proposals_claimed += 1;
 
-                match self.run_proposal(kind, simulator.as_ref(), &proposal.id).await {
+                match self
+                    .run_proposal(kind, simulator.as_ref(), &proposal.id)
+                    .await
+                {
                     Ok(cases) => {
                         summary.cases_run += cases;
                         summary.proposals_completed += 1;
@@ -204,11 +207,7 @@ impl ShadowRunner {
 
     /// Run one case in its own tempdir. Errors are downgraded to a
     /// failed `SimulatorOutput` so one bad case doesn't tank the set.
-    async fn run_case(
-        &self,
-        simulator: &dyn KindSimulator,
-        case: &EvalCase,
-    ) -> SimulatorOutput {
+    async fn run_case(&self, simulator: &dyn KindSimulator, case: &EvalCase) -> SimulatorOutput {
         let tmp = match TempDir::new() {
             Ok(t) => t,
             Err(e) => return failed_output(case, format!("tempdir: {e}")),
@@ -485,9 +484,7 @@ fn percentile(sorted: &[u64], p: u8) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use corlinman_evolution::{
-        EvolutionProposal, EvolutionStatus, EvolutionStore,
-    };
+    use corlinman_evolution::{EvolutionProposal, EvolutionStatus, EvolutionStore};
     use serde_json::json;
     use std::path::Path;
     use tempfile::TempDir;
@@ -515,10 +512,7 @@ mod tests {
             Ok(SimulatorOutput {
                 case_name: case.name.clone(),
                 passed: true,
-                baseline: json!({"chunks_total": 0})
-                    .as_object()
-                    .cloned()
-                    .unwrap(),
+                baseline: json!({"chunks_total": 0}).as_object().cloned().unwrap(),
                 shadow: json!({"chunks_total": 0, "rows_merged": 1})
                     .as_object()
                     .cloned()
@@ -584,9 +578,13 @@ expected:
     async fn run_once_processes_pending_high_risk() {
         let (tmp, _store, repo) = fresh_store().await;
         let pid = ProposalId::new("p-1");
-        repo.insert(&proposal("p-1", EvolutionKind::MemoryOp, EvolutionRisk::High))
-            .await
-            .unwrap();
+        repo.insert(&proposal(
+            "p-1",
+            EvolutionKind::MemoryOp,
+            EvolutionRisk::High,
+        ))
+        .await
+        .unwrap();
 
         let eval_dir = tmp.path().join("eval");
         write_eval_set(&eval_dir, EvolutionKind::MemoryOp).await;
@@ -628,14 +626,17 @@ expected:
     async fn run_once_skips_low_risk() {
         let (tmp, _store, repo) = fresh_store().await;
         let pid = ProposalId::new("p-low");
-        repo.insert(&proposal("p-low", EvolutionKind::MemoryOp, EvolutionRisk::Low))
-            .await
-            .unwrap();
+        repo.insert(&proposal(
+            "p-low",
+            EvolutionKind::MemoryOp,
+            EvolutionRisk::Low,
+        ))
+        .await
+        .unwrap();
         let eval_dir = tmp.path().join("eval");
         write_eval_set(&eval_dir, EvolutionKind::MemoryOp).await;
 
-        let mut runner =
-            ShadowRunner::new(repo.clone(), tmp.path().join("kb.sqlite"), eval_dir);
+        let mut runner = ShadowRunner::new(repo.clone(), tmp.path().join("kb.sqlite"), eval_dir);
         runner.register_simulator(Arc::new(MockSimulator {
             kind: EvolutionKind::MemoryOp,
         }));

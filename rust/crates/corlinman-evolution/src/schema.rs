@@ -74,6 +74,37 @@ CREATE INDEX IF NOT EXISTS idx_evol_history_proposal
 
 CREATE INDEX IF NOT EXISTS idx_evol_history_applied
     ON evolution_history(applied_at);
+
+-- Phase 3.1: forward-apply intent log.
+--
+-- `kb.sqlite` and `evolution.sqlite` are separate files (no cross-DB
+-- transaction). The original Phase 2 ordering (kb mutate → evolution
+-- TX) leaves a half-committed window if the gateway is killed between
+-- the two writes: the kb is changed but no audit row exists, so the
+-- monitor and any operator-facing UI both see an unchanged proposal.
+-- The intent log writes one row *before* the kb mutation and stamps
+-- `committed_at` (or `failed_at`) after. On gateway startup the scan
+-- for rows where both stamps are NULL surfaces every half-committed
+-- apply with enough information to manually reconcile — we
+-- intentionally do **not** auto-restore: the operator decides whether
+-- to retry forward, revert manually, or accept the kb state.
+CREATE TABLE IF NOT EXISTS apply_intent_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposal_id     TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    target          TEXT NOT NULL,
+    intent_at       INTEGER NOT NULL,
+    committed_at    INTEGER,
+    failed_at       INTEGER,
+    failure_reason  TEXT
+);
+
+-- Partial index only indexes uncommitted rows. The scan on startup is
+-- the hot path; once a row is committed we never read it again so the
+-- partial form keeps the index pages tiny on long-running deployments.
+CREATE INDEX IF NOT EXISTS idx_apply_intent_uncommitted
+    ON apply_intent_log(intent_at)
+    WHERE committed_at IS NULL AND failed_at IS NULL;
 "#;
 
 /// One migration step: add `column` to `table` via `ddl` if it does not

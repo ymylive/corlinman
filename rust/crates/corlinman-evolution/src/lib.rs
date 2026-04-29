@@ -20,7 +20,9 @@ pub mod schema;
 pub mod store;
 pub mod types;
 
-pub use repo::{iso_week_window, HistoryRepo, ProposalsRepo, RepoError, SignalsRepo};
+pub use repo::{
+    iso_week_window, ApplyIntent, HistoryRepo, IntentLogRepo, ProposalsRepo, RepoError, SignalsRepo,
+};
 pub use schema::SCHEMA_SQL;
 pub use store::{EvolutionStore, OpenError};
 pub use types::{

@@ -21,8 +21,8 @@ use corlinman_evolution::{
     EvolutionKind, EvolutionProposal, EvolutionRisk, EvolutionStatus, EvolutionStore, ProposalId,
     ProposalsRepo,
 };
-use corlinman_shadow_tester::{KindSimulator, ShadowRunner};
 use corlinman_shadow_tester::simulator::MemoryOpSimulator;
+use corlinman_shadow_tester::{KindSimulator, ShadowRunner};
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -116,7 +116,13 @@ async fn shadow_run_passes_all_real_memory_op_fixtures() {
         serde_json::from_str(&row.2.expect("shadow_metrics populated")).unwrap();
 
     // Fields present on both blobs.
-    for key in ["eval_run_id", "kind", "total_cases", "pass_rate", "p95_latency_ms"] {
+    for key in [
+        "eval_run_id",
+        "kind",
+        "total_cases",
+        "pass_rate",
+        "p95_latency_ms",
+    ] {
         assert!(baseline.get(key).is_some(), "baseline missing {key}");
         assert!(shadow.get(key).is_some(), "shadow missing {key}");
     }

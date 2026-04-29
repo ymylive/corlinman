@@ -18,16 +18,62 @@ import aiosqlite
 
 from corlinman_persona.state import RECENT_TOPICS_CAP, PersonaState
 
+# Phase 3.1 adds ``tenant_id`` (default ``'default'``). Every read/write
+# scopes through it implicitly until Phase 4's multi-tenant fan-out flips
+# the parameter at the call site. See ``corlinman-user-model.store`` for
+# the parallel migration on user_traits.
+DEFAULT_TENANT_ID = "default"
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS agent_persona_state (
     agent_id      TEXT PRIMARY KEY,
+    tenant_id     TEXT NOT NULL DEFAULT 'default',
     mood          TEXT NOT NULL DEFAULT 'neutral',
     fatigue       REAL NOT NULL DEFAULT 0.0,
     recent_topics TEXT NOT NULL DEFAULT '[]',
     updated_at    INTEGER NOT NULL,
     state_json    TEXT NOT NULL DEFAULT '{}'
 );
+
+CREATE INDEX IF NOT EXISTS idx_agent_persona_tenant_agent
+    ON agent_persona_state(tenant_id, agent_id);
 """
+
+# NB: ``agent_id`` stays PRIMARY KEY for now. SQLite can't change a PK
+# via ALTER TABLE, so promoting to a composite ``(tenant_id, agent_id)``
+# PK on legacy DBs would require a full table rewrite — Phase 4 will do
+# that in a versioned migration once we have real cross-tenant data and
+# can bound the rewrite cost. For Phase 3.1 the per-tenant index above
+# is enough to keep multi-tenant queries fast and the explicit
+# ``WHERE tenant_id = ? AND agent_id = ?`` predicate prevents cross-
+# tenant leaks even though the PK alone wouldn't.
+
+
+# Idempotent migrations applied after :data:`SCHEMA_SQL`. Each entry is
+# ``(table, column, ddl)`` — the runtime pragma-checks for the column
+# before running the ALTER. SQLite has no `ADD COLUMN IF NOT EXISTS`,
+# so we mirror the Rust crate's ``column_exists`` pattern.
+#
+# NB: pre-Phase-3.1 DBs created the table with ``agent_id`` as PRIMARY
+# KEY. ALTER TABLE can't change a primary key in SQLite, so the
+# migration only adds the column with a default of ``'default'``;
+# practically every existing row is therefore in the ``'default'``
+# tenant, which is exactly what we want.
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        "agent_persona_state",
+        "tenant_id",
+        "ALTER TABLE agent_persona_state ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+    ),
+)
+
+
+async def _column_exists(conn: aiosqlite.Connection, table: str, column: str) -> bool:
+    """True iff ``table.column`` exists. Used by the migration runner."""
+    cursor = await conn.execute(f"PRAGMA table_info({table})")
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return any(str(r[1]) == column for r in rows)
 
 
 def _now_ms() -> int:
@@ -129,8 +175,14 @@ class PersonaStore:
     async def _open(self) -> None:
         # ``aiosqlite.connect`` will create the file on demand. We then
         # apply the schema — ``IF NOT EXISTS`` makes it idempotent.
+        # Migrations land after the schema script: pre-Phase-3.1 DBs
+        # pick up the ``tenant_id`` column on first re-open without
+        # operator intervention.
         self._conn = await aiosqlite.connect(self._path)
         await self._conn.executescript(SCHEMA_SQL)
+        for table, column, ddl in _MIGRATIONS:
+            if not await _column_exists(self._conn, table, column):
+                await self._conn.execute(ddl)
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -144,14 +196,23 @@ class PersonaStore:
             raise RuntimeError("PersonaStore used outside async context")
         return self._conn
 
-    async def get(self, agent_id: str) -> PersonaState | None:
-        """Return the row for ``agent_id`` or ``None`` if absent."""
+    async def get(
+        self,
+        agent_id: str,
+        *,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> PersonaState | None:
+        """Return the row for ``(tenant_id, agent_id)`` or ``None``.
+
+        ``tenant_id`` is Phase 3.1 plumbing — defaults to ``'default'``
+        until Phase 4 wires multi-tenant ids.
+        """
         cursor = await self.conn.execute(
             """SELECT agent_id, mood, fatigue, recent_topics,
                       updated_at, state_json
                FROM agent_persona_state
-               WHERE agent_id = ?""",
-            (agent_id,),
+               WHERE tenant_id = ? AND agent_id = ?""",
+            (tenant_id, agent_id),
         )
         row = await cursor.fetchone()
         await cursor.close()
@@ -159,8 +220,13 @@ class PersonaStore:
             return None
         return _row_to_state(row)
 
-    async def upsert(self, state: PersonaState) -> None:
-        """Insert or replace the row for ``state.agent_id``.
+    async def upsert(
+        self,
+        state: PersonaState,
+        *,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> None:
+        """Insert or replace the row for ``(tenant_id, state.agent_id)``.
 
         ``recent_topics`` is dedup'd and capped on write so callers can't
         accidentally bypass the invariant by hand-crafting a long list.
@@ -170,18 +236,29 @@ class PersonaStore:
         """
         capped = _dedup_cap(list(state.recent_topics))
         updated_at = state.updated_at_ms or _now_ms()
+        # Conflict target is ``agent_id`` because the v0 schema declares
+        # it as PRIMARY KEY and SQLite can't alter a PK in place. Phase 4
+        # will rewrite to a composite ``(tenant_id, agent_id)`` PK when
+        # multi-tenant rollout actually needs the same agent_id reused
+        # across tenants. Today every tenant_id stays ``'default'`` so
+        # the practical effect is identical and the upsert stays a single
+        # round-trip. The UPDATE clause writes ``tenant_id`` too so a
+        # migrated row that came in without the column gets stamped on
+        # first re-write.
         await self.conn.execute(
             """INSERT INTO agent_persona_state
-                 (agent_id, mood, fatigue, recent_topics,
+                 (tenant_id, agent_id, mood, fatigue, recent_topics,
                   updated_at, state_json)
-               VALUES (?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(agent_id) DO UPDATE SET
+                 tenant_id     = excluded.tenant_id,
                  mood          = excluded.mood,
                  fatigue       = excluded.fatigue,
                  recent_topics = excluded.recent_topics,
                  updated_at    = excluded.updated_at,
                  state_json    = excluded.state_json""",
             (
+                tenant_id,
                 state.agent_id,
                 state.mood,
                 float(state.fatigue),
@@ -192,20 +269,34 @@ class PersonaStore:
         )
         await self.conn.commit()
 
-    async def update_mood(self, agent_id: str, mood: str) -> None:
-        """Set the ``mood`` column for ``agent_id``.
+    async def update_mood(
+        self,
+        agent_id: str,
+        mood: str,
+        *,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> None:
+        """Set the ``mood`` column for ``(tenant_id, agent_id)``.
 
         Silently no-ops if the row doesn't exist — callers who need
         seeding should go through :func:`~corlinman_persona.seeder.seed_from_card`.
         Mutations on existing rows otherwise belong to the EvolutionLoop.
         """
         await self.conn.execute(
-            "UPDATE agent_persona_state SET mood = ?, updated_at = ? WHERE agent_id = ?",
-            (mood, _now_ms(), agent_id),
+            """UPDATE agent_persona_state
+               SET mood = ?, updated_at = ?
+               WHERE tenant_id = ? AND agent_id = ?""",
+            (mood, _now_ms(), tenant_id, agent_id),
         )
         await self.conn.commit()
 
-    async def update_fatigue(self, agent_id: str, delta: float) -> None:
+    async def update_fatigue(
+        self,
+        agent_id: str,
+        delta: float,
+        *,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> None:
         """Add ``delta`` to fatigue, clamped to ``[0.0, 1.0]``.
 
         Negative deltas recover energy; positive ones consume it. The
@@ -215,12 +306,18 @@ class PersonaStore:
             """UPDATE agent_persona_state
                SET fatigue = MAX(0.0, MIN(1.0, fatigue + ?)),
                    updated_at = ?
-               WHERE agent_id = ?""",
-            (float(delta), _now_ms(), agent_id),
+               WHERE tenant_id = ? AND agent_id = ?""",
+            (float(delta), _now_ms(), tenant_id, agent_id),
         )
         await self.conn.commit()
 
-    async def push_recent_topic(self, agent_id: str, topic: str) -> None:
+    async def push_recent_topic(
+        self,
+        agent_id: str,
+        topic: str,
+        *,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> None:
         """Append ``topic`` to ``recent_topics`` with dedup + cap.
 
         Reads the current list, applies the same invariant the dataclass
@@ -228,39 +325,52 @@ class PersonaStore:
         entries), and writes it back. Two-statement transaction kept short
         so the row-level lock window stays tiny.
         """
-        current = await self.get(agent_id)
+        current = await self.get(agent_id, tenant_id=tenant_id)
         if current is None:
             return
         new_topics = _dedup_cap([*current.recent_topics, topic])
         await self.conn.execute(
             """UPDATE agent_persona_state
                SET recent_topics = ?, updated_at = ?
-               WHERE agent_id = ?""",
-            (json.dumps(new_topics), _now_ms(), agent_id),
+               WHERE tenant_id = ? AND agent_id = ?""",
+            (json.dumps(new_topics), _now_ms(), tenant_id, agent_id),
         )
         await self.conn.commit()
 
-    async def list_all(self) -> list[PersonaState]:
-        """Return every row, sorted by agent_id for deterministic output."""
+    async def list_all(
+        self,
+        *,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> list[PersonaState]:
+        """Return every row in ``tenant_id``, sorted by agent_id for
+        deterministic output."""
         cursor = await self.conn.execute(
             """SELECT agent_id, mood, fatigue, recent_topics,
                       updated_at, state_json
                FROM agent_persona_state
+               WHERE tenant_id = ?
                ORDER BY agent_id ASC""",
+            (tenant_id,),
         )
         rows = await cursor.fetchall()
         await cursor.close()
         return [_row_to_state(r) for r in rows]
 
-    async def delete(self, agent_id: str) -> bool:
-        """Remove the row for ``agent_id``. Returns True if a row was deleted.
+    async def delete(
+        self,
+        agent_id: str,
+        *,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> bool:
+        """Remove the row for ``(tenant_id, agent_id)``. Returns True if
+        a row was deleted.
 
         Used by the ``reset`` CLI subcommand (operator action — the next
         seeder pass re-creates the row from the YAML defaults).
         """
         cursor = await self.conn.execute(
-            "DELETE FROM agent_persona_state WHERE agent_id = ?",
-            (agent_id,),
+            "DELETE FROM agent_persona_state WHERE tenant_id = ? AND agent_id = ?",
+            (tenant_id, agent_id),
         )
         await self.conn.commit()
         deleted = cursor.rowcount > 0
@@ -268,4 +378,4 @@ class PersonaStore:
         return deleted
 
 
-__all__ = ["SCHEMA_SQL", "PersonaStore"]
+__all__ = ["DEFAULT_TENANT_ID", "SCHEMA_SQL", "PersonaStore"]
