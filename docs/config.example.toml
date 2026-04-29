@@ -261,13 +261,17 @@ action = { type = "subprocess", command = "corlinman-evolution-engine", args = [
 
 # Phase 3 wave 1-C: per-week / per-kind cap on EvolutionEngine proposal
 # filing. The Python engine reads this same TOML via `--budget-config`
-# (passed by the scheduler). When `enabled = false` the engine behaves
-# exactly like Phase 2 — no skip, no signal, no UI gating; flip on once
-# you've trued up `weekly_total` to your environment's signal volume.
-# The UI's `/admin/evolution/budget` endpoint serves the live snapshot
-# either way so operators can preview the gauge before opting in.
+# (passed by the scheduler). The UI's `/admin/evolution/budget` endpoint
+# serves the live snapshot regardless so operators can preview the gauge.
+#
+# Phase 3.1 flipped the default to `enabled = true` because shipping
+# evolution to prod with the budget gate disabled lets a runaway
+# proposer file unbounded rows on the audit trail and burn through
+# operator review time. If your environment hasn't trued up
+# `weekly_total` to its actual signal volume yet, set this back to
+# `false` for a week of observation, then commit a real ceiling.
 [evolution.budget]
-enabled       = false
+enabled       = true
 weekly_total  = 15
 
 [evolution.budget.per_kind]

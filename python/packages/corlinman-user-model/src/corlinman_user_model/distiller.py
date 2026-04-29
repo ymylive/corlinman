@@ -32,7 +32,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from corlinman_user_model.store import UserModelStore
+from corlinman_user_model.store import DEFAULT_TENANT_ID, UserModelStore
 from corlinman_user_model.traits import TraitKind, UserTrait
 
 logger = logging.getLogger(__name__)
@@ -63,34 +63,161 @@ class DistillerConfig:
 
 # ---------------------------------------------------------------------------
 # Redaction — regex only by design (no spacy / no model dependency).
+#
+# Phase 3.1 expansion: the v0 regex set caught only Chinese-domestic ID + mobile
+# + bare email/URL shapes. Real chat traffic also carries international phone
+# numbers (with separators), 17+X ID numbers, bank card PANs (with Luhn check
+# to dodge invoice / order-id false positives), IPv4 / IPv6 addresses, and QQ
+# numbers. The set below is still pure-regex by design — adding spaCy /
+# Presidio would balloon the cold-start dep tree for marginal recall gains and
+# we'd still need belt-and-suspenders LLM output filtering downstream.
 # ---------------------------------------------------------------------------
 
 
 _REDACTION_TOKEN = "[REDACTED]"
 
-# Order matters: URLs before emails (URL can contain '@' in userinfo),
-# emails before phone (some emails contain digit runs that would otherwise
-# match the phone pattern).
-_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"https?://\S+"), _REDACTION_TOKEN),
-    (re.compile(r"\S+@\S+"), _REDACTION_TOKEN),
-    (re.compile(r"\b\d{18}\b"), _REDACTION_TOKEN),  # Chinese ID number
-    (re.compile(r"\b\d{11}\b"), _REDACTION_TOKEN),  # Chinese mobile number
+
+def _luhn_ok(number: str) -> bool:
+    """Luhn check digit. Accepts digit-only strings; returns False otherwise.
+
+    Bank-card PANs (13-19 digits) are the false-positive nightmare of the
+    bare-digit pattern: any long-ish numeric run looks like a card. Luhn
+    catches >90% of these collisions for ~10 lines of arithmetic, with no
+    network call.
+    """
+    if not number or not number.isdigit():
+        return False
+    total = 0
+    parity = len(number) % 2
+    for idx, ch in enumerate(number):
+        digit = ord(ch) - ord("0")
+        if idx % 2 == parity:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return total % 10 == 0
+
+
+# Each entry: (compiled regex, optional post-match validator, replacement).
+# The validator (if present) is called with the full match text and must
+# return True for the match to be redacted — used by bank-card to enforce
+# the Luhn check.
+#
+# Order matters and is load-bearing:
+# 1. URL first — its body can contain '@' (userinfo), digits (port / IP),
+#    and '.' (hostname); we don't want partial redactions inside a URL.
+# 2. Email next — '@'-form is a strict subset of "non-URL".
+# 3. ID-X (17 digits + X) — most specific, claim before any digit-only
+#    pattern can chew the prefix.
+# 4. Bank card with Luhn before international phone — long bare digit
+#    runs that pass Luhn are PANs; the international-phone regex (which
+#    accepts no separators between groups too) would otherwise eat the
+#    leading 12-15 digits of a 16-digit PAN and leave a stub. Running
+#    Luhn first preserves the "Luhn-invalid runs are passed through"
+#    invariant that the test pins.
+# 5. International phone (with required separators or '+' prefix) — only
+#    matches obviously-phone-shaped strings now that bank cards already
+#    ran. The [\s\-] requirement on at least one separator (or a leading
+#    '+') keeps it from eating bare 12-digit invoice ids.
+# 6. Chinese mobile fallback — narrow `1\d{10}` only.
+# 7. IPv6 before IPv4 — IPv6 can contain colons + hex; IPv4 is straight
+#    dotted decimal. Running v6 first prevents partial IPv4-in-v6-tail.
+# 8. QQ last — narrow keyword anchor.
+_REDACTION_PATTERNS: tuple[
+    tuple[re.Pattern[str], "Callable[[str], bool] | None", str], ...
+] = (
+    (re.compile(r"https?://\S+"), None, _REDACTION_TOKEN),
+    (re.compile(r"\S+@\S+"), None, _REDACTION_TOKEN),
+    # Chinese ID with X check digit (17 digits + X/x).
+    (re.compile(r"\b\d{17}[\dXx]\b"), None, _REDACTION_TOKEN),
+    # Bank card PAN: 13-19 digit run, Luhn-validated. Luhn keeps
+    # order-ids / invoice numbers / catalog SKUs from being flagged.
+    (re.compile(r"\b\d{13,19}\b"), _luhn_ok, _REDACTION_TOKEN),
+    # International phone: either a leading '+' OR at least one
+    # space/hyphen between digit groups. Without one of those signals
+    # we'd false-match arbitrary 11-15 digit runs (which the bank-card
+    # pass already covers when they're real PANs). The non-capturing
+    # alternation pins the "must look phone-shaped" rule.
+    (
+        re.compile(
+            r"(?:"
+            r"\+\d{1,3}[\s\-]?\d{2,4}[\s\-]?\d{3,4}[\s\-]?\d{3,4}"
+            r"|"
+            r"\b\d{1,3}[\s\-]\d{2,4}[\s\-]\d{3,4}[\s\-]\d{3,4}\b"
+            r")"
+        ),
+        None,
+        _REDACTION_TOKEN,
+    ),
+    # Chinese mobile fallback — fewer false positives now that bank-card
+    # ran first. Kept for back-compat with the v0 redaction contract.
+    (re.compile(r"\b1\d{10}\b"), None, _REDACTION_TOKEN),
+    # IPv6 — covers both the long form (`2001:0db8:...:7334`) and the
+    # compressed form (`2001:db8::1`). Two alternatives:
+    #   * `(?:[hex]{1,4}:){2,7}[hex]{1,4}` for at-least-three-groups
+    #     uncompressed addresses.
+    #   * a `::`-anchored pattern that allows zero-to-six groups on
+    #     each side and a final optional trailing group. The trailing
+    #     group is optional because addresses like `fe80::` or
+    #     `2001:db8::` are still valid; without `(?:...)?` we'd miss
+    #     the head when only the suffix carried digits.
+    (
+        re.compile(
+            r"(?:"
+            r"(?:[A-Fa-f0-9]{1,4}:){2,7}[A-Fa-f0-9]{1,4}"
+            r"|"
+            r"(?:[A-Fa-f0-9]{1,4}:){1,6}:[A-Fa-f0-9]{0,4}(?::[A-Fa-f0-9]{1,4}){0,5}"
+            r")"
+        ),
+        None,
+        _REDACTION_TOKEN,
+    ),
+    # IPv4 — strict dotted decimal. No octet-range guard: that's a NER
+    # concern; the regex catches 999.999.999.999 too which is fine
+    # because a redacted IP is harmless even if synthetic.
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), None, _REDACTION_TOKEN),
+    # QQ number: keyword-anchored. Bare 5-12 digit runs are too noisy
+    # without the `QQ` prefix, but with it, this is a high-precision hit.
+    (
+        re.compile(r"\bQQ\s*[:：]?\s*\d{5,12}\b", re.IGNORECASE),
+        None,
+        _REDACTION_TOKEN,
+    ),
 )
 
 
 def redact_text(content: str) -> str:
     """Strip the obvious PII shapes before anything leaves the box.
 
-    Intentionally narrow: we don't try to be a NER. The goal is to
-    catch the four shapes that show up most often in real chats and
-    that the LLM is likely to echo back. Anything subtler is the LLM's
-    own "no PII" instruction's job to refuse.
+    Intentionally regex-only: we don't try to be a NER. Each pattern is
+    paired with an optional validator (e.g. Luhn for bank cards) so we
+    don't trade phone-PII recall for invoice-id false positives. See the
+    block comment above for the ordering rationale.
     """
     redacted = content
-    for pattern, replacement in _REDACTION_PATTERNS:
-        redacted = pattern.sub(replacement, redacted)
+    for pattern, validator, replacement in _REDACTION_PATTERNS:
+        if validator is None:
+            redacted = pattern.sub(replacement, redacted)
+        else:
+            redacted = pattern.sub(
+                lambda m: replacement if validator(m.group(0)) else m.group(0),
+                redacted,
+            )
     return redacted
+
+
+def _trait_value_has_pii(value: str) -> bool:
+    """Belt-and-suspenders check on LLM-emitted trait values.
+
+    The system prompt tells the model not to echo PII, but prompts are
+    not security boundaries. After the model returns, we run the same
+    redaction pass over each `value` field and drop traits where the
+    pre/post differ — that means the regex caught something. Cheaper
+    than letting a compromised model populate `user_traits` with an
+    email address that survives every future placeholder render.
+    """
+    return redact_text(value) != value
 
 
 # ---------------------------------------------------------------------------
@@ -99,15 +226,15 @@ def redact_text(content: str) -> str:
 
 
 DISTILL_SYSTEM_PROMPT = """你是一个用户画像分析师。读下面这段对话，抽取**关于用户**的稳定特征
-（不是临时状态，不是事实陈述）。每条 trait 有 4 个字段：
+（不是临时状态，不是事实陈述）。每条 trait 有 3 个字段：
 
   kind: interest | tone | topic | preference
-  value: <30字以内的中文短语>
+  value: <30字以内的中文短语，描述特征本身，不要原文摘抄>
   confidence: 0.0–1.0（这条 trait 的置信度，0.4 以下不要输出）
-  evidence: <从对话里摘取的一句话>
 
-输出严格 JSON：[{kind, value, confidence, evidence}, ...]
-绝对不要包含用户的姓名 / 联系方式 / 地址 / 其他 PII。"""
+输出严格 JSON：[{kind, value, confidence}, ...]
+绝对不要在 value 里包含用户的姓名 / 电话 / 邮箱 / 身份证 / 银行卡 / IP /
+QQ / 微信 / 地址 或任何其他 PII。也不要输出对话原文摘录字段。"""
 
 
 # Type alias for the LLM call — narrow on purpose so tests can pass
@@ -180,6 +307,7 @@ async def distill_session(
     llm_caller: LLMCaller,
     user_id: str | None = None,
     now_ms: int | None = None,
+    tenant_id: str = DEFAULT_TENANT_ID,
 ) -> list[UserTrait]:
     """Distil one session into traits and persist them.
 
@@ -191,7 +319,8 @@ async def distill_session(
     gateway's stable identifier and already follows the
     ``"<channel>:<sender_id>"`` convention from hermes-agent. Callers
     can override when they need to attribute traits to something other
-    than the session originator.
+    than the session originator. ``tenant_id`` is Phase 3.1 plumbing —
+    defaults to ``'default'`` until Phase 4 wires multi-tenant ids.
     """
     turns = read_session_turns(config.sessions_db_path, session_id)
     if len(turns) < config.distill_after_session_turns:
@@ -229,6 +358,7 @@ async def distill_session(
                 confidence=entry.confidence,
                 session_id=session_id,
                 now_ms=timestamp_ms,
+                tenant_id=tenant_id,
             )
             persisted.append(
                 UserTrait(
@@ -303,6 +433,14 @@ def _parse_llm_response(raw: str, *, floor: float) -> list[_ParsedTrait]:
       * unknown ``kind`` strings (drop the entry, don't crash)
       * confidence below the floor (drop)
       * empty / non-string ``value`` (drop)
+      * PII that survived the prompt's "no PII" instruction — the
+        regex pass over ``value`` (see :func:`_trait_value_has_pii`)
+        drops those traits before they hit disk. The model's output
+        is **not** a security boundary; this filter is.
+      * an ``evidence`` field if present — silently dropped, never
+        persisted, never surfaced. The system prompt no longer asks
+        for it (see ``DISTILL_SYSTEM_PROMPT``) but older / fine-tuned
+        models can still produce one and we refuse to write it.
 
     A whole-response parse failure returns an empty list and logs.
     """
@@ -335,6 +473,21 @@ def _parse_llm_response(raw: str, *, floor: float) -> list[_ParsedTrait]:
             continue
         if confidence < floor:
             continue
+        # Belt-and-suspenders: re-run the redaction regex over the
+        # value the LLM produced. If anything matches we drop the
+        # trait outright — a partial redaction would leave a
+        # half-PII trait on disk and we'd rather lose recall than
+        # quietly persist `email_user_at_example_dot_com` shapes.
+        if _trait_value_has_pii(value):
+            logger.warning(
+                "user_model.distill.dropped_pii_trait",
+                extra={"kind": kind.value},
+            )
+            continue
+        # ``evidence`` was the largest PII ingress in the v0 prompt
+        # (the LLM pasted raw user content back). Even if the model
+        # still emits it (older fine-tunes, prompt regression), we
+        # never read it and it never reaches the store.
         out.append(_ParsedTrait(kind=kind, value=value, confidence=confidence))
     return out
 

@@ -170,17 +170,22 @@ pub async fn load_eval_set(
     kind: EvolutionKind,
 ) -> Result<EvalSet, EvalLoadError> {
     let dir = eval_set_dir.join(kind.as_str());
-    if !tokio::fs::try_exists(&dir).await.map_err(|e| EvalLoadError::Io {
-        path: dir.clone(),
-        source: e,
-    })? {
+    if !tokio::fs::try_exists(&dir)
+        .await
+        .map_err(|e| EvalLoadError::Io {
+            path: dir.clone(),
+            source: e,
+        })?
+    {
         return Err(EvalLoadError::MissingDir(dir));
     }
 
-    let mut entries = tokio::fs::read_dir(&dir).await.map_err(|e| EvalLoadError::Io {
-        path: dir.clone(),
-        source: e,
-    })?;
+    let mut entries = tokio::fs::read_dir(&dir)
+        .await
+        .map_err(|e| EvalLoadError::Io {
+            path: dir.clone(),
+            source: e,
+        })?;
     let mut yaml_files: Vec<PathBuf> = Vec::new();
     while let Some(entry) = entries.next_entry().await.map_err(|e| EvalLoadError::Io {
         path: dir.clone(),
@@ -216,14 +221,17 @@ pub async fn load_eval_set(
 
     let mut cases = Vec::with_capacity(yaml_files.len());
     for file in yaml_files {
-        let text = tokio::fs::read_to_string(&file).await.map_err(|e| EvalLoadError::Io {
-            path: file.clone(),
-            source: e,
-        })?;
-        let mut case: EvalCase = serde_yaml::from_str(&text).map_err(|e| EvalLoadError::ParseFailure {
-            file: file.clone(),
-            reason: e.to_string(),
-        })?;
+        let text = tokio::fs::read_to_string(&file)
+            .await
+            .map_err(|e| EvalLoadError::Io {
+                path: file.clone(),
+                source: e,
+            })?;
+        let mut case: EvalCase =
+            serde_yaml::from_str(&text).map_err(|e| EvalLoadError::ParseFailure {
+                file: file.clone(),
+                reason: e.to_string(),
+            })?;
 
         // Reject explicit-but-wrong kinds; default the unset case to the dir's kind.
         match case.kind {
@@ -331,7 +339,10 @@ mod tests {
         let err = load_eval_set(tmp.path(), EvolutionKind::MemoryOp)
             .await
             .unwrap_err();
-        assert!(matches!(err, EvalLoadError::ParseFailure { .. }), "got {err:?}");
+        assert!(
+            matches!(err, EvalLoadError::ParseFailure { .. }),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]

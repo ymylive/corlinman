@@ -22,11 +22,22 @@ from corlinman_user_model.traits import TraitKind, UserTrait
 
 # ---------------------------------------------------------------------------
 # Schema — see docs/design/phase3-roadmap.md §5 for the canonical version.
+#
+# Phase 3.1 adds ``tenant_id`` (default ``'default'``). Phase 4 will switch
+# the multi-tenant gateway over to real tenant ids, at which point every
+# ``user_id`` query implicitly scoped under ``'default'`` becomes a single
+# call-site change instead of a schema migration on populated user data.
+# Doing it now while the table is small is ~10x cheaper than later.
 # ---------------------------------------------------------------------------
+
+# The tenant_id default lets every existing call site keep working without
+# a parameter — only Phase 4's multi-tenant fan-out has to thread real ids.
+DEFAULT_TENANT_ID = "default"
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS user_traits (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id    TEXT NOT NULL DEFAULT 'default',
     user_id      TEXT NOT NULL,
     trait_kind   TEXT NOT NULL,
     trait_value  TEXT NOT NULL,
@@ -41,7 +52,38 @@ CREATE INDEX IF NOT EXISTS idx_user_traits_user
 
 CREATE INDEX IF NOT EXISTS idx_user_traits_user_kind
     ON user_traits(user_id, trait_kind);
+
+CREATE INDEX IF NOT EXISTS idx_user_traits_tenant_user
+    ON user_traits(tenant_id, user_id);
 """
+
+
+# Migrations applied after :data:`_SCHEMA_SQL`. Each entry is
+# ``(table, column, ddl)``. The runtime checks via ``PRAGMA table_info``
+# whether the column exists before running the ALTER, so this is
+# idempotent on both fresh DBs (CREATE TABLE has the column already and
+# the ALTER is skipped) and pre-Phase-3.1 DBs (CREATE TABLE was the old
+# shape; the ALTER adds the column).
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        "user_traits",
+        "tenant_id",
+        "ALTER TABLE user_traits ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+    ),
+)
+
+
+async def _column_exists(conn: aiosqlite.Connection, table: str, column: str) -> bool:
+    """True iff ``table.column`` exists. Used by the migration runner.
+
+    SQLite has no `ADD COLUMN IF NOT EXISTS`; we pragma-check first so
+    re-opens stay idempotent. Mirrors the Rust crate's
+    ``corlinman-evolution::store::column_exists`` shape.
+    """
+    cursor = await conn.execute(f"PRAGMA table_info({table})")
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return any(str(r[1]) == column for r in rows)
 
 
 # Weighted-average constants for the upsert path. Old confidence keeps
@@ -70,13 +112,18 @@ class UserModelStore:
 
         Caller must still ``__aenter__`` / ``__aexit__`` to manage the
         connection — this constructor only ensures the file + schema
-        exist on disk.
+        exist on disk. Idempotent migrations land here too so a
+        pre-Phase-3.1 ``user_model.sqlite`` picks up the ``tenant_id``
+        column automatically on first re-open.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         # Open synchronously through aiosqlite to apply the schema, then
         # close — the caller will re-open via the context manager.
         async with aiosqlite.connect(path) as conn:
             await conn.executescript(_SCHEMA_SQL)
+            for table, column, ddl in _MIGRATIONS:
+                if not await _column_exists(conn, table, column):
+                    await conn.execute(ddl)
             await conn.commit()
         return cls(path)
 
@@ -105,31 +152,34 @@ class UserModelStore:
         *,
         kind: TraitKind | None = None,
         min_confidence: float = 0.4,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> list[UserTrait]:
         """Return traits for ``user_id`` ordered by confidence DESC.
 
         ``min_confidence`` matches the
         ``[user_model] trait_confidence_floor`` config default; callers
         can lower it for admin views and raise it for prompt-time
-        rendering.
+        rendering. ``tenant_id`` defaults to ``'default'`` — Phase 4
+        multi-tenant fan-out flips that one parameter at the call site.
         """
         if kind is None:
             cursor = await self.conn.execute(
                 """SELECT user_id, trait_kind, trait_value, confidence,
                           first_seen, last_seen, session_ids
                    FROM user_traits
-                   WHERE user_id = ? AND confidence >= ?
+                   WHERE tenant_id = ? AND user_id = ? AND confidence >= ?
                    ORDER BY confidence DESC, last_seen DESC""",
-                (user_id, min_confidence),
+                (tenant_id, user_id, min_confidence),
             )
         else:
             cursor = await self.conn.execute(
                 """SELECT user_id, trait_kind, trait_value, confidence,
                           first_seen, last_seen, session_ids
                    FROM user_traits
-                   WHERE user_id = ? AND trait_kind = ? AND confidence >= ?
+                   WHERE tenant_id = ? AND user_id = ? AND trait_kind = ?
+                     AND confidence >= ?
                    ORDER BY confidence DESC, last_seen DESC""",
-                (user_id, kind.value, min_confidence),
+                (tenant_id, user_id, kind.value, min_confidence),
             )
         rows = await cursor.fetchall()
         await cursor.close()
@@ -148,22 +198,25 @@ class UserModelStore:
         confidence: float,
         session_id: str,
         now_ms: int | None = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> None:
         """Insert a fresh trait, or update an existing one in place.
 
-        Matching is by ``(user_id, trait_kind, trait_value)``. On match
-        we take the weighted average ``0.7 * old + 0.3 * new``, bump
-        ``last_seen``, and append ``session_id`` to the JSON array if
-        not already present. Plain overwrite would lose the smoothing
-        the design calls for.
+        Matching is by ``(tenant_id, user_id, trait_kind, trait_value)``.
+        On match we take the weighted average ``0.7 * old + 0.3 * new``,
+        bump ``last_seen``, and append ``session_id`` to the JSON array
+        if not already present. Plain overwrite would lose the smoothing
+        the design calls for. ``tenant_id`` defaults to ``'default'``
+        until Phase 4 wires real tenant ids.
         """
         if now_ms is None:
             now_ms = int(time.time() * 1_000)
         cursor = await self.conn.execute(
             """SELECT id, confidence, first_seen, session_ids
                FROM user_traits
-               WHERE user_id = ? AND trait_kind = ? AND trait_value = ?""",
-            (user_id, trait_kind.value, trait_value),
+               WHERE tenant_id = ? AND user_id = ? AND trait_kind = ?
+                 AND trait_value = ?""",
+            (tenant_id, user_id, trait_kind.value, trait_value),
         )
         existing = await cursor.fetchone()
         await cursor.close()
@@ -171,10 +224,11 @@ class UserModelStore:
         if existing is None:
             await self.conn.execute(
                 """INSERT INTO user_traits
-                     (user_id, trait_kind, trait_value, confidence,
+                     (tenant_id, user_id, trait_kind, trait_value, confidence,
                       first_seen, last_seen, session_ids)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
+                    tenant_id,
                     user_id,
                     trait_kind.value,
                     trait_value,
@@ -271,4 +325,4 @@ def _row_to_trait(row: aiosqlite.Row | tuple[Any, ...]) -> UserTrait:
     )
 
 
-__all__ = ["UserModelStore"]
+__all__ = ["DEFAULT_TENANT_ID", "UserModelStore"]

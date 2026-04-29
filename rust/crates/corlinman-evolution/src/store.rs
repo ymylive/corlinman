@@ -222,13 +222,11 @@ mod tests {
         assert!(!column_exists(&pool, "evolution_proposals", "eval_run_id")
             .await
             .unwrap());
-        assert!(!column_exists(
-            &pool,
-            "evolution_proposals",
-            "baseline_metrics_json"
-        )
-        .await
-        .unwrap());
+        assert!(
+            !column_exists(&pool, "evolution_proposals", "baseline_metrics_json")
+                .await
+                .unwrap()
+        );
         pool.close().await;
 
         // Open through the production path → migrations apply.

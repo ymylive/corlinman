@@ -512,8 +512,7 @@ async fn apply_proposal(State(state): State<AdminState>, Path(id): Path<String>)
             // Unknown strings (shouldn't happen — value came from the
             // typed `EvolutionKind`) fall back to `MemoryOp` so the
             // counter still moves.
-            let kind =
-                EvolutionKind::from_str(&kind_str).unwrap_or(EvolutionKind::MemoryOp);
+            let kind = EvolutionKind::from_str(&kind_str).unwrap_or(EvolutionKind::MemoryOp);
             EvolutionApplier::observe_failure(kind);
             (
                 StatusCode::BAD_REQUEST,
@@ -657,10 +656,7 @@ pub struct HistoryEntryOut {
     pub reasoning: String,
 }
 
-async fn list_history(
-    State(state): State<AdminState>,
-    Query(q): Query<HistoryQuery>,
-) -> Response {
+async fn list_history(State(state): State<AdminState>, Query(q): Query<HistoryQuery>) -> Response {
     let Some(store) = state.evolution_store.as_ref() else {
         return evolution_disabled();
     };
@@ -731,17 +727,16 @@ async fn list_history(
             },
             None => None,
         };
-        let baseline_metrics_json =
-            match row.get::<Option<String>, _>("baseline_metrics_json") {
-                Some(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-                    Ok(v) => Some(v),
-                    Err(err) => {
-                        warn!(error = %err, "history.baseline_metrics_json malformed");
-                        None
-                    }
-                },
-                None => None,
-            };
+        let baseline_metrics_json = match row.get::<Option<String>, _>("baseline_metrics_json") {
+            Some(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+                Ok(v) => Some(v),
+                Err(err) => {
+                    warn!(error = %err, "history.baseline_metrics_json malformed");
+                    None
+                }
+            },
+            None => None,
+        };
         out.push(HistoryEntryOut {
             proposal_id: row.get("proposal_id"),
             kind: row.get("kind"),
@@ -1109,10 +1104,7 @@ mod tests {
         let (kb, applier) = build_applier(&tmp, store.clone()).await;
         // Seed two chunks so the real merge_chunks pipeline finds rows
         // when the proposal flips to approved.
-        let file_id = kb
-            .insert_file("/t", "diary", "ck", 0, 0)
-            .await
-            .unwrap();
+        let file_id = kb.insert_file("/t", "diary", "ck", 0, 0).await.unwrap();
         let a = kb
             .insert_chunk(file_id, 0, "winner", None, "general")
             .await

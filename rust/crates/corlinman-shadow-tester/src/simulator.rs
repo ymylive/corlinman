@@ -52,6 +52,17 @@ pub enum SimulatorError {
         source: sqlx::Error,
     },
 
+    /// Phase 3.1: a path the simulator was asked to operate on
+    /// canonicalised outside the tempdir sandbox. Carries the path
+    /// the runner provided plus a short reason. Surfaces an explicit
+    /// reject instead of writing into whatever symlink target tried
+    /// to hijack the sandbox.
+    #[error("path rejected {path:?}: {reason}")]
+    PathRejected {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+
     /// Catch-all for unanticipated runtime conditions.
     #[error("simulator runtime: {0}")]
     Runtime(String),
@@ -204,7 +215,10 @@ impl KindSimulator for MemoryOpSimulator {
 
         let baseline = capture_baseline(&pool, &parsed_ids).await?;
         let existing_ids = parsed_existing_ids(&baseline);
-        let surviving_id = *parsed_ids.iter().min().expect("parse_merge_target ensures len>=2");
+        let surviving_id = *parsed_ids
+            .iter()
+            .min()
+            .expect("parse_merge_target ensures len>=2");
 
         // NoOp short-circuit: if any target id is missing from the DB we
         // refuse to apply a partial merge. This matches the runner's
@@ -217,7 +231,9 @@ impl KindSimulator for MemoryOpSimulator {
         } else {
             // No mutation; surviving_content reflects whatever the
             // surviving row is right now (or empty if it too is absent).
-            let content = fetch_content(&pool, surviving_id).await?.unwrap_or_default();
+            let content = fetch_content(&pool, surviving_id)
+                .await?
+                .unwrap_or_default();
             (0u32, content)
         };
 
@@ -298,7 +314,10 @@ async fn capture_baseline(
         Value::Array(existing_ids.iter().map(|i| json!(i)).collect()),
     );
     baseline.insert("target_contents".into(), Value::Object(target_contents));
-    baseline.insert("surviving_id_candidate".into(), json!(surviving_id_candidate));
+    baseline.insert(
+        "surviving_id_candidate".into(),
+        json!(surviving_id_candidate),
+    );
     Ok(baseline)
 }
 
@@ -439,16 +458,15 @@ impl KindSimulator for TagRebalanceSimulator {
                 source: e,
             })?;
 
-        let target_row: Option<(i64, Option<i64>)> = sqlx::query_as(
-            "SELECT id, parent_id FROM tag_nodes WHERE path = ?1",
-        )
-        .bind(&path)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| SimulatorError::Sqlite {
-            step: "tag_baseline.lookup",
-            source: e,
-        })?;
+        let target_row: Option<(i64, Option<i64>)> =
+            sqlx::query_as("SELECT id, parent_id FROM tag_nodes WHERE path = ?1")
+                .bind(&path)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| SimulatorError::Sqlite {
+                    step: "tag_baseline.lookup",
+                    source: e,
+                })?;
 
         let (target_id, parent_id_opt) = match target_row {
             Some((id, parent)) => (Some(id), parent),
@@ -539,7 +557,10 @@ impl KindSimulator for TagRebalanceSimulator {
 
         let mut shadow = Map::new();
         shadow.insert("tag_nodes_total".into(), json!(post_total));
-        shadow.insert("target_node_present".into(), json!(target_id.is_some() && !node_deleted));
+        shadow.insert(
+            "target_node_present".into(),
+            json!(target_id.is_some() && !node_deleted),
+        );
         shadow.insert("moved_chunk_count".into(), json!(moved_chunk_count));
         shadow.insert("chunks_now_under_parent".into(), json!(chunks_under_parent));
 
@@ -556,9 +577,10 @@ impl KindSimulator for TagRebalanceSimulator {
                     && moved_chunk_count == *expected_moved;
                 (ok, None)
             }
-            ExpectedOutcome::TagNoOp { .. } => {
-                (target_id.is_none() && moved_chunk_count == 0 && !node_deleted, None)
-            }
+            ExpectedOutcome::TagNoOp { .. } => (
+                target_id.is_none() && moved_chunk_count == 0 && !node_deleted,
+                None,
+            ),
             _ => (
                 false,
                 Some("expected outcome shape mismatch for kind".to_string()),
@@ -599,9 +621,40 @@ impl KindSimulator for SkillUpdateSimulator {
     ) -> Result<SimulatorOutput, SimulatorError> {
         let started = Instant::now();
 
+        // Phase 3.1 sandbox enforcement.
+        //
+        // The runner hands us a tempdir-rooted `kb_path`, but `kb_path`
+        // itself is untrusted from the simulator's perspective: a
+        // racing process could pre-create / symlink the parent
+        // directory before the runner gets to it. Canonicalise the
+        // tempdir root *and* the system temp_dir, then assert
+        // containment — TOCTOU dodges between the assert and the
+        // write are closed by re-canonicalising the parent right
+        // before the write below.
+        let kb_path_canonical =
+            kb_path
+                .canonicalize()
+                .map_err(|e| SimulatorError::PathRejected {
+                    path: kb_path.to_path_buf(),
+                    reason: format!("canonicalize kb_path: {e}"),
+                })?;
+        let temp_root =
+            std::env::temp_dir()
+                .canonicalize()
+                .map_err(|e| SimulatorError::PathRejected {
+                    path: kb_path.to_path_buf(),
+                    reason: format!("canonicalize temp_dir: {e}"),
+                })?;
+        if !kb_path_canonical.starts_with(&temp_root) {
+            return Err(SimulatorError::PathRejected {
+                path: kb_path.to_path_buf(),
+                reason: format!("kb_path canonicalises outside temp_dir {temp_root:?}"),
+            });
+        }
+
         // Runner contract: skills tempdir is a sibling of kb.sqlite. We
         // never resolve outside it, and we never read prod paths.
-        let skills_dir = kb_path
+        let skills_dir = kb_path_canonical
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("skills");
@@ -609,13 +662,17 @@ impl KindSimulator for SkillUpdateSimulator {
         // Validate target shape — same rules the gateway applier uses.
         let target = &case.proposal.target;
         let basename = match target.strip_prefix("skills/") {
-            Some(b) if b.ends_with(".md") && !b.is_empty() && !b.contains('/') && !b.contains("..") => {
+            Some(b)
+                if b.ends_with(".md") && !b.is_empty() && !b.contains('/') && !b.contains("..") =>
+            {
                 b.to_string()
             }
             _ => {
-                let out = failed_skill_output(case, started, format!(
-                    "invalid target {target:?}: expected 'skills/<name>.md'"
-                ));
+                let out = failed_skill_output(
+                    case,
+                    started,
+                    format!("invalid target {target:?}: expected 'skills/<name>.md'"),
+                );
                 return Ok(out);
             }
         };
@@ -628,7 +685,11 @@ impl KindSimulator for SkillUpdateSimulator {
             Ok(m) if m.is_file() => match tokio::fs::read_to_string(&path).await {
                 Ok(s) => Some(s),
                 Err(e) => {
-                    return Ok(failed_skill_output(case, started, format!("read prior: {e}")));
+                    return Ok(failed_skill_output(
+                        case,
+                        started,
+                        format!("read prior: {e}"),
+                    ));
                 }
             },
             _ => None,
@@ -706,6 +767,25 @@ impl KindSimulator for SkillUpdateSimulator {
         for line in &appended_lines {
             new_content.push_str(line);
             new_content.push('\n');
+        }
+
+        // Re-validate the parent dir canonicalises under temp_root
+        // *immediately* before the write. If a racing process
+        // swapped `<tempdir>/skills` for a symlink to `/etc` between
+        // the entry-point check and now, the second canonicalise
+        // surfaces it and we reject. Belt-and-suspenders to the
+        // entry-point check above.
+        if let Some(parent) = path.parent() {
+            if let Ok(parent_canon) = parent.canonicalize() {
+                if !parent_canon.starts_with(&temp_root) {
+                    return Err(SimulatorError::PathRejected {
+                        path: path.clone(),
+                        reason: format!(
+                            "parent dir {parent_canon:?} escaped temp_root {temp_root:?}"
+                        ),
+                    });
+                }
+            }
         }
         if let Err(e) = tokio::fs::write(&path, new_content.as_bytes()).await {
             return Ok(failed_skill_output(case, started, format!("write: {e}")));
@@ -839,25 +919,37 @@ mod tests {
     #[test]
     fn parse_merge_target_rejects_missing_prefix() {
         let err = parse_merge_target("not_a_merge:1,2").unwrap_err();
-        assert!(matches!(err, SimulatorError::InvalidTarget { .. }), "got {err:?}");
+        assert!(
+            matches!(err, SimulatorError::InvalidTarget { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn parse_merge_target_rejects_single_id() {
         let err = parse_merge_target("merge_chunks:1").unwrap_err();
-        assert!(matches!(err, SimulatorError::InvalidTarget { .. }), "got {err:?}");
+        assert!(
+            matches!(err, SimulatorError::InvalidTarget { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn parse_merge_target_rejects_non_integer() {
         let err = parse_merge_target("merge_chunks:1,abc").unwrap_err();
-        assert!(matches!(err, SimulatorError::InvalidTarget { .. }), "got {err:?}");
+        assert!(
+            matches!(err, SimulatorError::InvalidTarget { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn parse_merge_target_rejects_duplicates() {
         let err = parse_merge_target("merge_chunks:1,1").unwrap_err();
-        assert!(matches!(err, SimulatorError::InvalidTarget { .. }), "got {err:?}");
+        assert!(
+            matches!(err, SimulatorError::InvalidTarget { .. }),
+            "got {err:?}"
+        );
     }
 
     // ---- simulate ----
@@ -927,9 +1019,14 @@ mod tests {
         );
         let out = MemoryOpSimulator.simulate(&c, &kb).await.unwrap();
         assert!(out.passed, "expected pass; out={out:?}");
-        assert_eq!(out.shadow.get("rows_merged").and_then(|v| v.as_u64()), Some(1));
         assert_eq!(
-            out.shadow.get("surviving_chunk_id").and_then(|v| v.as_i64()),
+            out.shadow.get("rows_merged").and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            out.shadow
+                .get("surviving_chunk_id")
+                .and_then(|v| v.as_i64()),
             Some(1)
         );
         assert!(out.error.is_none());
@@ -945,11 +1042,16 @@ mod tests {
         let c = case(
             "noop",
             "merge_chunks:1,99",
-            ExpectedOutcome::NoOp { latency_ms_max: 500 },
+            ExpectedOutcome::NoOp {
+                latency_ms_max: 500,
+            },
         );
         let out = MemoryOpSimulator.simulate(&c, &kb).await.unwrap();
         assert!(out.passed, "expected pass; out={out:?}");
-        assert_eq!(out.shadow.get("rows_merged").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            out.shadow.get("rows_merged").and_then(|v| v.as_u64()),
+            Some(0)
+        );
     }
 
     #[tokio::test]
@@ -962,7 +1064,9 @@ mod tests {
         let c = case(
             "bad",
             "not_a_merge:1,2",
-            ExpectedOutcome::NoOp { latency_ms_max: 500 },
+            ExpectedOutcome::NoOp {
+                latency_ms_max: 500,
+            },
         );
         let out = MemoryOpSimulator.simulate(&c, &kb).await.unwrap();
         assert!(!out.passed);
@@ -989,11 +1093,154 @@ mod tests {
             },
         );
         let out = MemoryOpSimulator.simulate(&c, &kb).await.unwrap();
-        for k in ["chunks_total", "target_chunk_ids", "target_contents", "surviving_id_candidate"] {
+        for k in [
+            "chunks_total",
+            "target_chunk_ids",
+            "target_contents",
+            "surviving_id_candidate",
+        ] {
             assert!(out.baseline.contains_key(k), "baseline missing {k}");
         }
-        for k in ["chunks_total", "surviving_chunk_id", "rows_merged", "surviving_content"] {
+        for k in [
+            "chunks_total",
+            "surviving_chunk_id",
+            "rows_merged",
+            "surviving_content",
+        ] {
             assert!(out.shadow.contains_key(k), "shadow missing {k}");
         }
+    }
+
+    // ---- Phase 3.1: skill-update sandbox enforcement ---------------------
+
+    /// SkillUpdateSimulator must reject a `kb_path` whose canonicalised
+    /// form lands outside `std::env::temp_dir()`. Build a tempdir that
+    /// looks valid, then symlink `<tempdir>/skills` to a non-temp
+    /// directory before running the simulator. The pre-write
+    /// re-canonicalise should catch the escape and return PathRejected
+    /// instead of issuing the write.
+    ///
+    /// Skipped on Windows because `std::os::unix::fs::symlink` isn't
+    /// available there; the rest of the simulator is unaffected.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn simulate_rejects_symlinked_skills_dir_escape() {
+        use crate::eval::ProposalSpec;
+        use std::os::unix::fs::symlink;
+
+        // Outside-of-temp target: a freshly-made tempdir is itself
+        // under temp_dir(), so we use the workspace's parent dir
+        // — which lives under `/Users/.../...` on macOS, well outside
+        // `/tmp` and `/var/folders/.../`. We don't write into it; the
+        // assertion is just on the canonicalize boundary.
+        let outside = std::env::current_dir().unwrap();
+        let outside = outside.canonicalize().unwrap();
+
+        let temp_root = std::env::temp_dir().canonicalize().unwrap();
+        // Sanity guard for the test itself: if the workspace
+        // happens to live under temp_root (rare CI shape), skip.
+        if outside.starts_with(&temp_root) {
+            eprintln!("skipping: workspace dir is under temp_root");
+            return;
+        }
+
+        // Build a kb_path whose tempdir-sibling `skills` directory
+        // is a symlink pointing outside temp_root.
+        let tmp = TempDir::new().unwrap();
+        let kb_path = tmp.path().join("kb.sqlite");
+        // Create the kb file so canonicalize succeeds for kb_path.
+        std::fs::write(&kb_path, b"").unwrap();
+        // Plant the symlink: tempdir/skills -> outside/.
+        let skills_link = tmp.path().join("skills");
+        symlink(&outside, &skills_link).unwrap();
+
+        // Diff is otherwise valid; the per-write canonicalize is
+        // what should reject.
+        let case = EvalCase {
+            name: "symlink-escape".into(),
+            kind: Some(EvolutionKind::SkillUpdate),
+            description: "test".into(),
+            kb_seed: vec![],
+            skill_seed: Default::default(),
+            proposal: ProposalSpec {
+                target: "skills/web_search.md".into(),
+                reasoning: "test".into(),
+                risk: EvolutionRisk::High,
+                signal_ids: vec![],
+                diff: "--- a/skills/web_search.md\n+++ b/skills/web_search.md\n@@ __APPEND__,0 +__APPEND__,1 @@\n+x\n".into(),
+            },
+            expected: ExpectedOutcome::SkillUpdated {
+                file: "skills/web_search.md".into(),
+                content_includes: "x".into(),
+                latency_ms_max: 500,
+            },
+        };
+        // Pre-seed the symlinked target file *outside* the tempdir
+        // so the simulator's read path doesn't bail early on a
+        // missing file — that's a different code path. We don't
+        // care if the prior file already exists; we only assert the
+        // simulator refuses to write through the symlink.
+        let prior_path = outside.join("web_search.md");
+        let pre_existed = prior_path.exists();
+        if !pre_existed {
+            std::fs::write(&prior_path, b"prior\n").unwrap();
+        }
+
+        let result = SkillUpdateSimulator.simulate(&case, &kb_path).await;
+        // Cleanup before assertions so a panic doesn't leave the
+        // test fixture in `outside` for the next run.
+        if !pre_existed {
+            let _ = std::fs::remove_file(&prior_path);
+        }
+
+        match result {
+            Err(SimulatorError::PathRejected { path: _, reason }) => {
+                assert!(
+                    reason.contains("temp_root") || reason.contains("temp_dir"),
+                    "expected sandbox-boundary message, got {reason:?}"
+                );
+            }
+            other => panic!("expected PathRejected, got {other:?}"),
+        }
+    }
+
+    /// Happy path: a normal tempdir-only kb_path simulator run still
+    /// passes the canonicalize boundary check. Pins that the new
+    /// validation isn't gating legit cases.
+    #[tokio::test]
+    async fn simulate_accepts_clean_tempdir_kb_path() {
+        use crate::eval::ProposalSpec;
+
+        let tmp = TempDir::new().unwrap();
+        let kb_path = tmp.path().join("kb.sqlite");
+        std::fs::write(&kb_path, b"").unwrap();
+        let skills_dir = tmp.path().join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::write(skills_dir.join("web_search.md"), b"prior\n").unwrap();
+
+        let case = EvalCase {
+            name: "clean".into(),
+            kind: Some(EvolutionKind::SkillUpdate),
+            description: "test".into(),
+            kb_seed: vec![],
+            skill_seed: Default::default(),
+            proposal: ProposalSpec {
+                target: "skills/web_search.md".into(),
+                reasoning: "test".into(),
+                risk: EvolutionRisk::High,
+                signal_ids: vec![],
+                diff: "--- a/skills/web_search.md\n+++ b/skills/web_search.md\n@@ __APPEND__,0 +__APPEND__,1 @@\n+x\n".into(),
+            },
+            expected: ExpectedOutcome::SkillUpdated {
+                file: "skills/web_search.md".into(),
+                content_includes: "x".into(),
+                latency_ms_max: 500,
+            },
+        };
+        let out = SkillUpdateSimulator
+            .simulate(&case, &kb_path)
+            .await
+            .unwrap();
+        assert!(out.passed, "clean tempdir kb_path must pass; out={out:?}");
     }
 }

@@ -22,7 +22,12 @@ def db_path(tmp_path: Path) -> Path:
 
 
 async def test_open_or_create_creates_schema(db_path: Path) -> None:
-    """Opening a fresh path materialises both the file and the table."""
+    """Opening a fresh path materialises both the file and the table.
+
+    Phase 3.1 added ``tenant_id`` so multi-tenant rollout in Phase 4 is
+    a single-line call-site change. This test pins the column set so
+    the next migration can't silently drop the column.
+    """
     store = await PersonaStore.open_or_create(db_path)
     try:
         assert db_path.exists()
@@ -37,6 +42,7 @@ async def test_open_or_create_creates_schema(db_path: Path) -> None:
             conn.close()
         assert cols == {
             "agent_id",
+            "tenant_id",
             "mood",
             "fatigue",
             "recent_topics",
@@ -247,3 +253,68 @@ async def test_use_outside_context_raises(db_path: Path) -> None:
     store = PersonaStore(db_path)
     with pytest.raises(RuntimeError, match="outside async context"):
         _ = store.conn
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.1: tenant_id scoping
+#
+# v0 schema kept ``agent_id`` as PRIMARY KEY; Phase 3.1 adds the
+# ``tenant_id`` column so Phase 4's multi-tenant fan-out has a place to
+# write to without a heavyweight ALTER TABLE then. The PK rewrite to a
+# composite key is deferred to Phase 4 (SQLite can't change a PK in
+# place). Practical implication: today every row's tenant_id is
+# ``'default'``; the read path filter still scopes correctly because
+# every row matches the same value.
+# ---------------------------------------------------------------------------
+
+
+async def test_list_all_default_tenant_skips_other_tenant_rows(db_path: Path) -> None:
+    """A row whose ``tenant_id`` got rewritten out of band must not be
+    returned by the default-tenant read. Pins the WHERE-clause scope
+    so Phase 4 can flip tenant_id at the call site and trust the
+    isolation."""
+    import sqlite3
+
+    async with PersonaStore(db_path) as store:
+        await store.upsert(PersonaState(agent_id="alpha", updated_at_ms=1))
+        await store.upsert(PersonaState(agent_id="beta", updated_at_ms=1))
+    # Re-tag one row's tenant_id without going through the
+    # store API — simulates the Phase 4 multi-tenant world where
+    # the same DB carries rows from many tenants.
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE agent_persona_state SET tenant_id = 'other-tenant' WHERE agent_id = 'beta'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    async with PersonaStore(db_path) as store:
+        default_rows = await store.list_all()
+        other_rows = await store.list_all(tenant_id="other-tenant")
+    assert [r.agent_id for r in default_rows] == ["alpha"]
+    assert [r.agent_id for r in other_rows] == ["beta"]
+
+
+async def test_get_filters_by_tenant_id(db_path: Path) -> None:
+    """Same shape as the list test — direct ``get`` lookups must
+    respect tenant scoping too."""
+    import sqlite3
+
+    async with PersonaStore(db_path) as store:
+        await store.upsert(PersonaState(agent_id="mentor", mood="curious", updated_at_ms=1))
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE agent_persona_state SET tenant_id = 'other-tenant' WHERE agent_id = 'mentor'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    async with PersonaStore(db_path) as store:
+        # Row exists, but not in the default tenant.
+        assert await store.get("mentor") is None
+        got = await store.get("mentor", tenant_id="other-tenant")
+        assert got is not None
+        assert got.mood == "curious"

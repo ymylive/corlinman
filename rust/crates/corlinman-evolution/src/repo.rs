@@ -488,13 +488,12 @@ impl ProposalsRepo {
         baseline_metrics_json: &serde_json::Value,
         shadow_metrics: &serde_json::Value,
     ) -> Result<(), RepoError> {
-        let baseline =
-            serde_json::to_string(baseline_metrics_json).map_err(|source| {
-                RepoError::MalformedJson {
-                    column: "baseline_metrics_json",
-                    source,
-                }
-            })?;
+        let baseline = serde_json::to_string(baseline_metrics_json).map_err(|source| {
+            RepoError::MalformedJson {
+                column: "baseline_metrics_json",
+                source,
+            }
+        })?;
         let shadow =
             serde_json::to_string(shadow_metrics).map_err(|source| RepoError::MalformedJson {
                 column: "shadow_metrics",
@@ -571,16 +570,17 @@ fn decode_proposal(row: sqlx::sqlite::SqliteRow) -> Result<EvolutionProposal, Re
     // Stored as JSON-as-TEXT (the W1-A path serializes the
     // MetricSnapshot before binding); decode lazily and surface a typed
     // error so a malformed row doesn't masquerade as a clean None.
-    let baseline_metrics_json: Option<Json> =
-        match row.get::<Option<String>, _>("baseline_metrics_json") {
-            Some(s) => Some(serde_json::from_str(&s).map_err(|source| {
-                RepoError::MalformedJson {
-                    column: "baseline_metrics_json",
-                    source,
-                }
-            })?),
-            None => None,
-        };
+    let baseline_metrics_json: Option<Json> = match row
+        .get::<Option<String>, _>("baseline_metrics_json")
+    {
+        Some(s) => Some(
+            serde_json::from_str(&s).map_err(|source| RepoError::MalformedJson {
+                column: "baseline_metrics_json",
+                source,
+            })?,
+        ),
+        None => None,
+    };
 
     Ok(EvolutionProposal {
         id: ProposalId(row.get("id")),
@@ -673,13 +673,12 @@ impl HistoryRepo {
         let row = row.ok_or_else(|| RepoError::NotFound(proposal_id.0.clone()))?;
 
         let kind_raw: String = row.get("kind");
-        let kind =
-            kind_raw
-                .parse::<EvolutionKind>()
-                .map_err(|_| RepoError::MalformedEnum {
-                    column: "kind",
-                    value: kind_raw,
-                })?;
+        let kind = kind_raw
+            .parse::<EvolutionKind>()
+            .map_err(|_| RepoError::MalformedEnum {
+                column: "kind",
+                value: kind_raw,
+            })?;
         let metrics_str: String = row.get("metrics_baseline");
         let metrics_baseline: Json =
             serde_json::from_str(&metrics_str).map_err(|source| RepoError::MalformedJson {
@@ -722,6 +721,132 @@ impl HistoryRepo {
             return Err(RepoError::NotFound(proposal_id.0.clone()));
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Intent log — Phase 3.1
+// ---------------------------------------------------------------------------
+
+/// One row from `apply_intent_log`. Only the four fields we read at
+/// runtime — the table itself stores `intent_at` for chronological
+/// ordering on the dashboard but the half-committed scan only needs
+/// to surface enough to identify the in-flight apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyIntent {
+    pub id: i64,
+    pub proposal_id: String,
+    pub kind: String,
+    pub target: String,
+    pub intent_at: i64,
+}
+
+/// Repo for the apply-intent log. The forward-apply path writes one
+/// `intent_at` row before the kb mutation, then stamps `committed_at`
+/// (success) or `failed_at` (clean error). A crash between the two
+/// writes leaves a row with both stamps NULL — the gateway scans for
+/// those at startup so operators discover half-committed applies
+/// instead of silently losing the audit trail.
+#[derive(Debug, Clone)]
+pub struct IntentLogRepo {
+    pool: SqlitePool,
+}
+
+impl IntentLogRepo {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Open a new intent. Returns the autoincrement id — the caller
+    /// passes it back to [`mark_committed`] / [`mark_failed`] so the
+    /// stamp updates exactly the row we opened, not a same-proposal
+    /// row from a previous (already-resolved) attempt.
+    pub async fn record_intent(
+        &self,
+        proposal_id: &str,
+        kind: &str,
+        target: &str,
+        intent_at_ms: i64,
+    ) -> Result<i64, RepoError> {
+        let row = sqlx::query(
+            r#"INSERT INTO apply_intent_log
+                 (proposal_id, kind, target, intent_at,
+                  committed_at, failed_at, failure_reason)
+               VALUES (?, ?, ?, ?, NULL, NULL, NULL)
+               RETURNING id"#,
+        )
+        .bind(proposal_id)
+        .bind(kind)
+        .bind(target)
+        .bind(intent_at_ms)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>("id"))
+    }
+
+    /// Stamp `committed_at`. Idempotent: a second call is a no-op on
+    /// the partial-index hot path because the row no longer matches
+    /// the `committed_at IS NULL` predicate.
+    pub async fn mark_committed(
+        &self,
+        intent_id: i64,
+        committed_at_ms: i64,
+    ) -> Result<(), RepoError> {
+        sqlx::query(
+            "UPDATE apply_intent_log SET committed_at = ? \
+             WHERE id = ? AND committed_at IS NULL AND failed_at IS NULL",
+        )
+        .bind(committed_at_ms)
+        .bind(intent_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Stamp `failed_at` + `failure_reason`. Reason is operator-facing
+    /// — keep it short, `Display`-style, no full backtraces.
+    pub async fn mark_failed(
+        &self,
+        intent_id: i64,
+        failed_at_ms: i64,
+        reason: &str,
+    ) -> Result<(), RepoError> {
+        sqlx::query(
+            "UPDATE apply_intent_log SET failed_at = ?, failure_reason = ? \
+             WHERE id = ? AND committed_at IS NULL AND failed_at IS NULL",
+        )
+        .bind(failed_at_ms)
+        .bind(reason)
+        .bind(intent_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Every row that opened an intent and never reached a terminal
+    /// stamp. Sorted oldest-first so the operator sees the longest-
+    /// outstanding tickets at the top. This is the gateway's startup
+    /// scan; it must not return a stream because the call site is the
+    /// boot path and we want the count up front for the warn log.
+    pub async fn list_uncommitted(&self) -> Result<Vec<ApplyIntent>, RepoError> {
+        let rows = sqlx::query(
+            r#"SELECT id, proposal_id, kind, target, intent_at
+               FROM apply_intent_log
+               WHERE committed_at IS NULL AND failed_at IS NULL
+               ORDER BY intent_at ASC"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ApplyIntent {
+                id: r.get::<i64, _>("id"),
+                proposal_id: r.get::<String, _>("proposal_id"),
+                kind: r.get::<String, _>("kind"),
+                target: r.get::<String, _>("target"),
+                intent_at: r.get::<i64, _>("intent_at"),
+            })
+            .collect())
     }
 }
 
@@ -864,8 +989,20 @@ mod tests {
         let (_tmp, store) = fresh_store().await;
         let repo = ProposalsRepo::new(store.pool().clone());
         // High memory_op (match), low memory_op (skip), high skill_update (skip).
-        insert_pending(&repo, "p-high-mem", EvolutionKind::MemoryOp, EvolutionRisk::High).await;
-        insert_pending(&repo, "p-low-mem", EvolutionKind::MemoryOp, EvolutionRisk::Low).await;
+        insert_pending(
+            &repo,
+            "p-high-mem",
+            EvolutionKind::MemoryOp,
+            EvolutionRisk::High,
+        )
+        .await;
+        insert_pending(
+            &repo,
+            "p-low-mem",
+            EvolutionKind::MemoryOp,
+            EvolutionRisk::Low,
+        )
+        .await;
         insert_pending(
             &repo,
             "p-high-skill",
@@ -890,8 +1027,13 @@ mod tests {
     async fn claim_for_shadow_transitions_then_fails_on_non_pending() {
         let (_tmp, store) = fresh_store().await;
         let repo = ProposalsRepo::new(store.pool().clone());
-        let pid =
-            insert_pending(&repo, "p-claim", EvolutionKind::MemoryOp, EvolutionRisk::High).await;
+        let pid = insert_pending(
+            &repo,
+            "p-claim",
+            EvolutionKind::MemoryOp,
+            EvolutionRisk::High,
+        )
+        .await;
         repo.claim_for_shadow(&pid).await.unwrap();
         let after = repo.get(&pid).await.unwrap();
         assert_eq!(after.status, EvolutionStatus::ShadowRunning);
@@ -904,8 +1046,13 @@ mod tests {
     async fn mark_shadow_done_persists_metrics_and_eval_id() {
         let (_tmp, store) = fresh_store().await;
         let repo = ProposalsRepo::new(store.pool().clone());
-        let pid = insert_pending(&repo, "p-done", EvolutionKind::MemoryOp, EvolutionRisk::High)
-            .await;
+        let pid = insert_pending(
+            &repo,
+            "p-done",
+            EvolutionKind::MemoryOp,
+            EvolutionRisk::High,
+        )
+        .await;
         repo.claim_for_shadow(&pid).await.unwrap();
 
         let baseline = json!({"chunks_total": 2});
@@ -1060,7 +1207,9 @@ mod tests {
         let repo = ProposalsRepo::new(store.pool().clone());
         let pid = insert_applied(&repo, "evol-ar-002").await;
 
-        repo.mark_auto_rolled_back(&pid, 5_000, "first").await.unwrap();
+        repo.mark_auto_rolled_back(&pid, 5_000, "first")
+            .await
+            .unwrap();
         // Second call: status is now `rolled_back`, so the WHERE clause
         // misses and we bail with NotFound — keeps a racing pair of
         // monitor passes from double-incrementing or stomping the reason.
@@ -1077,8 +1226,13 @@ mod tests {
         let repo = ProposalsRepo::new(store.pool().clone());
         // Pending row — must refuse: the monitor only ever rolls back
         // proposals that already landed on disk.
-        let pid = insert_pending(&repo, "evol-ar-003", EvolutionKind::MemoryOp, EvolutionRisk::Low)
-            .await;
+        let pid = insert_pending(
+            &repo,
+            "evol-ar-003",
+            EvolutionKind::MemoryOp,
+            EvolutionRisk::Low,
+        )
+        .await;
         let err = repo
             .mark_auto_rolled_back(&pid, 5_000, "won't take")
             .await
@@ -1090,11 +1244,7 @@ mod tests {
 
     /// Helper: insert one applied proposal with an explicit `applied_at`
     /// so the time-window tests can pin behaviour without flakey clocks.
-    async fn insert_applied_at(
-        repo: &ProposalsRepo,
-        id: &str,
-        applied_at_ms: i64,
-    ) -> ProposalId {
+    async fn insert_applied_at(repo: &ProposalsRepo, id: &str, applied_at_ms: i64) -> ProposalId {
         let pid = ProposalId::new(id);
         repo.insert(&EvolutionProposal {
             id: pid.clone(),
@@ -1275,10 +1425,20 @@ mod tests {
         let ancient = start_ms - 30 * 24 * 3_600 * 1_000;
 
         insert_with_created_at(&repo, "p-mem-1", EvolutionKind::MemoryOp, in_window).await;
-        insert_with_created_at(&repo, "p-mem-2", EvolutionKind::MemoryOp, in_window + 60_000)
-            .await;
-        insert_with_created_at(&repo, "p-skill", EvolutionKind::SkillUpdate, in_window + 120_000)
-            .await;
+        insert_with_created_at(
+            &repo,
+            "p-mem-2",
+            EvolutionKind::MemoryOp,
+            in_window + 60_000,
+        )
+        .await;
+        insert_with_created_at(
+            &repo,
+            "p-skill",
+            EvolutionKind::SkillUpdate,
+            in_window + 120_000,
+        )
+        .await;
         insert_with_created_at(&repo, "p-mem-old", EvolutionKind::MemoryOp, ancient).await;
 
         let memory_only = repo
@@ -1322,5 +1482,103 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1, "rolled_back row still counts toward the budget");
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 3.1: apply intent log.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn intent_log_record_then_commit_clears_uncommitted() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = IntentLogRepo::new(store.pool().clone());
+
+        let intent_id = repo
+            .record_intent("evol-int-001", "memory_op", "delete_chunk:42", 1_000)
+            .await
+            .unwrap();
+        // Before commit: visible in the uncommitted scan.
+        let before = repo.list_uncommitted().await.unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].id, intent_id);
+        assert_eq!(before[0].proposal_id, "evol-int-001");
+        assert_eq!(before[0].kind, "memory_op");
+        assert_eq!(before[0].target, "delete_chunk:42");
+
+        repo.mark_committed(intent_id, 2_000).await.unwrap();
+        let after = repo.list_uncommitted().await.unwrap();
+        assert!(after.is_empty(), "committed row drops out of the scan");
+    }
+
+    #[tokio::test]
+    async fn intent_log_record_then_fail_clears_uncommitted() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = IntentLogRepo::new(store.pool().clone());
+
+        let intent_id = repo
+            .record_intent("evol-int-002", "memory_op", "merge_chunks:1,2", 1_000)
+            .await
+            .unwrap();
+        repo.mark_failed(intent_id, 2_000, "kb: chunk 2 missing")
+            .await
+            .unwrap();
+        let after = repo.list_uncommitted().await.unwrap();
+        assert!(after.is_empty(), "failed row drops out of the scan");
+    }
+
+    #[tokio::test]
+    async fn intent_log_uncommitted_preserves_only_in_flight() {
+        // Three intents: one committed, one failed, one open. Only the
+        // open one should come back from `list_uncommitted` — pins the
+        // gateway-startup contract that surfaces only half-committed
+        // applies.
+        let (_tmp, store) = fresh_store().await;
+        let repo = IntentLogRepo::new(store.pool().clone());
+
+        let committed = repo
+            .record_intent("evol-int-c", "memory_op", "t-c", 1_000)
+            .await
+            .unwrap();
+        let failed = repo
+            .record_intent("evol-int-f", "memory_op", "t-f", 1_500)
+            .await
+            .unwrap();
+        let open = repo
+            .record_intent("evol-int-o", "memory_op", "t-o", 2_000)
+            .await
+            .unwrap();
+        repo.mark_committed(committed, 1_100).await.unwrap();
+        repo.mark_failed(failed, 1_600, "test").await.unwrap();
+
+        let outstanding = repo.list_uncommitted().await.unwrap();
+        assert_eq!(outstanding.len(), 1);
+        assert_eq!(outstanding[0].id, open);
+        assert_eq!(outstanding[0].proposal_id, "evol-int-o");
+    }
+
+    #[tokio::test]
+    async fn intent_log_double_commit_is_idempotent() {
+        // Once an intent is stamped, a re-stamp must not flip it back —
+        // an at-least-once retry of the apply path shouldn't unstamp a
+        // previously-resolved intent. The partial-index WHERE clause
+        // takes care of this: the second mark_committed simply matches
+        // zero rows.
+        let (_tmp, store) = fresh_store().await;
+        let repo = IntentLogRepo::new(store.pool().clone());
+        let intent_id = repo
+            .record_intent("evol-int-idem", "memory_op", "t", 1_000)
+            .await
+            .unwrap();
+        repo.mark_committed(intent_id, 2_000).await.unwrap();
+        // Second commit at a different ts must not change anything.
+        repo.mark_committed(intent_id, 9_999).await.unwrap();
+        let row: (Option<i64>, Option<i64>) =
+            sqlx::query_as("SELECT committed_at, failed_at FROM apply_intent_log WHERE id = ?")
+                .bind(intent_id)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(row.0, Some(2_000), "first commit timestamp pinned");
+        assert!(row.1.is_none(), "failed_at stays null");
     }
 }

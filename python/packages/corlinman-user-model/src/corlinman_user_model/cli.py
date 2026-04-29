@@ -31,7 +31,7 @@ from corlinman_user_model.distiller import (
     default_llm_caller,
     distill_session,
 )
-from corlinman_user_model.store import UserModelStore
+from corlinman_user_model.store import DEFAULT_TENANT_ID, UserModelStore
 from corlinman_user_model.traits import TraitKind
 
 
@@ -61,11 +61,26 @@ def _build_parser() -> argparse.ArgumentParser:
             help="Path to the gateway sessions.sqlite (default: %(default)s).",
         )
 
+    # Phase 3.1: tenant scoping. Defaults to ``'default'`` until Phase 4
+    # wires real tenant ids — operators flipping their gateway over to
+    # multi-tenant set this once per CLI invocation.
+    def _add_tenant_flag(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--tenant-id",
+            type=str,
+            default=DEFAULT_TENANT_ID,
+            help=(
+                "Tenant scope for read/write (default: %(default)s). Phase 4 "
+                "multi-tenant deployments override per-call."
+            ),
+        )
+
     distill_one = sub.add_parser(
         "distill-once",
         help="Run distillation for a single session_id.",
     )
     _add_db_flags(distill_one)
+    _add_tenant_flag(distill_one)
     distill_one.add_argument("--session-id", required=True)
     distill_one.add_argument("--llm-model", default="deepseek-chat")
     distill_one.add_argument("--trait-confidence-floor", type=float, default=0.4)
@@ -86,6 +101,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Distil every session with activity in the last N hours.",
     )
     _add_db_flags(distill_recent)
+    _add_tenant_flag(distill_recent)
     distill_recent.add_argument("--since-hours", type=float, default=24.0)
     distill_recent.add_argument("--llm-model", default="deepseek-chat")
     distill_recent.add_argument("--trait-confidence-floor", type=float, default=0.4)
@@ -96,6 +112,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     list_cmd = sub.add_parser("list", help="List traits for a user.")
     list_cmd.add_argument("--db-path", type=Path, default=Path("/data/user_model.sqlite"))
+    _add_tenant_flag(list_cmd)
     list_cmd.add_argument("--user-id", required=True)
     list_cmd.add_argument(
         "--kind",
@@ -131,7 +148,12 @@ async def _cmd_distill_once(args: argparse.Namespace, llm_caller: LLMCaller) -> 
         redaction_enabled=not args.no_redaction,
         llm_model=args.llm_model,
     )
-    traits = await distill_session(config, args.session_id, llm_caller=llm_caller)
+    traits = await distill_session(
+        config,
+        args.session_id,
+        llm_caller=llm_caller,
+        tenant_id=args.tenant_id,
+    )
     print(f"distilled {len(traits)} traits for session {args.session_id}")
     for t in traits:
         print(f"  {t.trait_kind.value:10s} {t.confidence:0.2f}  {t.trait_value}")
@@ -159,7 +181,9 @@ async def _cmd_distill_recent(
     total = 0
     for sid in session_ids:
         try:
-            traits = await distill_session(config, sid, llm_caller=llm_caller)
+            traits = await distill_session(
+                config, sid, llm_caller=llm_caller, tenant_id=args.tenant_id
+            )
         except Exception as exc:
             # Best-effort batch loop: one bad session shouldn't stop the rest.
             print(f"  {sid}: error {exc}", file=sys.stderr)
@@ -177,7 +201,10 @@ async def _cmd_list(args: argparse.Namespace) -> int:
     store = await UserModelStore.open_or_create(args.db_path)
     async with store as s:
         traits = await s.list_traits_for_user(
-            args.user_id, kind=kind, min_confidence=args.min_confidence
+            args.user_id,
+            kind=kind,
+            min_confidence=args.min_confidence,
+            tenant_id=args.tenant_id,
         )
     if args.json:
         print(
