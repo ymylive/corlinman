@@ -1,0 +1,24 @@
+[package]
+name = "corlinman-tenant"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Phase 4 Wave 1 multi-tenancy primitives: TenantId newtype, slug validation, per-tenant SQLite path resolution, and a multi-DB pool wrapper keyed by (TenantId, db_name)."
+
+[dependencies]
+serde = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+async-trait = { workspace = true }
+once_cell = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = { workspace = true }

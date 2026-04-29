@@ -1011,6 +1011,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "corlinman-tenant"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "regex",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "corlinman-vector"
 version = "0.1.0"
 dependencies = [
