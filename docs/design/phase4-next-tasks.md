@@ -14,9 +14,12 @@
 `3a2ab56`, `95dafb6`, `2963aa8`, A6 directly on disk, A7 in `26a721e`).
 Section B: B4 landed in `90411db`. **B2 in flight** — primitive
 crate complete at 4/8 iters, 29 unit tests, design at
-`docs/design/phase4-w2-b2-design.md`. **B3 design seeded** at
-`docs/design/phase4-w2-b3-design.md` (10-iter plan, dispatched as
-parallel design-only agent track).
+`docs/design/phase4-w2-b2-design.md`. **B1 + B3 designs seeded** at
+`docs/design/phase4-w2-b1-design.md` (10 iters, capability-list
+operator gate + dual-clause recursion guard) and
+`docs/design/phase4-w2-b3-design.md` (10 iters, asymmetric opt-in +
+two-clause loop prevention). Both produced by parallel
+Software-Architect background agents.
 
 ---
 
@@ -48,7 +51,7 @@ Phase 4 promises. Per `phase4-roadmap.md` §4 Wave 2.
 
 | # | Task | Estimate | Concept |
 |---|---|---|---|
-| **B1** | **4-2A Meta proposal kinds** — new `EvolutionKind` variants `engine_config` / `engine_prompt` / `observer_filter` / `cluster_threshold`. Engine improves the engine that improves it. Strict one-level recursion guard, operator-only approval, double-confirm UI on `engine_prompt`. Routes to a separate `meta_pending` admin tab. | 7-9d | Self-improvement core. Highest risk; requires `auto_rollback` window tightened (24h vs the default 72h). |
+| **B1** | **4-2A Meta proposal kinds** [design pending integration] — new `EvolutionKind` variants `engine_config` / `engine_prompt` / `observer_filter` / `cluster_threshold`. Engine improves the engine that improves it. Strict one-level recursion guard (semantic via `trace_id` descent + per-`(tenant, kind)` cooldown), operator-only via `[admin] meta_approver_users` capability list, double-confirm UI on `engine_prompt`. `meta_grace_window_hours = 24` as a peer field on the rollback config. Routes to a separate `meta_pending` admin tab. Detailed plan: `docs/design/phase4-w2-b1-design.md` (10 iters). | 7-9d | Self-improvement core. Highest risk; requires `auto_rollback` window tightened (24h vs the default 72h). |
 | **B2** 🟡 | **4-2B Cross-channel `UserIdentityResolver`** [iters 1-4 done in `e05be35`/`63756c5`/`5d07c84`/`8bed667`] — `user_identity.sqlite` schema; verification phrase exchange protocol (operator triggers from one channel, user pastes in the other); merged trait state via SQL union with confidence-weighted dedup. Primitive crate at 29 unit tests; iters 5-8 are integration (gateway middleware + admin REST + admin UI + HookEvent attribution). Detailed plan: `docs/design/phase4-w2-b2-design.md`. | 6-8d | Same human across QQ + Telegram + native iOS = same `user_id`. |
 | **B3** | **4-2C Per-tenant evolution federation (opt-in)** [design `299ea32`] — operator-flagged `share-with-tenants` `skill_update` proposals get rebroadcast as proposals to opted-in tenants; receiving tenant must approve as if local. Detailed plan: `docs/design/phase4-w2-b3-design.md` (10 iters, two-clause loop prevention, asymmetric opt-in). | 5-7d | Tenant A's lessons benefit tenant B without auto-propagating. |
 | **B4** ✅ | **4-2D Trajectory replay CLI** [done `90411db`] — `corlinman replay <session_id>` reconstructs a past session deterministically; useful for debugging plus offline replay against new prompts before live deploy. Shipped: `corlinman-replay` crate (`replay()` + `list_sessions()` primitives, 6 tests), `corlinman replay` subcommand (3 tests), `/admin/sessions` + `/admin/sessions/:key/replay` gateway routes (9 tests), and the operator UI page + dialog with mock-server contract (Agent B). Rerun mode ships with a `not_implemented_yet` marker for Wave 2.5 to fill in. | 4-5d | Independent / no upstream deps; good warm-up task. |
