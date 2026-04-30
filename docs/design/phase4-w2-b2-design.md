@@ -271,25 +271,40 @@ canonical `user_id` instead of the channel-scoped key.
 
 Each numbered item is a single bounded iteration (~30 min - 2 hours):
 
-1. **Crate skeleton + schema** — `corlinman-identity/Cargo.toml`,
+1. ✅ **Crate skeleton + schema** [done `e05be35`] — `corlinman-identity/Cargo.toml`,
    `lib.rs` with module decls, `error.rs` with `IdentityError`
    variants, `types.rs` with `UserId`/`ChannelAlias`/`BindingKind`,
-   schema constants in `store.rs`. No impls yet. Compile + register
-   in workspace.
-2. **`SqliteIdentityStore::open` + schema bootstrap** — open a sqlx
-   pool, apply DDL, idempotent re-open. Single test:
-   `open_creates_schema_and_reopens`.
-3. **`resolve_or_create` + `lookup` + `aliases_for`** — core CRUD
-   methods. 4 tests covering happy path + concurrent race + unknown
-   lookup + multi-alias.
-4. **`issue_phrase` + phrase generation** — dictionary-word
-   generator, expires_at default. 2 tests: uniqueness, expiry.
-5. **`redeem_phrase`** — the unify path. SQL transaction; cascade.
-   3 tests: happy unify, expired, already-consumed.
-6. **Gateway integration** — middleware lookup; stamp on
+   schema constants in `store.rs`. 8 unit tests.
+2. ✅ **`SqliteIdentityStore::open` + schema bootstrap** [done `63756c5`] — sqlx
+   pool, idempotent re-open, optional `open_with_pool_size` for the
+   workspace's WAL-race test convention. 2 new tests.
+3. ✅ **`resolve_or_create` + `lookup` + `aliases_for`** [done `5d07c84`] — core CRUD
+   on the `IdentityStore` trait. 10 new tests including a 32-way
+   concurrent first-call correctness check.
+4. ✅ **`issue_phrase` + `redeem_phrase` + `sweep_expired_phrases`** [done `8bed667`]
+   — combined into one iteration since the issue/redeem pair is
+   tightly coupled. Crockford-base32 phrase format. 9 new tests
+   covering happy unify, fresh-bind, expired, already-consumed,
+   GC sweep, and generator format.
+5. **Gateway integration** — middleware lookup; stamp on
    `SessionContext`. 1 integration test with a real chat request.
-7. **Admin REST routes + tests** — 4 routes; 6 tests.
-8. **Admin UI page + tests** — `/admin/identity` table + dialog.
+   Touches `rust/crates/corlinman-gateway/src/routes/chat.rs`;
+   needs an `IdentityStore` field added to `ChatState` and plumbed
+   from the boot path.
+6. **Admin REST routes** — `/admin/identity` (list), `/admin/identity/:user_id`
+   (detail), `/admin/identity/:user_id/issue-phrase` (POST),
+   `/admin/identity/merge` (POST operator-driven). ~6 tests.
+7. **Admin UI page** — `/admin/identity` table + dialog flow for
+   issue-phrase + manual merge. Mock-server contract first, like
+   B4 did with sessions.
+8. **HookEvent + persona attribution** — once the gateway stamps
+   `user_id` on `SessionContext`, propagate it to `HookEvent` and
+   the `EvolutionObserver` so per-user (rather than per-alias)
+   trait attribution lands. Pairs with the Phase 4 W1.5 A1 work.
+
+**Status snapshot (2026-04-30)**: iters 1-4 done; identity primitive
+crate fully self-contained at 29 unit tests. Iters 5-8 are the
+integration-side work that surfaces the primitive to chat traffic + UI.
 
 ## Out of scope (B2)
 
