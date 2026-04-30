@@ -147,10 +147,21 @@ impl TenantPool {
             }
         }
 
-        // Slow path: create dir + open pool *outside* the lock so two
-        // first-time opens on different (tenant, db) pairs don't
-        // serialise. We re-check inside the lock at the end for the
-        // same-pair race.
+        // Slow path: serialise open of this (tenant, db) pair under
+        // the lock. Earlier revisions opened the pool *outside* the
+        // lock to keep distinct-pair opens parallel, but Phase 4 W1.5
+        // /A7 caught a flake where two simultaneous SQLite opens of
+        // the *same* file race in `create_if_missing` + WAL setup
+        // and one of them transiently errors. First-time open is
+        // one-shot per pair — serialising a few ms of file-system
+        // work is cheaper than the audit cost of intermittent CI
+        // red. Distinct-pair opens still see contention only when
+        // they *also* race on the cache mutex (microseconds).
+        let mut guard = self.inner.lock().await;
+        if let Some(pool) = guard.get(&key) {
+            return Ok(pool.clone());
+        }
+
         let dir = tenant_root_dir(&self.root, tenant);
         if let Err(source) = std::fs::create_dir_all(&dir) {
             return Err(TenantPoolError::CreateDir { path: dir, source });
@@ -175,15 +186,6 @@ impl TenantPool {
             .await
             .map_err(|source| TenantPoolError::Connect { url, source })?;
 
-        // Same-pair race close: another caller may have raced us in.
-        // If so, drop our pool and use theirs so we don't leak file
-        // descriptors or end up with two pools fighting for the same
-        // WAL file.
-        let mut guard = self.inner.lock().await;
-        if let Some(existing) = guard.get(&key) {
-            drop(pool);
-            return Ok(existing.clone());
-        }
         guard.insert(key, pool.clone());
         Ok(pool)
     }

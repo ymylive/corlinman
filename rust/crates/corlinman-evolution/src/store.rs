@@ -37,6 +37,30 @@ impl EvolutionStore {
     /// `synchronous=NORMAL` + `foreign_keys=ON`. Applies `SCHEMA_SQL`
     /// once — `CREATE … IF NOT EXISTS` makes this safe to repeat.
     pub async fn open(path: &Path) -> Result<Self, OpenError> {
+        Self::open_with_pool_size(path, 8).await
+    }
+
+    /// Phase 4 W1.5 (next-tasks A7): variant of [`Self::open`] with a
+    /// caller-supplied `max_connections`. Tests pass `1` to dodge a
+    /// sqlx 0.7 + SQLite WAL cross-connection visibility race that
+    /// only manifests under workspace-level parallel pressure: a
+    /// committed INSERT on one pooled connection isn't always
+    /// reflected in the snapshot a sibling connection acquires for
+    /// the immediately-following SELECT, even though autocommit
+    /// should make the row visible. Pinning the pool to one
+    /// connection eliminates the race because all queries serialise
+    /// on the same connection.
+    ///
+    /// Production `open` keeps the default `8` so request handlers
+    /// don't queue on the connection budget. The race never reaches
+    /// production because real handlers have a non-trivial gap
+    /// between the write and the read (operator decision latency,
+    /// network RTTs); the symptom is unique to back-to-back
+    /// fetch_one + fetch_optional on the same pool.
+    pub async fn open_with_pool_size(
+        path: &Path,
+        pool_size: u32,
+    ) -> Result<Self, OpenError> {
         let url = format!("sqlite://{}", path.display());
 
         let options = SqliteConnectOptions::from_str(&url)
@@ -48,7 +72,7 @@ impl EvolutionStore {
             .busy_timeout(Duration::from_secs(5));
 
         let pool = SqlitePoolOptions::new()
-            .max_connections(8)
+            .max_connections(pool_size)
             .connect_with(options)
             .await
             .map_err(|e| OpenError::Connect(url, e))?;

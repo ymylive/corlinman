@@ -863,10 +863,16 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    /// Phase 4 W1.5 (next-tasks A7): tests pin the pool to a single
+    /// connection so back-to-back fetch_one + fetch_optional don't
+    /// race on sqlx 0.7's WAL cross-connection visibility quirk.
+    /// Production keeps the default 8 via `EvolutionStore::open`.
     async fn fresh_store() -> (TempDir, EvolutionStore) {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("evolution.sqlite");
-        let store = EvolutionStore::open(&path).await.unwrap();
+        let store = EvolutionStore::open_with_pool_size(&path, 1)
+            .await
+            .unwrap();
         (tmp, store)
     }
 
