@@ -154,6 +154,7 @@ pub(crate) fn adapt(event: &HookEvent) -> Option<EvolutionSignal> {
             duration_ms,
             ok,
             error_code,
+            tenant_id,
         } => {
             if *ok {
                 return None;
@@ -185,6 +186,7 @@ pub(crate) fn adapt(event: &HookEvent) -> Option<EvolutionSignal> {
                 trace_id: None,
                 session_id: None,
                 observed_at: now_ms(),
+                tenant_id: tenant_id.clone().unwrap_or_else(|| "default".into()),
             })
         }
         HookEvent::ApprovalDecided {
@@ -192,6 +194,7 @@ pub(crate) fn adapt(event: &HookEvent) -> Option<EvolutionSignal> {
             decision,
             decider,
             decided_at_ms,
+            tenant_id,
         } => {
             // Only non-allow decisions seed the EvolutionLoop; allow is
             // the happy path and would just pollute clusters.
@@ -213,6 +216,7 @@ pub(crate) fn adapt(event: &HookEvent) -> Option<EvolutionSignal> {
                 trace_id: None,
                 session_id: None,
                 observed_at: now_ms(),
+                tenant_id: tenant_id.clone().unwrap_or_else(|| "default".into()),
             })
         }
         // Phase 2 wave 2-B closed loop: scheduler-driven engine runs
@@ -239,6 +243,7 @@ pub(crate) fn adapt(event: &HookEvent) -> Option<EvolutionSignal> {
                 trace_id: None,
                 session_id: None,
                 observed_at: now_ms(),
+                tenant_id: "default".into(),
             })
         }
         HookEvent::EngineRunFailed {
@@ -260,6 +265,7 @@ pub(crate) fn adapt(event: &HookEvent) -> Option<EvolutionSignal> {
                 trace_id: None,
                 session_id: None,
                 observed_at: now_ms(),
+                tenant_id: "default".into(),
             })
         }
         // Other variants are not part of the curated set today. New
@@ -358,6 +364,7 @@ mod tests {
             duration_ms: 12,
             ok: false,
             error_code: code.map(str::to_string),
+            tenant_id: None,
         }
     }
 
@@ -370,6 +377,7 @@ mod tests {
             duration_ms: 5,
             ok: true,
             error_code: None,
+            tenant_id: None,
         })
         .is_none());
 
@@ -378,11 +386,31 @@ mod tests {
         assert_eq!(s.event_kind, "tool.call.failed");
         assert_eq!(s.severity, SignalSeverity::Error);
         assert_eq!(s.target.as_deref(), Some("web_search"));
+        // Phase 4 W1.5 (next-tasks A1): legacy default attribution.
+        assert_eq!(s.tenant_id, "default");
 
         // timeout → severity Warn, kind tool.call.timeout.
         let s = adapt(&tool_failed("web_search", Some("timeout"))).unwrap();
         assert_eq!(s.event_kind, "tool.call.timeout");
         assert_eq!(s.severity, SignalSeverity::Warn);
+    }
+
+    /// Phase 4 W1.5 (next-tasks A1): when the source HookEvent
+    /// carries a tenant_id, the resulting signal must wear it
+    /// instead of falling back to "default". Pins the propagation
+    /// the chat-lifecycle follow-up will rely on.
+    #[test]
+    fn adapt_propagates_tenant_id_from_tool_called() {
+        let s = adapt(&HookEvent::ToolCalled {
+            tool: "web_search".into(),
+            runner_id: "r1".into(),
+            duration_ms: 12,
+            ok: false,
+            error_code: Some("timeout".into()),
+            tenant_id: Some("acme".into()),
+        })
+        .unwrap();
+        assert_eq!(s.tenant_id, "acme");
     }
 
     #[test]
@@ -393,6 +421,7 @@ mod tests {
             decision: "allow".into(),
             decider: Some("op".into()),
             decided_at_ms: 0,
+            tenant_id: None,
         })
         .is_none());
 
@@ -402,11 +431,13 @@ mod tests {
             decision: "deny".into(),
             decider: Some("op".into()),
             decided_at_ms: 0,
+            tenant_id: None,
         })
         .unwrap();
         assert_eq!(s.event_kind, "approval.rejected");
         assert_eq!(s.severity, SignalSeverity::Warn);
         assert_eq!(s.target.as_deref(), Some("a2"));
+        assert_eq!(s.tenant_id, "default");
 
         // timeout → also approval.rejected (non-allow).
         let s = adapt(&HookEvent::ApprovalDecided {
@@ -414,9 +445,23 @@ mod tests {
             decision: "timeout".into(),
             decider: None,
             decided_at_ms: 0,
+            tenant_id: None,
         })
         .unwrap();
         assert_eq!(s.event_kind, "approval.rejected");
+    }
+
+    #[test]
+    fn adapt_propagates_tenant_id_from_approval_decided() {
+        let s = adapt(&HookEvent::ApprovalDecided {
+            id: "a4".into(),
+            decision: "deny".into(),
+            decider: Some("op".into()),
+            decided_at_ms: 0,
+            tenant_id: Some("bravo".into()),
+        })
+        .unwrap();
+        assert_eq!(s.tenant_id, "bravo");
     }
 
     #[test]

@@ -613,6 +613,11 @@ async fn emit_tool_called(
         duration_ms,
         ok,
         error_code: error_code.map(|s| s.to_string()),
+        // Phase 4 W1.5 (next-tasks A1): wstool runs out of band
+        // from the gateway's tenant middleware, so it has no
+        // tenant context to propagate. Observer falls back to
+        // "default".
+        tenant_id: None,
     };
     let _ = state.hook_bus.emit(event).await;
 }

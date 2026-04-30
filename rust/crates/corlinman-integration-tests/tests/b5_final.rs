@@ -576,6 +576,7 @@ async fn full_batch_chain() {
         duration_ms: 1,
         ok: true,
         error_code: None,
+        tenant_id: None,
     })
     .await
     .expect("emit tool_called");

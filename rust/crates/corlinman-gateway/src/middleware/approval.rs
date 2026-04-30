@@ -427,6 +427,11 @@ impl ApprovalGate {
             decision: decision_label.to_string(),
             decider,
             decided_at_ms: Self::now_ms(),
+            // Phase 4 W1.5 (next-tasks A1): the approval gate doesn't
+            // currently carry tenant context — that's a follow-up
+            // when /v1/chat/* gains a tenant middleware. For now the
+            // observer falls back to "default".
+            tenant_id: None,
         };
         bus.emit_nonblocking(ev);
     }

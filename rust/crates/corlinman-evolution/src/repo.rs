@@ -78,8 +78,8 @@ impl SignalsRepo {
         })?;
         let row = sqlx::query(
             r#"INSERT INTO evolution_signals
-                 (event_kind, target, severity, payload_json, trace_id, session_id, observed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+                 (event_kind, target, severity, payload_json, trace_id, session_id, observed_at, tenant_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                RETURNING id"#,
         )
         .bind(&signal.event_kind)
@@ -89,6 +89,7 @@ impl SignalsRepo {
         .bind(&signal.trace_id)
         .bind(&signal.session_id)
         .bind(signal.observed_at)
+        .bind(&signal.tenant_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get::<i64, _>("id"))
@@ -105,7 +106,7 @@ impl SignalsRepo {
         let rows = if let Some(kind) = event_kind {
             sqlx::query(
                 r#"SELECT id, event_kind, target, severity, payload_json,
-                          trace_id, session_id, observed_at
+                          trace_id, session_id, observed_at, tenant_id
                    FROM evolution_signals
                    WHERE observed_at >= ? AND event_kind = ?
                    ORDER BY observed_at ASC
@@ -119,7 +120,7 @@ impl SignalsRepo {
         } else {
             sqlx::query(
                 r#"SELECT id, event_kind, target, severity, payload_json,
-                          trace_id, session_id, observed_at
+                          trace_id, session_id, observed_at, tenant_id
                    FROM evolution_signals
                    WHERE observed_at >= ?
                    ORDER BY observed_at ASC
@@ -156,6 +157,7 @@ impl SignalsRepo {
                     trace_id: r.get("trace_id"),
                     session_id: r.get("session_id"),
                     observed_at: r.get("observed_at"),
+                    tenant_id: r.get("tenant_id"),
                 })
             })
             .collect()
@@ -882,6 +884,7 @@ mod tests {
                 trace_id: Some("t1".into()),
                 session_id: Some("s1".into()),
                 observed_at: 1_000,
+                tenant_id: "default".into(),
             })
             .await
             .unwrap();

@@ -56,12 +56,21 @@ pub enum HookEvent {
     /// Emitted once a remote/local tool invocation settles. `ok == false`
     /// implies `error_code` is populated with a short machine-readable
     /// identifier (e.g. `"timeout"`, `"disconnected"`, `"unsupported"`).
+    ///
+    /// Phase 4 W1.5 (next-tasks A1): `tenant_id` carries the source
+    /// tenant when the chat / tool path knows it. `None` falls back
+    /// to `default` when the EvolutionObserver persists the resulting
+    /// signal — matching the schema column default. Wider tenant
+    /// context propagation through the chat lifecycle is a follow-up;
+    /// this field is the wire-shape commitment.
     ToolCalled {
         tool: String,
         runner_id: String,
         duration_ms: u64,
         ok: bool,
         error_code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tenant_id: Option<String>,
     },
     /// An approval request was raised; admins may see it via SSE or the UI.
     ///
@@ -82,11 +91,17 @@ pub enum HookEvent {
     /// `decision` is one of `"allow"`, `"deny"`, or `"timeout"`. `decider`
     /// carries the operator identity for `allow`/`deny` and is `None` for
     /// `timeout`.
+    ///
+    /// Phase 4 W1.5 (next-tasks A1): `tenant_id` carries the source
+    /// tenant when the approval gate knows it. See `ToolCalled` for
+    /// the legacy default semantics.
     ApprovalDecided {
         id: String,
         decision: String,
         decider: Option<String>,
         decided_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tenant_id: Option<String>,
     },
     /// Rate-limit rejected a request.
     ///

@@ -69,6 +69,7 @@ fn all_event_samples() -> Vec<HookEvent> {
             decision: "allow".into(),
             decider: Some("root".into()),
             decided_at_ms: 0,
+            tenant_id: None,
         },
         HookEvent::RateLimitTriggered {
             session_key: "s1".into(),
@@ -247,6 +248,7 @@ async fn approval_decided_round_trips_and_is_session_scoped_none() {
         decision: "allow".into(),
         decider: Some("admin".into()),
         decided_at_ms: 1_700_000_000_500,
+        tenant_id: None,
     };
     bus.emit(ev.clone()).await.expect("emit ok");
     let got = sub.recv().await.expect("recv ok");
