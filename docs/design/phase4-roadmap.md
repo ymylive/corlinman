@@ -191,6 +191,44 @@ needs new code.
 - 4-1D itself (the W2-C unblocker) — unchanged, still gated on 4-1C
   finishing
 
+### Wave 1 outcome (closed 2026-04-30, PR [#1](https://github.com/ymylive/corlinman/pull/1))
+
+16 atomic commits land the full Wave 1 surface end-to-end. Wave 1
+acceptance is met:
+
+- ✅ 3-tenant deployment boots clean on a single gateway
+- ✅ `corlinman tenant create acme` (CLI) and `POST /admin/tenants`
+  (route) both create the per-tenant data dir + admin login
+- ✅ Operator scoped to tenant A can't see tenant B's proposals —
+  middleware returns HTTP 403 `tenant_not_allowed`; covered by 8
+  integration cases in `tests/tenant_isolation.rs`
+- ✅ All three Phase 4 high-risk kinds (`prompt_template`,
+  `tool_policy`, `agent_card`) wired Python proposer → ShadowTester
+  gating → Rust applier → AutoRollback revert
+
+Test surface as of merge candidate:
+
+- `cargo test --workspace`: green, 0 failures
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean
+- `uv run pytest python/packages/corlinman-evolution-engine/`: 90
+  passed (24 of which are Phase 4 W1 4-1D additions)
+- `pnpm test` in `ui/`: 277 passed (32 Phase 4 W1 4-1B additions)
+
+**Deferred to Wave 1.5 follow-up** (tracked in
+[`phase4-next-tasks.md`](./phase4-next-tasks.md) section A):
+
+- Item 2b — `HookEvent.tenant_id` propagation through the chat
+  request lifecycle (cross-cutting refactor; Wave 1 acceptance is
+  read-path scoping which is already enforced)
+- Operator-initiated rollback HTTP route + UI button
+- DriftMismatch UX plumbing (applier emits actual mode; route layer
+  doesn't yet plumb it through)
+- `GET /admin/tenants/:tenant/{prompt_segments,agent_cards}/:name`
+  for the operator UI's diff view
+- Shared slug-validation spec (Rust `TenantId::new` + TS
+  `tenants.ts` regex are duplicated; codegen or shared spec when a
+  third caller appears)
+
 ---
 
 ## 4. Wave Structure
