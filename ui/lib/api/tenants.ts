@@ -97,9 +97,20 @@ export function createTenant(
 }
 
 /**
- * Slug regex — kept identical to the Rust validator in corlinman-tenant
- * so the UI's typing-time hint matches what the server will accept.
- * Exported for the create-tenant form's inline check.
+ * Slug regex — Phase 4 W1.5 (next-tasks A5) anchored on the canonical
+ * spec at `docs/contracts/tenant-slug.md`. The Rust source of truth
+ * is `corlinman-tenant::TENANT_SLUG_REGEX_STR` (`\A...\z` instead of
+ * `^...$` because the Rust regex crate's anchors handle multi-line
+ * input differently; the TS pattern below uses `^` / `$` because
+ * JavaScript regex literals don't accept `\A` / `\z` and `^` / `$`
+ * already mean "string start / end" without the `m` flag).
+ *
+ * Drift is dangerous: the UI's typing-time hint must match what the
+ * Rust gateway accepts. The corpus test in `tenants.test.ts` and the
+ * Rust corpus test in `corlinman-tenant/tests/slug_corpus.rs` both
+ * exercise the same accept / reject lists from the spec doc; CI
+ * should grep this comment + the doc + both regex sites before any
+ * merge.
  */
 export const TENANT_SLUG_RE = /^[a-z][a-z0-9-]{0,62}$/;
 

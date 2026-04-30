@@ -32,6 +32,6 @@ mod path;
 mod pool;
 
 pub use admin_schema::{AdminDb, AdminDbError, AdminRow, TenantRow};
-pub use id::{TenantId, TenantIdError, DEFAULT_TENANT_ID};
+pub use id::{TenantId, TenantIdError, DEFAULT_TENANT_ID, TENANT_SLUG_REGEX_STR};
 pub use path::{tenant_db_path, tenant_root_dir};
 pub use pool::{TenantPool, TenantPoolError};

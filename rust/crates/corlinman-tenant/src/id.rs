@@ -40,6 +40,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// (typos in a literal slip through compilation).
 pub const DEFAULT_TENANT_ID: &str = "default";
 
+/// Canonical slug regex string. Source of truth for the cross-
+/// language tenant slug contract documented at
+/// `docs/contracts/tenant-slug.md`. The TypeScript validator in
+/// `ui/lib/api/tenants.ts` MUST mirror this pattern byte-for-byte;
+/// drift would let the UI's defensive validator accept slugs the
+/// Rust-side parser rejects (and vice versa). Phase 4 W1.5 / A5
+/// promotes this to a public `pub const` so future codegen can
+/// read it as the single source of truth.
+pub const TENANT_SLUG_REGEX_STR: &str = r"\A[a-z][a-z0-9-]{0,62}\z";
+
 /// Compiled once at first use. The regex is static so we don't pay the
 /// compile cost on every `TenantId::new` (validation runs in admin auth
 /// hot paths).
@@ -48,7 +58,7 @@ static TENANT_ID_RE: Lazy<Regex> = Lazy::new(|| {
     // string can't sneak through with a slug on its first line. `regex`
     // honours both, but `\A` / `\z` are unambiguous about not matching
     // `\n`.
-    Regex::new(r"\A[a-z][a-z0-9-]{0,62}\z").expect("tenant id regex is statically known to compile")
+    Regex::new(TENANT_SLUG_REGEX_STR).expect("tenant id regex is statically known to compile")
 });
 
 /// Validation failure for a candidate tenant id. The variants keep
