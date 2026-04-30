@@ -37,7 +37,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::error::CorlinmanError;
-use crate::session::{SessionMessage, SessionRole, SessionStore};
+use crate::session::{SessionMessage, SessionRole, SessionStore, SessionSummary};
 
 /// Full DDL applied on open. Idempotent — safe against an existing file.
 pub const SCHEMA_SQL: &str = r#"
@@ -143,6 +143,55 @@ impl SqliteSessionStore {
     #[cfg(test)]
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Phase 4 W2 4-2D: aggregate per-session metadata for the admin
+    /// sessions list route. Returns one [`SessionSummary`] per distinct
+    /// `session_key`, ordered by `MAX(ts) DESC` so the UI's most-recent
+    /// session shows up at the top without a follow-up sort.
+    ///
+    /// `ts` is stored as RFC-3339 text; we parse `MAX(ts)` per row into
+    /// unix-ms here so the wire shape can stay numeric (sortable, cheap
+    /// to compare). Rows whose `ts` fails to parse are skipped — the
+    /// SQLite column is `NOT NULL` and every writer goes through
+    /// [`SessionMessage`], so this case implies an externally-corrupted
+    /// row and the operator should run `corlinman doctor` rather than
+    /// see a silent zero in the UI.
+    pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, CorlinmanError> {
+        let rows = sqlx::query(
+            "SELECT session_key, MAX(ts) AS last_ts, COUNT(*) AS msg_count \
+             FROM sessions \
+             GROUP BY session_key \
+             ORDER BY MAX(ts) DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| storage("list_sessions", e))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let session_key: String = row.get("session_key");
+            let last_ts: String = row.get("last_ts");
+            let msg_count: i64 = row.get("msg_count");
+            let last_message_at_ms = match OffsetDateTime::parse(&last_ts, &Rfc3339) {
+                Ok(dt) => (dt.unix_timestamp_nanos() / 1_000_000) as i64,
+                Err(e) => {
+                    tracing::warn!(
+                        session_key = %session_key,
+                        last_ts = %last_ts,
+                        error = %e,
+                        "list_sessions: skipping row with unparseable ts",
+                    );
+                    continue;
+                }
+            };
+            out.push(SessionSummary {
+                session_key,
+                last_message_at_ms,
+                message_count: msg_count,
+            });
+        }
+        Ok(out)
     }
 }
 

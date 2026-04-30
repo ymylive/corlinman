@@ -28,6 +28,8 @@ import {
   MOCK_PENDING_APPROVALS,
   MOCK_TENANTS,
   MOCK_TENANTS_ENABLED,
+  MOCK_SESSIONS,
+  makeMockReplay,
   genTraceId,
   type MockApproval,
   type MockTenant,
@@ -206,6 +208,11 @@ const server = createServer(async (req, res) => {
       case "/admin/approvals/stream":
         openApprovalsSse(req, res);
         return;
+      case "/admin/sessions":
+        // Phase 4 W2 4-2D — trajectory replay list. Mirrors the Rust
+        // route's `{ sessions: SessionSummary[] }` shape.
+        json(res, 200, { sessions: MOCK_SESSIONS });
+        return;
       case "/admin/tenants": {
         if (!MOCK_TENANTS_ENABLED) {
           json(res, 403, { error: "tenants_disabled" });
@@ -304,6 +311,31 @@ const server = createServer(async (req, res) => {
       json(res, 200, { id, decision: resolved.decision });
       return;
     }
+
+    // Phase 4 W2 4-2D — replay endpoint:
+    //   POST /admin/sessions/:key/replay
+    // The :key segment is URL-encoded by the client (colons, slashes), so
+    // decode it before lookup. Body is optional; defaults to mode=transcript.
+    const replayMatch = path.match(/^\/admin\/sessions\/([^/]+)\/replay$/);
+    if (replayMatch) {
+      const sessionKey = decodeURIComponent(replayMatch[1]!);
+      let body: { mode?: string };
+      try {
+        body = (await readJsonBody(req)) as typeof body;
+      } catch {
+        json(res, 400, { error: "invalid_json" });
+        return;
+      }
+      const requestedMode = body?.mode === "rerun" ? "rerun" : "transcript";
+      const replay = makeMockReplay(sessionKey, requestedMode);
+      if (!replay) {
+        json(res, 404, { error: "not_found", session_key: sessionKey });
+        return;
+      }
+      json(res, 200, replay);
+      return;
+    }
+
     json(res, 404, { error: "not_found", path });
     return;
   }

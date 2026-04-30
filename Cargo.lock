@@ -681,6 +681,7 @@ dependencies = [
  "corlinman-gateway",
  "corlinman-plugins",
  "corlinman-proto",
+ "corlinman-replay",
  "corlinman-tenant",
  "corlinman-vector",
  "cron",
@@ -779,6 +780,7 @@ dependencies = [
  "corlinman-hooks",
  "corlinman-plugins",
  "corlinman-proto",
+ "corlinman-replay",
  "corlinman-scheduler",
  "corlinman-tenant",
  "corlinman-vector",
@@ -953,6 +955,22 @@ dependencies = [
  "prost",
  "tonic",
  "tonic-build",
+]
+
+[[package]]
+name = "corlinman-replay"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "corlinman-core",
+ "corlinman-tenant",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

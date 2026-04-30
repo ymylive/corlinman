@@ -28,6 +28,7 @@ corlinman-evolution = { path = "../corlinman-evolution" }
 corlinman-auto-rollback = { path = "../corlinman-auto-rollback" }
 corlinman-scheduler = { path = "../corlinman-scheduler" }
 corlinman-tenant = { path = "../corlinman-tenant" }
+corlinman-replay = { path = "../corlinman-replay" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

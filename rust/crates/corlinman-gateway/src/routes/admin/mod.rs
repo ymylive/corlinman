@@ -52,6 +52,7 @@ pub mod plugins;
 pub mod providers;
 pub mod rag;
 pub mod scheduler;
+pub mod sessions;
 pub mod tenants;
 
 /// Shared read-only state passed to every admin handler.
@@ -154,6 +155,20 @@ pub struct AdminState {
     /// `tenants_disabled` + `reason=admin_db_missing` for the second,
     /// matching the UI mock contract in `ui/lib/api/tenants.ts`.
     pub admin_db: Option<Arc<AdminDb>>,
+    /// Phase 4 W2 4-2D: kill-switch for the `/admin/sessions*` admin
+    /// surface. Defaults to `false` (sessions surface is on). When
+    /// flipped to `true` — typically by a test harness or a future
+    /// `[sessions].admin_enabled = false` config flag — both routes
+    /// return 503 `sessions_disabled`. The UI keys off this status to
+    /// render the "session storage is off" banner without inspecting
+    /// the error message.
+    pub sessions_disabled: bool,
+    /// Phase 4 W2 4-2D: explicit data-dir override for routes that
+    /// need to read per-tenant SQLite files. `None` falls back to the
+    /// `CORLINMAN_DATA_DIR` env var or `~/.corlinman`. Tests pin a
+    /// tempdir here to avoid the parallel-test race that the env-var
+    /// fallback would have if two tests set it concurrently.
+    pub data_dir: Option<PathBuf>,
 }
 
 impl AdminState {
@@ -176,6 +191,8 @@ impl AdminState {
             tenant_pool: None,
             allowed_tenants: BTreeSet::new(),
             admin_db: None,
+            sessions_disabled: false,
+            data_dir: None,
         }
     }
 
@@ -298,6 +315,24 @@ impl AdminState {
         self
     }
 
+    /// Phase 4 W2 4-2D fluent: flip the sessions admin surface off.
+    /// All `/admin/sessions*` routes then return 503 `sessions_disabled`
+    /// matching the UI mock contract. Tests use this to exercise the
+    /// banner path without touching real session files.
+    pub fn with_sessions_disabled(mut self, disabled: bool) -> Self {
+        self.sessions_disabled = disabled;
+        self
+    }
+
+    /// Phase 4 W2 4-2D fluent: pin the data dir handlers should read
+    /// per-tenant SQLite files from. Production boot leaves this `None`
+    /// so the env-var fallback applies; tests pin a tempdir here to
+    /// dodge the global-env race.
+    pub fn with_data_dir(mut self, dir: PathBuf) -> Self {
+        self.data_dir = Some(dir);
+        self
+    }
+
     /// Re-serialise the current config snapshot to the Python-side JSON
     /// drop. No-op + warn when the path isn't configured — admin writes
     /// still succeed (the TOML write already landed), they just can't
@@ -367,6 +402,7 @@ pub fn router_with_state(state: AdminState) -> Router {
         .merge(scheduler::router(state.clone()))
         .merge(evolution::router(state.clone()))
         .merge(memory::router(state.clone()))
+        .merge(sessions::router(state.clone()))
         .merge(tenants::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             tenant_state,

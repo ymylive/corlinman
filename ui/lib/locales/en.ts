@@ -94,6 +94,7 @@ export const en = {
     playground: "Playground",
     canvas: "Canvas",
     tenants: "Tenants",
+    sessions: "Sessions",
     expandSidebar: "Expand sidebar",
     collapseSidebar: "Collapse sidebar",
     openPalette: "Open command palette",
@@ -1227,6 +1228,7 @@ export const en = {
     config: "Config",
     logs: "Logs",
     tenants: "Tenants",
+    sessions: "Sessions",
   },
 
   health: {
@@ -1523,5 +1525,43 @@ export const en = {
       statRolledBackThisWeek: "Rolled back · 7d",
       statRolledBackFoot: "auto + manual",
     },
+  },
+
+  sessions: {
+    title: "Sessions",
+    subtitle:
+      "Browse historical sessions; press Replay to read the deterministic transcript.",
+    colSessionKey: "Session key",
+    colMessageCount: "Messages",
+    colLastMessageAt: "Last message",
+    colActions: "Actions",
+    replay: "Replay",
+    empty: "No sessions recorded yet.",
+    loadFailed: "Could not load sessions",
+    sessionsDisabledTitle: "Session storage is off",
+    sessionsDisabledHint:
+      "`[sessions.enabled]` is disabled in config. Flip it on for sessions to appear here.",
+    messageCountLabel: "{{n}} messages",
+    dialogTitle: "Replay · {{key}}",
+    dialogDescription:
+      "Deterministic replay of a recorded session — byte-for-byte identical to what the agent saw.",
+    modeLabel: "Mode",
+    modeTranscript: "Transcript (read-only)",
+    modeRerun: "Rerun (simulate)",
+    modeRerunComingSoon: "coming in Wave 2.5",
+    rerunNotImplementedTitle: "Rerun mode is not implemented yet",
+    rerunNotImplementedHint:
+      "The diff renderer ships in Wave 2.5. The backend currently returns this placeholder.",
+    transcriptEmpty: "This session has no replayable messages.",
+    transcriptRoleUser: "User",
+    transcriptRoleAssistant: "Assistant",
+    transcriptRoleSystem: "System",
+    summaryMessageCount: "Messages",
+    summaryTenantId: "Tenant",
+    notFoundTitle: "Session not found",
+    notFoundHint:
+      "`{{key}}` is not in the sessions database — it may have been pruned.",
+    replayLoading: "Replaying…",
+    replayFailed: "Replay failed: {{msg}}",
   },
 } satisfies LocaleBundle;

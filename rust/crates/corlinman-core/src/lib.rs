@@ -30,5 +30,5 @@ pub use placeholders::{
     DiaryNamespaceResolver, FixedTime, NamespaceResolver, PlaceholderContext,
     PlaceholderContextBuilder, RagRetriever, RenderError, Renderer, SystemTime, TimeSource,
 };
-pub use session::{SessionMessage, SessionRole, SessionStore};
+pub use session::{SessionMessage, SessionRole, SessionStore, SessionSummary};
 pub use session_sqlite::SqliteSessionStore;

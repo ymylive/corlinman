@@ -7,5 +7,6 @@ pub mod doctor;
 pub mod onboard;
 pub mod plugins;
 pub mod qa;
+pub mod replay;
 pub mod tenant;
 pub mod vector;

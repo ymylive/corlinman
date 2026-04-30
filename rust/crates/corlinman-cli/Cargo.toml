@@ -19,6 +19,7 @@ corlinman-plugins = { path = "../corlinman-plugins" }
 corlinman-vector = { path = "../corlinman-vector" }
 corlinman-gateway = { path = "../corlinman-gateway" }
 corlinman-tenant = { path = "../corlinman-tenant" }
+corlinman-replay = { path = "../corlinman-replay" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

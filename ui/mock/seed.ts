@@ -408,3 +408,134 @@ export const MOCK_TENANTS: MockTenant[] = [
  */
 export const MOCK_TENANTS_ENABLED =
   process.env.MOCK_TENANTS_ENABLED !== "0";
+
+// --- Sessions (Phase 4 W2 4-2D — trajectory replay) -----------------------
+// Mirrors Agent A's Rust shape:
+//   GET  /admin/sessions             → { sessions: MockSession[] }
+//   POST /admin/sessions/:key/replay → MockReplay
+//
+// `last_message_at` is unix milliseconds (i64 SQLite column). Transcript ts
+// values are ISO-8601 strings, matching the tenants.created_at convention.
+
+export interface MockSession {
+  session_key: string;
+  /** Unix milliseconds. */
+  last_message_at: number;
+  message_count: number;
+}
+
+export interface MockTranscriptMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+  /** RFC-3339 / ISO-8601. */
+  ts: string;
+}
+
+export interface MockReplay {
+  session_key: string;
+  mode: "transcript" | "rerun";
+  transcript: MockTranscriptMessage[];
+  summary: {
+    message_count: number;
+    tenant_id: string;
+    rerun_diff?: string;
+  };
+}
+
+// Pin to a fixed wall clock so the demo deck reads consistently.
+const SESSIONS_PIN_MS = Date.UTC(2026, 3, 28, 9, 30, 0); // 2026-04-28T09:30Z
+
+export const MOCK_SESSIONS: MockSession[] = [
+  {
+    session_key: "qq:1234",
+    last_message_at: SESSIONS_PIN_MS,
+    message_count: 12,
+  },
+  {
+    session_key: "qq:group:567890",
+    last_message_at: SESSIONS_PIN_MS - 1000 * 60 * 47,
+    message_count: 38,
+  },
+  {
+    session_key: "telegram:private:9001",
+    last_message_at: SESSIONS_PIN_MS - 1000 * 60 * 60 * 5,
+    message_count: 6,
+  },
+  {
+    session_key: "telegram:group:-100123456",
+    last_message_at: SESSIONS_PIN_MS - 1000 * 60 * 60 * 28,
+    message_count: 21,
+  },
+  {
+    session_key: "web:admin:nova",
+    last_message_at: SESSIONS_PIN_MS - 1000 * 60 * 60 * 96,
+    message_count: 3,
+  },
+];
+
+const TRANSCRIPT_FIXTURE: MockTranscriptMessage[] = [
+  {
+    role: "user",
+    content: "今天能帮我把昨晚的会议纪要整理成日记吗？",
+    ts: new Date(SESSIONS_PIN_MS - 1000 * 60 * 12).toISOString(),
+  },
+  {
+    role: "assistant",
+    content:
+      "可以的。会议纪要我先抽出三条主线：\n1. 部署窗口确定在周五傍晚\n2. 监控指标 p99 仍偏高，需要再排查一次\n3. 下周一开始尝试新的审批流。\n\n要按这个分段写成日记还是合成一段？",
+    ts: new Date(SESSIONS_PIN_MS - 1000 * 60 * 11).toISOString(),
+  },
+  {
+    role: "user",
+    content: "分段写吧，每条多写两句细节。",
+    ts: new Date(SESSIONS_PIN_MS - 1000 * 60 * 10).toISOString(),
+  },
+  {
+    role: "assistant",
+    content:
+      "好，我已经把日记写到 `Daily/2026-04-27.md`，你可以打开看看 — 三段都按你的偏好补了细节，结尾留了一个明日待办的钩子。",
+    ts: new Date(SESSIONS_PIN_MS - 1000 * 60 * 9).toISOString(),
+  },
+  {
+    role: "user",
+    content: "完美，谢谢！",
+    ts: new Date(SESSIONS_PIN_MS - 1000 * 60 * 1).toISOString(),
+  },
+  {
+    role: "assistant",
+    content: "不客气，晚安。",
+    ts: new Date(SESSIONS_PIN_MS).toISOString(),
+  },
+];
+
+/**
+ * Build a `MockReplay` for the given session_key + mode. Returns `null`
+ * when the session_key is unknown (so the mock server responds 404).
+ */
+export function makeMockReplay(
+  sessionKey: string,
+  mode: "transcript" | "rerun",
+): MockReplay | null {
+  const session = MOCK_SESSIONS.find((s) => s.session_key === sessionKey);
+  if (!session) return null;
+
+  const take = Math.min(
+    TRANSCRIPT_FIXTURE.length,
+    Math.max(2, session.message_count),
+  );
+  const transcript = TRANSCRIPT_FIXTURE.slice(0, take);
+
+  const replay: MockReplay = {
+    session_key: sessionKey,
+    mode,
+    transcript,
+    summary: {
+      message_count: session.message_count,
+      tenant_id: "default",
+    },
+  };
+  if (mode === "rerun") {
+    replay.summary.rerun_diff = "not_implemented_yet";
+  }
+  return replay;
+}

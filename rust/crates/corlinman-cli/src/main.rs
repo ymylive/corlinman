@@ -1,7 +1,7 @@
 //! corlinman CLI entry point (clap derive).
 //!
 //! Subcommands (see plan §2 `corlinman-cli` + §8 borrowed patterns):
-//!   onboard / doctor / plugins / config / dev / qa
+//!   onboard / doctor / plugins / config / dev / qa / vector / tenant / replay
 //!
 //! Each subcommand lives in `cmd/<name>.rs`; `main` only dispatches.
 
@@ -42,6 +42,10 @@ enum Cmd {
     /// (Phase 4 W1 4-1A Item 4).
     #[command(subcommand)]
     Tenant(cmd::tenant::Cmd),
+    /// Deterministic session replay (Phase 4 W2 4-2D). Reconstructs a
+    /// stored session by key from `sessions.sqlite` and prints the
+    /// transcript in human or JSON form.
+    Replay(cmd::replay::Args),
 }
 
 #[tokio::main]
@@ -56,5 +60,6 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Qa(sub) => cmd::qa::run(cmd::qa::Args { cmd: sub }).await,
         Cmd::Vector(sub) => cmd::vector::run(sub).await,
         Cmd::Tenant(sub) => cmd::tenant::run(sub).await,
+        Cmd::Replay(args) => cmd::replay::run(args).await,
     }
 }

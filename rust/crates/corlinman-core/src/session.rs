@@ -87,6 +87,20 @@ impl SessionMessage {
     }
 }
 
+/// One row returned by [`crate::session_sqlite::SqliteSessionStore::list_sessions`].
+/// Used by the admin sessions list route (Phase 4 W2 4-2D) so the
+/// operator UI can paint a roster without loading every transcript.
+///
+/// `last_message_at_ms` is unix milliseconds — picked over RFC-3339 to
+/// match the UI's `Date(ms).toLocaleString()` rendering convention and
+/// to keep the wire shape numeric (sortable + cheap to compare).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub session_key: String,
+    pub last_message_at_ms: i64,
+    pub message_count: i64,
+}
+
 /// Trait implemented by any backing store (SQLite, memory, remote) capable of
 /// persisting ordered message histories per session.
 #[async_trait]

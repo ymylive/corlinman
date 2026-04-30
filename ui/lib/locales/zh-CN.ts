@@ -96,6 +96,7 @@ export const zhCN = {
     playground: "Playground",
     canvas: "Canvas",
     tenants: "租户",
+    sessions: "会话",
     expandSidebar: "展开侧边栏",
     collapseSidebar: "折叠侧边栏",
     openPalette: "打开命令面板",
@@ -1209,6 +1210,7 @@ export const zhCN = {
     config: "配置",
     logs: "日志",
     tenants: "租户",
+    sessions: "会话",
   },
 
   health: {
@@ -1501,6 +1503,41 @@ export const zhCN = {
       statRolledBackThisWeek: "本周回滚",
       statRolledBackFoot: "auto + manual",
     },
+  },
+
+  sessions: {
+    title: "会话",
+    subtitle: "查看历史会话；点击 “重放” 可按只读方式回看完整逐字记录。",
+    colSessionKey: "会话标识",
+    colMessageCount: "消息数",
+    colLastMessageAt: "最近消息",
+    colActions: "操作",
+    replay: "重放",
+    empty: "尚未记录任何会话。",
+    loadFailed: "会话列表加载失败",
+    sessionsDisabledTitle: "会话存储已关闭",
+    sessionsDisabledHint:
+      "运维侧将 `[sessions.enabled]` 关闭了。开启之后这里才会列出历史会话。",
+    messageCountLabel: "{{n}} 条消息",
+    dialogTitle: "会话重放 · {{key}}",
+    dialogDescription: "确定性重放历史会话 — 与原始记录逐字一致。",
+    modeLabel: "模式",
+    modeTranscript: "Transcript（逐字记录）",
+    modeRerun: "Rerun（重跑模拟）",
+    modeRerunComingSoon: "在 Wave 2.5 上线",
+    rerunNotImplementedTitle: "Rerun 模式尚未实现",
+    rerunNotImplementedHint:
+      "Wave 2.5 会启用差异渲染。当前后端固定返回该占位标记。",
+    transcriptEmpty: "该会话没有可回放的消息。",
+    transcriptRoleUser: "用户",
+    transcriptRoleAssistant: "Assistant",
+    transcriptRoleSystem: "系统",
+    summaryMessageCount: "消息数",
+    summaryTenantId: "Tenant",
+    notFoundTitle: "未找到该会话",
+    notFoundHint: "`{{key}}` 不在 sessions 数据库中，可能已被清理。",
+    replayLoading: "正在重放…",
+    replayFailed: "重放失败：{{msg}}",
   },
 };
 

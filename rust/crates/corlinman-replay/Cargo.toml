@@ -1,0 +1,23 @@
+[package]
+name = "corlinman-replay"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Phase 4 Wave 2 4-2D — deterministic session replay primitive. Reads a session by key from sessions.sqlite and reconstructs a structured transcript ready for diff / dump."
+
+[dependencies]
+corlinman-core = { path = "../corlinman-core" }
+corlinman-tenant = { path = "../corlinman-tenant" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
