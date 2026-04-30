@@ -402,3 +402,162 @@ async fn create_403_when_tenants_disabled() {
     let body = body_json(resp).await;
     assert_eq!(body["error"], "tenants_disabled");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4 W1.5 (next-tasks A4): per-tenant content reads for the diff view
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn read_prompt_segment_returns_content_when_file_exists() {
+    let (state, tmp, _guard) = state_enabled().await;
+
+    let segment_dir = tmp
+        .path()
+        .join("tenants")
+        .join("acme")
+        .join("prompt_segments");
+    std::fs::create_dir_all(&segment_dir).unwrap();
+    std::fs::write(segment_dir.join("agent.greeting.md"), "Welcome to Acme.").unwrap();
+
+    let app = tenants_routes::router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/tenants/acme/prompt_segments/agent.greeting")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = body_json(resp).await;
+    assert_eq!(body["tenant_id"], "acme");
+    assert_eq!(body["kind"], "prompt_template");
+    assert_eq!(body["name"], "agent.greeting");
+    assert_eq!(body["exists"], true);
+    assert_eq!(body["content"], "Welcome to Acme.");
+}
+
+#[tokio::test]
+async fn read_prompt_segment_returns_exists_false_for_missing_file() {
+    let (state, _tmp, _guard) = state_enabled().await;
+    let app = tenants_routes::router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/tenants/default/prompt_segments/agent.greeting")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = body_json(resp).await;
+    assert_eq!(body["exists"], false);
+    assert_eq!(body["content"], "");
+}
+
+#[tokio::test]
+async fn read_agent_card_returns_content_when_file_exists() {
+    let (state, tmp, _guard) = state_enabled().await;
+
+    let cards_dir = tmp.path().join("tenants").join("acme").join("agent_cards");
+    std::fs::create_dir_all(&cards_dir).unwrap();
+    std::fs::write(
+        cards_dir.join("casual.md"),
+        "# Casual\n\nWarm, low-formality.",
+    )
+    .unwrap();
+
+    let app = tenants_routes::router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/tenants/acme/agent_cards/casual")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = body_json(resp).await;
+    assert_eq!(body["kind"], "agent_card");
+    assert_eq!(body["name"], "casual");
+    assert_eq!(body["exists"], true);
+    assert!(body["content"].as_str().unwrap().contains("Warm"));
+}
+
+#[tokio::test]
+async fn read_content_rejects_invalid_tenant_slug_with_400() {
+    let (state, _tmp, _guard) = state_enabled().await;
+    let app = tenants_routes::router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/tenants/BAD!!/prompt_segments/agent.greeting")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "invalid_tenant_slug");
+}
+
+#[tokio::test]
+async fn read_content_rejects_invalid_segment_name_with_400() {
+    let (state, _tmp, _guard) = state_enabled().await;
+    let app = tenants_routes::router(state);
+
+    // The Path extractor URL-decodes `..` and `%2F`. Either the
+    // axum router rejects with 404 or the segment validator catches
+    // it as 400 — either is acceptable defense-in-depth.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/tenants/default/prompt_segments/..%2Fetc%2Fpasswd")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::NOT_FOUND,
+        "expected 4xx for traversal attempt, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn read_content_returns_403_when_tenants_disabled() {
+    let _guard = data_dir_lock().lock().await;
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("CORLINMAN_DATA_DIR", tmp.path());
+
+    let cfg = Config::default(); // enabled = false by default
+    let state = AdminState::new(
+        Arc::new(PluginRegistry::default()),
+        Arc::new(ArcSwap::from_pointee(cfg)),
+    );
+
+    let app = tenants_routes::router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/tenants/default/prompt_segments/agent.greeting")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "tenants_disabled");
+}

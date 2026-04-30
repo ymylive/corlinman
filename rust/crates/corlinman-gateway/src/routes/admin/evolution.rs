@@ -85,6 +85,11 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/evolution/:id/approve", post(approve_proposal))
         .route("/admin/evolution/:id/deny", post(deny_proposal))
         .route("/admin/evolution/:id/apply", post(apply_proposal))
+        // Phase 4 W1.5 (next-tasks A2): operator-initiated rollback.
+        // AutoRollback monitors call `EvolutionApplier::revert`
+        // programmatically; this surface is the manual-action path
+        // for the admin UI's Rollback button.
+        .route("/admin/evolution/:id/rollback", post(rollback_proposal))
         .with_state(state)
 }
 
@@ -594,6 +599,28 @@ async fn apply_proposal(State(state): State<AdminState>, Path(id): Path<String>)
             )
                 .into_response()
         }
+        // Phase 4 W1.5 (next-tasks A3): tool_policy drift detection
+        // surfaces the on-disk mode that diverged from `diff.before`.
+        // Operator can re-evaluate without re-querying. 409 mirrors
+        // `invalid_state_transition` semantically — both are
+        // "stale-precondition" failures.
+        Err(ApplyError::DriftMismatch {
+            target,
+            expected,
+            actual,
+        }) => {
+            EvolutionApplier::observe_failure(EvolutionKind::ToolPolicy);
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "drift_mismatch",
+                    "target": target,
+                    "expected": expected,
+                    "actual": actual,
+                })),
+            )
+                .into_response()
+        }
         Err(other) => {
             EvolutionApplier::observe_failure(EvolutionKind::MemoryOp);
             warn!(error = %other, "admin/evolution apply failed");
@@ -601,6 +628,128 @@ async fn apply_proposal(State(state): State<AdminState>, Path(id): Path<String>)
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": "apply_failed",
+                    "message": other.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rollback — `POST /admin/evolution/:id/rollback`
+// ---------------------------------------------------------------------------
+//
+// Phase 4 W1.5 (next-tasks A2): operator-initiated rollback. The
+// AutoRollback monitor already drives `EvolutionApplier::revert`
+// programmatically when post-apply metrics breach the threshold; this
+// route is the manual-action path so an operator can trigger the same
+// flow from the admin UI without an out-of-band SQL surgery.
+//
+// State machine:
+//
+// ```text
+// applied ──► rolled_back   (this route)
+// applied ──► rolled_back   (AutoRollback monitor; same code path)
+// ```
+//
+// Any non-`applied` row returns 409 `invalid_state_transition` matching
+// the existing `apply` / `approve` envelope. Reverting an already-
+// rolled-back row is intentionally NOT idempotent — the applier
+// returns `NotApplied("rolled_back")` so the operator sees the
+// double-fire and doesn't accidentally re-apply the original change.
+
+#[derive(Debug, Deserialize, Default)]
+pub struct RollbackBody {
+    /// Optional human-readable reason recorded in
+    /// `evolution_proposals.auto_rollback_reason`. Defaults to
+    /// `"operator: <username unknown>"` when absent so the audit
+    /// log always carries something. The `decided_by` claim from
+    /// the admin session would be a better source; threading that
+    /// through is a Phase 4 follow-up alongside the chat-lifecycle
+    /// tenant work.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+async fn rollback_proposal(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+    body: Option<Json<RollbackBody>>,
+) -> Response {
+    let Some(applier) = state.evolution_applier.as_ref() else {
+        return evolution_disabled();
+    };
+    let pid = ProposalId::new(id.clone());
+    let reason = body
+        .and_then(|Json(b)| b.reason)
+        .unwrap_or_else(|| "operator: unknown".to_string());
+
+    match applier.revert(&pid, &reason).await {
+        Ok(history) => Json(json!({
+            "id": id,
+            "status": EvolutionStatus::RolledBack.as_str(),
+            "history_id": history.id,
+            "reason": reason,
+        }))
+        .into_response(),
+        Err(ApplyError::NotFound(_)) => not_found(&id),
+        Err(ApplyError::NotApplied(actual)) => {
+            // Distinct envelope from `NotApproved`'s 409 because the
+            // forward state machine uses `Applied → RolledBack` and
+            // the UI should distinguish "never applied" from "already
+            // rolled back".
+            EvolutionApplier::observe_failure(EvolutionKind::MemoryOp);
+            let from = EvolutionStatus::from_str(&actual).unwrap_or(EvolutionStatus::Pending);
+            invalid_state_transition(from, EvolutionStatus::RolledBack)
+        }
+        Err(ApplyError::UnsupportedRevertKind(kind_str)) => {
+            let kind = EvolutionKind::from_str(&kind_str).unwrap_or(EvolutionKind::MemoryOp);
+            EvolutionApplier::observe_failure(kind);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "unsupported_revert_kind",
+                    "kind": kind_str,
+                    "message": "no inverse handler for this kind yet",
+                })),
+            )
+                .into_response()
+        }
+        Err(ApplyError::HistoryMissing(pid_str)) => {
+            EvolutionApplier::observe_failure(EvolutionKind::MemoryOp);
+            // 410 Gone semantically captures "the audit row that
+            // would have driven this revert is missing"; the
+            // forward apply succeeded but the history is corrupt.
+            (
+                StatusCode::GONE,
+                Json(json!({
+                    "error": "history_missing",
+                    "proposal_id": pid_str,
+                    "message": "evolution_history row missing for this proposal; cannot revert without inverse_diff",
+                })),
+            )
+                .into_response()
+        }
+        Err(ApplyError::Tampered(reason)) => {
+            EvolutionApplier::observe_failure(EvolutionKind::MemoryOp);
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "tampered_inverse_diff",
+                    "reason": reason,
+                    "message": "inverse_diff failed trust gates; manual reconciliation required",
+                })),
+            )
+                .into_response()
+        }
+        Err(other) => {
+            EvolutionApplier::observe_failure(EvolutionKind::MemoryOp);
+            warn!(error = %other, "admin/evolution rollback failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "rollback_failed",
                     "message": other.to_string(),
                 })),
             )

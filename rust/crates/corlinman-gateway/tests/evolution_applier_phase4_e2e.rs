@@ -522,3 +522,162 @@ async fn rollback_agent_card_restores_prior_content() {
         "revert restores prior content when before_present=true"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4 W1.5 (next-tasks A2): operator-initiated rollback HTTP route
+// ---------------------------------------------------------------------------
+
+/// Happy path: apply a prompt_template proposal, then POST
+/// `/admin/evolution/:id/rollback` and confirm the segment file is
+/// removed (revert reads `before_present=false` from inverse_diff)
+/// and the proposal status flips to `rolled_back`.
+#[tokio::test]
+async fn rollback_route_undoes_applied_prompt_template() {
+    let (tmp, _applier, evol, app) = boot().await;
+    let pid = seed_approved(
+        &evol,
+        "evol-rb-route-001",
+        EvolutionKind::PromptTemplate,
+        "agent.greeting",
+        &json!({
+            "before": "",
+            "after": "Hello!",
+            "rationale": "warmer welcome",
+        })
+        .to_string(),
+    )
+    .await;
+
+    let segment_path = tmp
+        .path()
+        .join("tenants")
+        .join("default")
+        .join("prompt_segments")
+        .join("agent.greeting.md");
+
+    // Forward apply via the existing route.
+    let (status, _) = post(
+        app.clone(),
+        &format!("/admin/evolution/{}/apply", pid.as_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(segment_path.exists());
+
+    // Operator rollback via the new route.
+    let (status, body) = post(app, &format!("/admin/evolution/{}/rollback", pid.as_str())).await;
+    assert_eq!(status, StatusCode::OK, "rollback returned {body}");
+    assert_eq!(body["status"], "rolled_back");
+    assert_eq!(body["id"], pid.as_str());
+
+    // File removed (before_present was false at apply time).
+    assert!(
+        !segment_path.exists(),
+        "rollback route must drive the same revert that AutoRollback does"
+    );
+}
+
+/// Rolling back a proposal that was never applied returns 409
+/// `invalid_state_transition` rather than 200 — the state machine
+/// expects `applied → rolled_back`, not `pending → rolled_back`.
+#[tokio::test]
+async fn rollback_route_rejects_pending_proposal() {
+    let (_tmp, _applier, evol, app) = boot().await;
+
+    // Seed a proposal in `pending` (not applied) — `seed_approved`
+    // sets status=Approved, so we override via direct repo write.
+    use corlinman_evolution::EvolutionStatus;
+    let pid = ProposalId::new("evol-rb-pending-001");
+    let repo = ProposalsRepo::new(evol.pool().clone());
+    repo.insert(&corlinman_evolution::EvolutionProposal {
+        id: pid.clone(),
+        kind: EvolutionKind::PromptTemplate,
+        target: "agent.greeting".into(),
+        diff: r#"{"before":"","after":"x","rationale":"y"}"#.into(),
+        reasoning: "phase 4 e2e".into(),
+        risk: EvolutionRisk::High,
+        budget_cost: 3,
+        status: EvolutionStatus::Pending,
+        shadow_metrics: None,
+        signal_ids: vec![],
+        trace_ids: vec![],
+        created_at: 1_000,
+        decided_at: None,
+        decided_by: None,
+        applied_at: None,
+        rollback_of: None,
+        eval_run_id: None,
+        baseline_metrics_json: None,
+        auto_rollback_at: None,
+        auto_rollback_reason: None,
+    })
+    .await
+    .unwrap();
+
+    let (status, body) = post(app, &format!("/admin/evolution/{}/rollback", pid.as_str())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "invalid_state_transition");
+    assert_eq!(body["from"], "pending");
+    assert_eq!(body["to"], "rolled_back");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 W1.5 (next-tasks A3): drift mismatch error envelope
+// ---------------------------------------------------------------------------
+
+/// `apply_tool_policy` against drifted state surfaces 409 with the
+/// observed `actual` mode, so the operator UI can render a useful
+/// diff without re-querying the toml file.
+#[tokio::test]
+async fn apply_tool_policy_drift_mismatch_returns_409_with_actual_mode() {
+    let (tmp, _applier, evol, app) = boot().await;
+
+    // Seed prior state with a mode that disagrees with `diff.before`.
+    let toml_path = tmp
+        .path()
+        .join("tenants")
+        .join("default")
+        .join("tool_policy.toml");
+    std::fs::create_dir_all(toml_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &toml_path,
+        "[web_search]\nmode = \"deny\"\nrule_id = \"manual-override\"\n",
+    )
+    .unwrap();
+
+    // Proposal claims `before = "auto"` — actual on disk is `"deny"`.
+    let pid = seed_approved(
+        &evol,
+        "evol-drift-409-001",
+        EvolutionKind::ToolPolicy,
+        "web_search",
+        &json!({
+            "before": "auto",
+            "after": "prompt",
+            "rule_id": "rule-soft-gate",
+        })
+        .to_string(),
+    )
+    .await;
+
+    let (status, body) = post(app, &format!("/admin/evolution/{}/apply", pid.as_str())).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "expected drift 409, got {body}"
+    );
+    assert_eq!(body["error"], "drift_mismatch");
+    assert_eq!(body["target"], "web_search");
+    assert_eq!(body["expected"], "auto");
+    assert_eq!(
+        body["actual"], "deny",
+        "operator must see the on-disk mode that diverged"
+    );
+
+    // FS unchanged.
+    let parsed: toml::Table = std::fs::read_to_string(&toml_path)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(parsed["web_search"]["mode"].as_str(), Some("deny"));
+}

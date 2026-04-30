@@ -45,7 +45,7 @@ use std::sync::Arc;
 use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
 use argon2::Argon2;
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
@@ -103,7 +103,38 @@ pub struct CreateOut {
 pub fn router(state: AdminState) -> Router {
     Router::new()
         .route("/admin/tenants", get(list_tenants).post(create_tenant))
+        // Phase 4 W1.5 (next-tasks A4): per-tenant content reads for
+        // the operator UI's diff view. Both kinds whose proposers
+        // emit `diff.before = ""` (the applier reads live state at
+        // apply time) need a way to render the on-disk content
+        // alongside the proposed `diff.after`. Single GET endpoint
+        // per kind keeps the contract narrow; future kinds add
+        // sibling routes.
+        .route(
+            "/admin/tenants/:tenant/prompt_segments/:name",
+            get(read_prompt_segment),
+        )
+        .route(
+            "/admin/tenants/:tenant/agent_cards/:name",
+            get(read_agent_card),
+        )
         .with_state(state)
+}
+
+/// Wire shape for `GET /admin/tenants/:tenant/{prompt_segments,agent_cards}/:name`.
+///
+/// `exists = false` is a legitimate response shape (not a 404):
+/// `prompt_template` and `agent_card` proposals can apply against a
+/// segment that doesn't exist yet (operator is creating the segment
+/// from scratch). The UI's diff view should render `before = ""` in
+/// that case rather than a "not found" error.
+#[derive(Debug, Serialize)]
+pub struct TenantContentOut {
+    pub tenant_id: String,
+    pub kind: String,
+    pub name: String,
+    pub exists: bool,
+    pub content: String,
 }
 
 /// Convert a unix-millis timestamp from `tenants.sqlite` into an
@@ -126,6 +157,45 @@ fn now_unix_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Phase 4 W1.5 (next-tasks A4): minimal defensive validation on a
+/// `prompt_segment` id read from the URL path. The full validator
+/// lives in `evolution_applier::validate_prompt_segment_id` (the
+/// source of truth for the write path); this is a slimmer copy
+/// that keeps rejected names out of the filesystem read. Drift
+/// between the two is OK: the applier-side validator is stricter
+/// (size cap, control-char ban) — anything this fn passes the
+/// applier rejects on apply, so the route stays defensive without
+/// being a duplicate spec.
+fn is_valid_segment_name(s: &str) -> bool {
+    if s.is_empty() || s.len() > 128 {
+        return false;
+    }
+    if s.starts_with('.') || s.ends_with('.') || s.contains("..") {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
+}
+
+/// Phase 4 W1.5 (next-tasks A4): same shape as
+/// [`is_valid_segment_name`] for agent ids, mirroring the applier's
+/// `validate_agent_id` whitelist (`[a-z][a-z0-9_-]{0,63}`).
+fn is_valid_agent_name(s: &str) -> bool {
+    if s.is_empty() || s.len() > 64 {
+        return false;
+    }
+    if !s
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_lowercase())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
 /// Mirror of `corlinman-cli::cmd::tenant::hash_password`. Kept inline
@@ -238,6 +308,127 @@ fn disabled_envelope(state: &AdminState) -> Option<Response> {
         return Some(admin_db_missing_503());
     }
     None
+}
+
+/// Read a per-tenant content file (a `prompt_template` segment or an
+/// `agent_card` markdown file) and return its current bytes for the
+/// operator UI's diff view. `kind` parameterises the directory layout
+/// — both kinds share the same path shape and validation discipline,
+/// only the directory name differs.
+async fn read_tenant_content(
+    state: &AdminState,
+    tenant_raw: &str,
+    name: &str,
+    kind: &'static str,
+    name_validator: fn(&str) -> bool,
+    subdir: &'static str,
+) -> Response {
+    if let Some(resp) = disabled_envelope(state) {
+        return resp;
+    }
+
+    // Validate tenant slug via the canonical `TenantId::new` (same
+    // regex the middleware enforces). Reject before touching the
+    // filesystem so a traversal attempt never reaches `Path::join`.
+    let tenant = match TenantId::new(tenant_raw.to_string()) {
+        Ok(t) => t,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_tenant_slug",
+                    "slug": tenant_raw,
+                    "reason": err.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate the segment / agent name using the kind-specific
+    // whitelist. Defense-in-depth — the applier-side validator is
+    // the source of truth for the write path.
+    if !name_validator(name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_name",
+                "kind": kind,
+                "name": name,
+            })),
+        )
+            .into_response();
+    }
+
+    // Resolve `<data_dir>/tenants/<tenant>/<subdir>/<name>.md`. The
+    // path is fully derived from validated inputs, so traversal is
+    // already prevented.
+    let data_dir = resolve_data_dir();
+    let path = tenant_root_dir(&data_dir, &tenant)
+        .join(subdir)
+        .join(format!("{name}.md"));
+
+    let (exists, content) = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => (true, s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (false, String::new()),
+        Err(e) => {
+            warn!(
+                tenant = tenant.as_str(),
+                kind,
+                name,
+                path = %path.display(),
+                error = %e,
+                "admin/tenants content read failed",
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "storage_error",
+                    "message": e.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    Json(TenantContentOut {
+        tenant_id: tenant.as_str().to_string(),
+        kind: kind.to_string(),
+        name: name.to_string(),
+        exists,
+        content,
+    })
+    .into_response()
+}
+
+async fn read_prompt_segment(
+    State(state): State<AdminState>,
+    Path((tenant, name)): Path<(String, String)>,
+) -> Response {
+    read_tenant_content(
+        &state,
+        &tenant,
+        &name,
+        "prompt_template",
+        is_valid_segment_name,
+        "prompt_segments",
+    )
+    .await
+}
+
+async fn read_agent_card(
+    State(state): State<AdminState>,
+    Path((tenant, name)): Path<(String, String)>,
+) -> Response {
+    read_tenant_content(
+        &state,
+        &tenant,
+        &name,
+        "agent_card",
+        is_valid_agent_name,
+        "agent_cards",
+    )
+    .await
 }
 
 async fn list_tenants(State(state): State<AdminState>) -> Response {
