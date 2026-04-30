@@ -28,8 +28,11 @@
 //! `docs/design/phase4-w2-b2-design.md` §"Implementation order".
 
 pub mod error;
+pub mod resolver;
 pub mod store;
 pub mod types;
 
 pub use error::IdentityError;
+pub use resolver::IdentityStore;
+pub use store::{identity_db_path, SqliteIdentityStore, SCHEMA_SQL};
 pub use types::{BindingKind, ChannelAlias, UserId, VerificationPhrase};
