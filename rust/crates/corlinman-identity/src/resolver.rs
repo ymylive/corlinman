@@ -58,6 +58,33 @@ pub trait IdentityStore: Send + Sync {
         &self,
         user_id: &UserId,
     ) -> Result<Vec<ChannelAlias>, IdentityError>;
+
+    /// Page through `user_identities`, ordered by `created_at DESC`
+    /// so the most-recently-minted user lands on top of the admin
+    /// list view. `limit` is clamped to `[1, 200]` at the call site
+    /// to keep an unbounded `LIMIT 0` query from being expensive
+    /// on a tenant with millions of users.
+    ///
+    /// Returns `(user_id, display_name, alias_count)` triples — the
+    /// `alias_count` is computed via a `LEFT JOIN ... GROUP BY` in
+    /// the impl so the admin UI can paint "QQ + Telegram" next to
+    /// each row without N+1 follow-up queries.
+    async fn list_users(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<UserSummary>, IdentityError>;
+}
+
+/// One row in [`IdentityStore::list_users`]. Wire shape: matches the
+/// UI's `UserSummary` interface (which iter 7 will define under
+/// `ui/lib/api/identity.ts`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct UserSummary {
+    pub user_id: UserId,
+    pub display_name: Option<String>,
+    /// Number of aliases bound to this user_id at query time.
+    pub alias_count: i64,
 }
 
 #[async_trait]
@@ -133,6 +160,44 @@ impl IdentityStore for SqliteIdentityStore {
             source: e,
         })?;
         Ok(row.map(UserId::from_str))
+    }
+
+    async fn list_users(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<UserSummary>, IdentityError> {
+        let limit = limit.clamp(1, 200) as i64;
+        let offset = offset as i64;
+        let rows = sqlx::query(
+            "SELECT u.user_id, u.display_name, COUNT(a.channel) AS alias_count \
+             FROM user_identities u \
+             LEFT JOIN user_aliases a ON a.user_id = u.user_id \
+             GROUP BY u.user_id \
+             ORDER BY u.created_at DESC \
+             LIMIT ?1 OFFSET ?2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| IdentityError::Storage {
+            op: "list_users",
+            source: e,
+        })?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let user_id_str: String = row.get("user_id");
+            let display_name: Option<String> = row.get("display_name");
+            let alias_count: i64 = row.get("alias_count");
+            out.push(UserSummary {
+                user_id: UserId::from_str(user_id_str),
+                display_name,
+                alias_count,
+            });
+        }
+        Ok(out)
     }
 
     async fn aliases_for(
@@ -419,6 +484,90 @@ mod tests {
         let store = fresh(&tmp).await;
         let phantom = UserId::generate();
         assert!(store.aliases_for(&phantom).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_users_returns_descending_by_created_at_with_alias_counts() {
+        let tmp = TempDir::new().unwrap();
+        let store = fresh(&tmp).await;
+
+        // Mint three users on different (channel, channel_user_id)
+        // pairs. Each gets a single auto-bound alias to start.
+        let u1 = store.resolve_or_create("qq", "1", None).await.unwrap();
+        let u2 = store.resolve_or_create("qq", "2", None).await.unwrap();
+        let u3 = store
+            .resolve_or_create("qq", "3", Some("Charlie"))
+            .await
+            .unwrap();
+
+        // Bond a second alias to u1 so its alias_count = 2.
+        sqlx::query(
+            "INSERT INTO user_aliases \
+             (channel, channel_user_id, user_id, created_at, binding_kind) \
+             VALUES ('telegram', '999', ?1, ?2, 'verified')",
+        )
+        .bind(u1.as_str())
+        .bind(
+            OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .unwrap(),
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let users = store.list_users(10, 0).await.unwrap();
+        assert_eq!(users.len(), 3);
+        // ORDER BY created_at DESC → u3 first.
+        assert_eq!(users[0].user_id, u3);
+        assert_eq!(users[0].display_name.as_deref(), Some("Charlie"));
+        assert_eq!(users[0].alias_count, 1);
+        assert_eq!(users[1].user_id, u2);
+        assert_eq!(users[1].alias_count, 1);
+        // u1 has the bonded telegram alias.
+        assert_eq!(users[2].user_id, u1);
+        assert_eq!(users[2].alias_count, 2);
+    }
+
+    #[tokio::test]
+    async fn list_users_paginates_via_limit_offset() {
+        let tmp = TempDir::new().unwrap();
+        let store = fresh(&tmp).await;
+        for i in 0..5 {
+            store
+                .resolve_or_create("qq", &i.to_string(), None)
+                .await
+                .unwrap();
+        }
+        let page1 = store.list_users(2, 0).await.unwrap();
+        let page2 = store.list_users(2, 2).await.unwrap();
+        let page3 = store.list_users(2, 4).await.unwrap();
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page3.len(), 1);
+        // No overlap between pages.
+        let p1_ids: Vec<_> = page1.iter().map(|u| &u.user_id).collect();
+        for u in &page2 {
+            assert!(!p1_ids.contains(&&u.user_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn list_users_clamps_excessive_limit() {
+        let tmp = TempDir::new().unwrap();
+        let store = fresh(&tmp).await;
+        for i in 0..5 {
+            store
+                .resolve_or_create("qq", &i.to_string(), None)
+                .await
+                .unwrap();
+        }
+        // limit = 0 (would otherwise return zero rows) clamps up to 1;
+        // limit = u32::MAX clamps down to 200.
+        let with_zero = store.list_users(0, 0).await.unwrap();
+        assert_eq!(with_zero.len(), 1);
+        let with_max = store.list_users(u32::MAX, 0).await.unwrap();
+        assert_eq!(with_max.len(), 5, "5 < 200 → all returned");
     }
 
     #[tokio::test]
