@@ -129,6 +129,7 @@ async fn reset_decay(State(state): State<AdminState>, Json(req): Json<ResetReque
         baseline_metrics_json: None,
         auto_rollback_at: None,
         auto_rollback_reason: None,
+        metadata: None,
     };
     if let Err(err) = proposals_repo.insert(&proposal).await {
         tracing::error!(

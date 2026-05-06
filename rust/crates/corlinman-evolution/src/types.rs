@@ -417,6 +417,23 @@ pub struct EvolutionProposal {
     /// Human-readable summary of the threshold breach that triggered the
     /// auto-rollback (e.g. `"err_signal_count: 4 -> 12 (+200%)"`).
     pub auto_rollback_reason: Option<String>,
+    // ─── Phase 4 W2: free-form metadata blob ──────────────────────────
+    /// Free-form JSON blob keyed by feature. Stored as TEXT in SQLite
+    /// (NULL when None, JSON-encoded otherwise) so new surfaces can
+    /// stash typed views without schema churn. Current consumers:
+    ///
+    /// - **B1 (meta proposal recursion guard)** reads
+    ///   `metadata.parent_meta_proposal_id` + `metadata.descended_from`
+    ///   to walk the trace_id descent chain and refuse runaway
+    ///   self-mutation.
+    /// - **B3 (per-tenant federation)** reads
+    ///   `metadata.federated_from = { tenant, source_proposal_id, hop }`
+    ///   to detect inbound federated proposals and stamp a hop counter
+    ///   for asymmetric opt-in routing.
+    ///
+    /// Unknown keys must round-trip untouched — both surfaces only
+    /// reach into their own namespace, never overwriting each other.
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

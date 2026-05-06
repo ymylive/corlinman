@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS evolution_proposals (
     applied_at            INTEGER,
     auto_rollback_at      INTEGER,
     auto_rollback_reason  TEXT,
+    metadata              TEXT,
     rollback_of           TEXT REFERENCES evolution_proposals(id),
     tenant_id             TEXT NOT NULL DEFAULT 'default'
 );
@@ -198,5 +199,19 @@ pub const MIGRATIONS: &[(&str, &str, &str)] = &[
         "apply_intent_log",
         "tenant_id",
         "ALTER TABLE apply_intent_log ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+    ),
+    // Phase 4 W2 B1 iter 2 — proposal `metadata` column. Free-form JSON
+    // (TEXT) stored alongside the typed columns. B1 (meta proposal
+    // recursion guard) and B3 (federation hop counter) both deserialize
+    // their own typed view of the blob: B1 reads
+    // `parent_meta_proposal_id` + `descended_from`; B3 reads
+    // `federated_from = { tenant, source_proposal_id, hop }`. Storing as
+    // a single column keeps schema churn out of the cross-language
+    // contract — Python engine and Rust observers both treat unknown
+    // keys as opaque pass-through.
+    (
+        "evolution_proposals",
+        "metadata",
+        "ALTER TABLE evolution_proposals ADD COLUMN metadata TEXT",
     ),
 ];

@@ -190,6 +190,7 @@ mod tests {
             "baseline_metrics_json",
             "auto_rollback_at",
             "auto_rollback_reason",
+            "metadata",
         ] {
             let exists = column_exists(store.pool(), "evolution_proposals", leak(col))
                 .await
@@ -280,6 +281,89 @@ mod tests {
                 "migration must add evolution_proposals.{col}"
             );
         }
+    }
+
+    /// Phase 4 W2 B1 iter 2: simulate a pre-Phase-4 schema (no
+    /// `metadata` column), reopen through `EvolutionStore::open`, and
+    /// confirm the migration block adds the column. Mirrors the v0.3
+    /// pattern above so an operator upgrading a long-running
+    /// installation doesn't have to rebuild the audit DB.
+    #[tokio::test]
+    async fn migration_adds_metadata_column_to_legacy_db() {
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("evolution.sqlite");
+        let url = format!("sqlite://{}", path.display());
+
+        // Bootstrap a v0.3-shaped DB by hand — same as today's
+        // SCHEMA_SQL *minus* the new `metadata` column. We include the
+        // earlier v0.2→v0.3 columns so the only thing the migration
+        // block has to add is the new one (cleaner assertion).
+        {
+            let opts = SqliteConnectOptions::from_str(&url)
+                .unwrap()
+                .create_if_missing(true);
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                r#"CREATE TABLE evolution_proposals (
+                    id                    TEXT PRIMARY KEY,
+                    kind                  TEXT NOT NULL,
+                    target                TEXT NOT NULL,
+                    diff                  TEXT NOT NULL,
+                    reasoning             TEXT NOT NULL,
+                    risk                  TEXT NOT NULL,
+                    budget_cost           INTEGER NOT NULL DEFAULT 1,
+                    status                TEXT NOT NULL,
+                    shadow_metrics        TEXT,
+                    eval_run_id           TEXT,
+                    baseline_metrics_json TEXT,
+                    signal_ids            TEXT NOT NULL,
+                    trace_ids             TEXT NOT NULL,
+                    created_at            INTEGER NOT NULL,
+                    decided_at            INTEGER,
+                    decided_by            TEXT,
+                    applied_at            INTEGER,
+                    auto_rollback_at      INTEGER,
+                    auto_rollback_reason  TEXT,
+                    rollback_of           TEXT
+                );"#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        // Pre-condition: `metadata` column missing.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        assert!(!column_exists(&pool, "evolution_proposals", "metadata")
+            .await
+            .unwrap());
+        pool.close().await;
+
+        // Open through the production path → migration applies.
+        let store = EvolutionStore::open(&path).await.unwrap();
+        assert!(
+            column_exists(store.pool(), "evolution_proposals", "metadata")
+                .await
+                .unwrap(),
+            "migration must add evolution_proposals.metadata"
+        );
+
+        // Idempotent: a second open against the now-migrated DB must
+        // be a no-op (the pragma probe sees the column and skips the
+        // ALTER) — not crash with `duplicate column name`.
+        let _store2 = EvolutionStore::open(&path).await.unwrap();
     }
 
     /// `column_exists` requires `&'static str`. The test names are

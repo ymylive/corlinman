@@ -211,13 +211,27 @@ impl ProposalsRepo {
             }
             None => None,
         };
+        // Free-form metadata blob (Phase 4 W2). Serialize on the way in
+        // so a malformed `serde_json::Value` (impossible today, but
+        // defensive against future composition) surfaces as a typed
+        // RepoError rather than a panic at write time.
+        let metadata = match &proposal.metadata {
+            Some(v) => Some(serde_json::to_string(v).map_err(|source| {
+                RepoError::MalformedJson {
+                    column: "metadata",
+                    source,
+                }
+            })?),
+            None => None,
+        };
 
         sqlx::query(
             r#"INSERT INTO evolution_proposals
                  (id, kind, target, diff, reasoning, risk, budget_cost, status,
                   shadow_metrics, signal_ids, trace_ids,
-                  created_at, decided_at, decided_by, applied_at, rollback_of)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                  created_at, decided_at, decided_by, applied_at, rollback_of,
+                  metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(proposal.id.as_str())
         .bind(proposal.kind.as_str())
@@ -235,6 +249,7 @@ impl ProposalsRepo {
         .bind(&proposal.decided_by)
         .bind(proposal.applied_at)
         .bind(proposal.rollback_of.as_ref().map(|p| p.as_str()))
+        .bind(metadata)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -246,7 +261,8 @@ impl ProposalsRepo {
                       shadow_metrics, signal_ids, trace_ids,
                       created_at, decided_at, decided_by, applied_at, rollback_of,
                       eval_run_id, baseline_metrics_json,
-                      auto_rollback_at, auto_rollback_reason
+                      auto_rollback_at, auto_rollback_reason,
+                      metadata
                FROM evolution_proposals WHERE id = ?"#,
         )
         .bind(id.as_str())
@@ -267,7 +283,8 @@ impl ProposalsRepo {
                       shadow_metrics, signal_ids, trace_ids,
                       created_at, decided_at, decided_by, applied_at, rollback_of,
                       eval_run_id, baseline_metrics_json,
-                      auto_rollback_at, auto_rollback_reason
+                      auto_rollback_at, auto_rollback_reason,
+                      metadata
                FROM evolution_proposals
                WHERE status = ?
                ORDER BY created_at DESC
@@ -373,7 +390,8 @@ impl ProposalsRepo {
                       shadow_metrics, signal_ids, trace_ids,
                       created_at, decided_at, decided_by, applied_at, rollback_of,
                       eval_run_id, baseline_metrics_json,
-                      auto_rollback_at, auto_rollback_reason
+                      auto_rollback_at, auto_rollback_reason,
+                      metadata
                FROM evolution_proposals
                WHERE status = 'applied'
                  AND applied_at IS NOT NULL
@@ -409,7 +427,8 @@ impl ProposalsRepo {
                       shadow_metrics, signal_ids, trace_ids,
                       created_at, decided_at, decided_by, applied_at, rollback_of,
                       eval_run_id, baseline_metrics_json,
-                      auto_rollback_at, auto_rollback_reason
+                      auto_rollback_at, auto_rollback_reason,
+                      metadata
                FROM evolution_proposals
                WHERE status = 'pending' AND kind = ? AND risk IN ({placeholders})
                ORDER BY created_at DESC
@@ -583,6 +602,27 @@ fn decode_proposal(row: sqlx::sqlite::SqliteRow) -> Result<EvolutionProposal, Re
         ),
         None => None,
     };
+    // Phase 4 W2: free-form metadata blob. Tolerant decode — a row that
+    // somehow holds garbage TEXT (operator hand-edit, stale tooling)
+    // logs a warn and decodes as None instead of failing the whole
+    // load. The recursion-guard / hop-counter consumers treat absent
+    // metadata the same as a fresh proposal, so this is the safe
+    // failure mode and preserves the rest of the audit trail.
+    let proposal_id_for_warn: String = row.get("id");
+    let metadata: Option<Json> = match row.get::<Option<String>, _>("metadata") {
+        Some(s) => match serde_json::from_str::<Json>(&s) {
+            Ok(v) => Some(v),
+            Err(source) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id_for_warn,
+                    error = %source,
+                    "evolution_proposals.metadata held non-JSON TEXT; decoding as None"
+                );
+                None
+            }
+        },
+        None => None,
+    };
 
     Ok(EvolutionProposal {
         id: ProposalId(row.get("id")),
@@ -605,6 +645,7 @@ fn decode_proposal(row: sqlx::sqlite::SqliteRow) -> Result<EvolutionProposal, Re
         baseline_metrics_json,
         auto_rollback_at: row.get("auto_rollback_at"),
         auto_rollback_reason: row.get("auto_rollback_reason"),
+        metadata,
     })
 }
 
@@ -930,6 +971,7 @@ mod tests {
             baseline_metrics_json: None,
             auto_rollback_at: None,
             auto_rollback_reason: None,
+            metadata: None,
         })
         .await
         .unwrap();
@@ -987,6 +1029,7 @@ mod tests {
             baseline_metrics_json: None,
             auto_rollback_at: None,
             auto_rollback_reason: None,
+            metadata: None,
         })
         .await
         .unwrap();
@@ -1114,6 +1157,7 @@ mod tests {
                 baseline_metrics_json: None,
                 auto_rollback_at: None,
                 auto_rollback_reason: None,
+                metadata: None,
             })
             .await
             .unwrap();
@@ -1178,6 +1222,7 @@ mod tests {
             baseline_metrics_json: None,
             auto_rollback_at: None,
             auto_rollback_reason: None,
+            metadata: None,
         })
         .await
         .unwrap();
@@ -1276,6 +1321,7 @@ mod tests {
             baseline_metrics_json: None,
             auto_rollback_at: None,
             auto_rollback_reason: None,
+            metadata: None,
         })
         .await
         .unwrap();
@@ -1415,6 +1461,7 @@ mod tests {
             baseline_metrics_json: None,
             auto_rollback_at: None,
             auto_rollback_reason: None,
+            metadata: None,
         })
         .await
         .unwrap();
@@ -1711,5 +1758,120 @@ mod tests {
                 .unwrap();
         assert_eq!(row.0, Some(2_000), "first commit timestamp pinned");
         assert!(row.1.is_none(), "failed_at stays null");
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 4 W2 B1 iter 2: free-form `metadata` blob.
+    //
+    // The blob is shared scaffolding for B1 (meta proposal recursion
+    // guard) and B3 (federation hop counter). The repo only stores +
+    // round-trips JSON; namespacing into `parent_meta_proposal_id`,
+    // `federated_from`, etc. is the consumer's job. These tests pin the
+    // round-trip contract — fixtures elsewhere assume `metadata: None`
+    // is the legacy default.
+    // -------------------------------------------------------------------
+
+    /// Bare insert (no metadata supplied) must round-trip as `None` —
+    /// the legacy default for every existing fixture across the
+    /// workspace. Pins the contract that the new column is opt-in.
+    #[tokio::test]
+    async fn metadata_is_none_for_legacy_inserts() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let pid = insert_pending(
+            &repo,
+            "p-meta-legacy",
+            EvolutionKind::MemoryOp,
+            EvolutionRisk::Low,
+        )
+        .await;
+        let got = repo.get(&pid).await.unwrap();
+        assert!(got.metadata.is_none(), "legacy insert must read back None");
+    }
+
+    /// Round-trip an arbitrary JSON blob — both B1's
+    /// `parent_meta_proposal_id` and B3's `federated_from` shape work
+    /// because the repo is shape-agnostic. Pinning a B3-style blob
+    /// here lets the federation surface trust this layer.
+    #[tokio::test]
+    async fn metadata_round_trips_arbitrary_json() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let pid = ProposalId::new("p-meta-rt");
+        let blob = json!({
+            "federated_from": {
+                "tenant": "acme",
+                "source_proposal_id": "evol-acme-2026-05-01-007",
+                "hop": 1,
+            },
+            // Out-of-band key the repo must preserve untouched —
+            // future B1 / B3 iterations may compose blobs.
+            "trace_descent": ["t1", "t2"],
+        });
+        repo.insert(&EvolutionProposal {
+            id: pid.clone(),
+            kind: EvolutionKind::MemoryOp,
+            target: "t".into(),
+            diff: String::new(),
+            reasoning: "fixture".into(),
+            risk: EvolutionRisk::Low,
+            budget_cost: 0,
+            status: EvolutionStatus::Pending,
+            shadow_metrics: None,
+            signal_ids: vec![],
+            trace_ids: vec![],
+            created_at: 1_000,
+            decided_at: None,
+            decided_by: None,
+            applied_at: None,
+            rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
+            metadata: Some(blob.clone()),
+        })
+        .await
+        .unwrap();
+        let got = repo.get(&pid).await.unwrap();
+        assert_eq!(got.metadata, Some(blob), "JSON must round-trip byte-for-byte");
+    }
+
+    /// Corrupted TEXT in the metadata column (operator hand-edit, stale
+    /// tooling, partial write) must decode as `None` and emit a warn —
+    /// **not** fail the whole `get` / `list_*` call. Loss of the audit
+    /// trail elsewhere on the row would be much worse than losing the
+    /// blob; the recursion-guard / hop-counter consumers treat absent
+    /// metadata the same as a fresh proposal, so this is the safe fall.
+    #[tokio::test]
+    async fn metadata_corrupt_json_decodes_as_none_with_warn() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let pid = insert_pending(
+            &repo,
+            "p-meta-corrupt",
+            EvolutionKind::MemoryOp,
+            EvolutionRisk::Low,
+        )
+        .await;
+        // Bypass the repo to plant garbage — the real repo's bind path
+        // serializes via `serde_json::to_string` and so can never
+        // produce non-JSON. We're testing the load tolerance, not the
+        // write path.
+        sqlx::query("UPDATE evolution_proposals SET metadata = ? WHERE id = ?")
+            .bind("not json")
+            .bind(pid.as_str())
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        // Load must succeed (other columns intact) and surface the
+        // corrupt blob as None — `decode_proposal` logs a tracing::warn
+        // we don't try to capture here (the repo unit-test layer
+        // doesn't bring in tracing-test). Operator-facing surfaces
+        // hook on that warn separately.
+        let got = repo.get(&pid).await.unwrap();
+        assert!(got.metadata.is_none(), "corrupt metadata decodes as None");
+        assert_eq!(got.id, pid, "rest of the row still loads cleanly");
     }
 }

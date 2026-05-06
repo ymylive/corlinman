@@ -84,6 +84,7 @@ async fn apply_runs_real_merge_chunks_pipeline() {
         baseline_metrics_json: None,
         auto_rollback_at: None,
         auto_rollback_reason: None,
+        metadata: None,
     })
     .await
     .unwrap();
@@ -201,6 +202,7 @@ async fn apply_runs_real_delete_chunk_pipeline() {
         baseline_metrics_json: None,
         auto_rollback_at: None,
         auto_rollback_reason: None,
+        metadata: None,
     })
     .await
     .unwrap();
@@ -295,6 +297,7 @@ async fn apply_runs_real_consolidate_chunk_pipeline() {
         baseline_metrics_json: None,
         auto_rollback_at: None,
         auto_rollback_reason: None,
+        metadata: None,
     })
     .await
     .unwrap();

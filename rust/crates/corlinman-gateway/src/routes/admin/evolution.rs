@@ -980,6 +980,7 @@ mod tests {
             baseline_metrics_json: None,
             auto_rollback_at: None,
             auto_rollback_reason: None,
+            metadata: None,
         }
     }
 

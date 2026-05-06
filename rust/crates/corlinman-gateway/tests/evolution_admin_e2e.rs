@@ -78,6 +78,7 @@ async fn happy_path_list_approve_apply() {
         baseline_metrics_json: None,
         auto_rollback_at: None,
         auto_rollback_reason: None,
+        metadata: None,
     })
     .await
     .unwrap();
@@ -278,6 +279,7 @@ async fn budget_endpoint_reflects_filed_proposals() {
             baseline_metrics_json: None,
             auto_rollback_at: None,
             auto_rollback_reason: None,
+            metadata: None,
         })
         .await
         .unwrap();
