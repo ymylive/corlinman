@@ -21,7 +21,8 @@ pub mod store;
 pub mod types;
 
 pub use repo::{
-    iso_week_window, ApplyIntent, HistoryRepo, IntentLogRepo, ProposalsRepo, RepoError, SignalsRepo,
+    iso_week_window, ApplyIntent, EvolutionGuardConfig, HistoryRepo, IntentLogRepo, ProposalsRepo,
+    RepoError, SignalsRepo,
 };
 pub use schema::SCHEMA_SQL;
 pub use store::{EvolutionStore, OpenError};

@@ -52,6 +52,83 @@ pub enum RepoError {
     MalformedEnum { column: &'static str, value: String },
     #[error("not found: {0}")]
     NotFound(String),
+    // ─── Phase 4 W2 B1 iter 3 — dual-clause meta recursion guard ─────────
+    /// Clause A — semantic descent. The proposal being inserted carries
+    /// `metadata.parent_meta_proposal_id` pointing at another row whose
+    /// `kind` is itself meta. Refuse so a meta proposal cannot directly
+    /// spawn another meta proposal (one-level recursion only).
+    #[error(
+        "recursion guard: meta proposal descends from another meta proposal \
+         (parent_id={parent_id}, parent_kind={parent_kind:?})"
+    )]
+    RecursionGuardViolation {
+        parent_id: String,
+        parent_kind: EvolutionKind,
+    },
+    /// Clause B — temporal cooldown. The same `(tenant_id, kind)` already
+    /// landed an applied / rolled-back meta proposal `remaining_secs`
+    /// ago, inside the configured `window_secs`. Refuse the queue at
+    /// insert time — proposer can't even park a duplicate behind the
+    /// in-flight one.
+    #[error(
+        "recursion guard cooldown: last meta apply at {last_applied_at_ms}ms \
+         within {window_secs}s window ({remaining_secs}s remaining)"
+    )]
+    RecursionGuardCooldown {
+        last_applied_at_ms: i64,
+        window_secs: u64,
+        remaining_secs: u64,
+    },
+}
+
+/// Phase 4 W2 B1 iter 3 — configuration for the dual-clause meta
+/// recursion guard. Plumbed into [`ProposalsRepo`] via
+/// [`ProposalsRepo::with_guard`]. Absent = guard disabled (legacy
+/// behaviour); test fixtures and any non-meta-aware caller continue to
+/// work unchanged. Production wires this at gateway start, sourced from
+/// `[evolution.meta]` in `corlinman.toml`.
+///
+/// Lives in `corlinman-evolution` rather than `corlinman-core::config`
+/// because the only consumer is the repo `insert` path; pushing it
+/// upstream would force `corlinman-core` to import the evolution kinds
+/// (it already does — but the inverse coupling here keeps this iter
+/// dep-free until iter 7 wires the operator-only auth gate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvolutionGuardConfig {
+    /// Cooldown window per `(tenant_id, EvolutionKind)` meta pair.
+    /// Default **3600** (1 hour). Two meta proposals of the same kind
+    /// in the same tenant cannot both be inserted within this window
+    /// — the second hits [`RepoError::RecursionGuardCooldown`].
+    pub meta_kind_cooldown_secs: u64,
+}
+
+impl Default for EvolutionGuardConfig {
+    fn default() -> Self {
+        Self {
+            meta_kind_cooldown_secs: 3_600,
+        }
+    }
+}
+
+/// Phase 4 W2 B1 iter 3 — pull the recursion-guard parent pointer out
+/// of the free-form `metadata` blob. The B1 namespace lives at
+/// `metadata.parent_meta_proposal_id`; B3's `federated_from` and any
+/// future surface ride alongside without collision. Returns `None`
+/// when:
+///
+/// - the proposal has no metadata,
+/// - the metadata blob is not a JSON object,
+/// - the key is missing or JSON-null, or
+/// - the value isn't a string (defensive — a typed value here would be
+///   a contract violation we treat as "no parent" rather than panic).
+fn parent_meta_proposal_id_from_metadata(metadata: &Option<Json>) -> Option<String> {
+    let blob = metadata.as_ref()?;
+    let obj = blob.as_object()?;
+    let raw = obj.get("parent_meta_proposal_id")?;
+    if raw.is_null() {
+        return None;
+    }
+    raw.as_str().map(|s| s.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -180,14 +257,50 @@ impl SignalsRepo {
 #[derive(Debug, Clone)]
 pub struct ProposalsRepo {
     pool: SqlitePool,
+    /// Phase 4 W2 B1 iter 3 — dual-clause meta recursion guard. `None`
+    /// = guard disabled (legacy behaviour). Set via
+    /// [`ProposalsRepo::with_guard`] at the gateway-wiring layer.
+    guard: Option<EvolutionGuardConfig>,
 }
 
 impl ProposalsRepo {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self { pool, guard: None }
+    }
+
+    /// Phase 4 W2 B1 iter 3 — opt-in to the dual-clause meta recursion
+    /// guard. Call once at construction; subsequent `insert`s for
+    /// meta-kind proposals (`EvolutionKind::is_meta() == true`) run
+    /// both clauses:
+    ///
+    /// - **Clause A (descent)**: reject if the new proposal's
+    ///   `metadata.parent_meta_proposal_id` resolves to a row whose
+    ///   `kind` is itself meta — fails with
+    ///   [`RepoError::RecursionGuardViolation`].
+    /// - **Clause B (cooldown)**: reject if the same
+    ///   `(tenant_id, kind)` saw an `applied` / `rolled_back` meta row
+    ///   within `cfg.meta_kind_cooldown_secs` — fails with
+    ///   [`RepoError::RecursionGuardCooldown`].
+    ///
+    /// Non-meta inserts skip the entire check (zero-cost path).
+    /// Builder is cheap (just stores `cfg`); call sites compose it via
+    /// `ProposalsRepo::new(pool).with_guard(cfg)` at startup.
+    pub fn with_guard(mut self, cfg: EvolutionGuardConfig) -> Self {
+        self.guard = Some(cfg);
+        self
     }
 
     pub async fn insert(&self, proposal: &EvolutionProposal) -> Result<(), RepoError> {
+        // Phase 4 W2 B1 iter 3 — dual-clause meta recursion guard.
+        // Non-meta inserts and unguarded repos skip the lookups
+        // entirely so the existing fast path (one INSERT, no SELECTs)
+        // is preserved for the 8 legacy kinds.
+        if let Some(cfg) = self.guard {
+            if proposal.kind.is_meta() {
+                self.check_meta_recursion_guard(proposal, cfg).await?;
+            }
+        }
+
         let signal_ids = serde_json::to_string(&proposal.signal_ids).map_err(|source| {
             RepoError::MalformedJson {
                 column: "signal_ids",
@@ -216,12 +329,14 @@ impl ProposalsRepo {
         // defensive against future composition) surfaces as a typed
         // RepoError rather than a panic at write time.
         let metadata = match &proposal.metadata {
-            Some(v) => Some(serde_json::to_string(v).map_err(|source| {
-                RepoError::MalformedJson {
-                    column: "metadata",
-                    source,
-                }
-            })?),
+            Some(v) => {
+                Some(
+                    serde_json::to_string(v).map_err(|source| RepoError::MalformedJson {
+                        column: "metadata",
+                        source,
+                    })?,
+                )
+            }
             None => None,
         };
 
@@ -252,6 +367,108 @@ impl ProposalsRepo {
         .bind(metadata)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Phase 4 W2 B1 iter 3 — dual-clause meta recursion guard. Runs
+    /// only when [`with_guard`] is set and `proposal.kind.is_meta()`.
+    ///
+    /// Returns `Ok(())` when the proposal may proceed; returns a
+    /// guard error variant otherwise.
+    ///
+    /// **Clause A (semantic descent)**: pulled from
+    /// `proposal.metadata.parent_meta_proposal_id`. If absent or
+    /// JSON-null, no descent check fires (a meta proposal with no
+    /// recorded parent is always allowed). If present and the resolved
+    /// parent row's `kind` is itself meta → reject with
+    /// [`RepoError::RecursionGuardViolation`]. A non-meta parent is
+    /// allowed (engine learns from agent-asset proposals).
+    ///
+    /// **Clause B (temporal cooldown)**: looks up the most recent
+    /// `applied` / `rolled_back` row for the same `(tenant_id, kind)`
+    /// and rejects if `created_at - last_applied_at` is shorter than
+    /// `cfg.meta_kind_cooldown_secs`. The new proposal's
+    /// `created_at` plays "now" so test fixtures stay deterministic
+    /// without a clock injection. The schema column `tenant_id` on
+    /// `evolution_proposals` defaults to `'default'`; legacy fixtures
+    /// (no explicit tenant) all collapse onto that one bucket.
+    async fn check_meta_recursion_guard(
+        &self,
+        proposal: &EvolutionProposal,
+        cfg: EvolutionGuardConfig,
+    ) -> Result<(), RepoError> {
+        // ─── Clause A: semantic descent via metadata.parent_meta_proposal_id ─
+        //
+        // Single SELECT against the parent id pulled from the metadata
+        // blob. Iter 2 documents the namespace (`parent_meta_proposal_id`
+        // is the recursion-guard key); other keys (e.g. B3's
+        // `federated_from`) coexist untouched. Missing key → no parent →
+        // skip; JSON-null also treated as no parent.
+        if let Some(parent_id) = parent_meta_proposal_id_from_metadata(&proposal.metadata) {
+            // Single SELECT — `id` is PRIMARY KEY so this hits the
+            // unique index. Returns Option so a dangling pointer (parent
+            // never inserted; e.g. operator hand-edit) is benign — we
+            // refuse silently as "no parent" rather than synthesise an
+            // error the engine can't reason about.
+            let parent_kind: Option<String> =
+                sqlx::query_scalar("SELECT kind FROM evolution_proposals WHERE id = ?1")
+                    .bind(&parent_id)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            if let Some(kind_str) = parent_kind {
+                let parent_kind =
+                    kind_str
+                        .parse::<EvolutionKind>()
+                        .map_err(|_| RepoError::MalformedEnum {
+                            column: "kind",
+                            value: kind_str.clone(),
+                        })?;
+                if parent_kind.is_meta() {
+                    return Err(RepoError::RecursionGuardViolation {
+                        parent_id,
+                        parent_kind,
+                    });
+                }
+            }
+        }
+
+        // ─── Clause B: temporal cooldown per (tenant_id, kind) ────────
+        //
+        // The cooldown query — verbatim per the iter 3 spec. `IN
+        // ('applied','rolled_back')` matches the spec's apply-time
+        // window definition: a meta apply that was later auto-rolled
+        // still consumed the slot until the cooldown expires (you don't
+        // get a fresh budget by reverting). The new proposal's
+        // tenant_id matches the schema default ('default') today; if a
+        // future iteration plumbs `EvolutionProposal.tenant_id`, swap
+        // the bind to `proposal.tenant_id`.
+        let last_applied_at_ms: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(applied_at) FROM evolution_proposals \
+              WHERE tenant_id = ?1 AND kind = ?2 \
+                AND status IN ('applied', 'rolled_back') \
+                AND applied_at IS NOT NULL",
+        )
+        .bind("default")
+        .bind(proposal.kind.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+
+        if let Some(last) = last_applied_at_ms {
+            let window_ms = (cfg.meta_kind_cooldown_secs as i64).saturating_mul(1_000);
+            let elapsed_ms = proposal.created_at.saturating_sub(last);
+            if elapsed_ms < window_ms {
+                let remaining_ms = window_ms - elapsed_ms.max(0);
+                // Round up so the operator-facing message never
+                // claims "0s remaining" while the gate is still shut.
+                let remaining_secs = ((remaining_ms + 999) / 1_000).max(0) as u64;
+                return Err(RepoError::RecursionGuardCooldown {
+                    last_applied_at_ms: last,
+                    window_secs: cfg.meta_kind_cooldown_secs,
+                    remaining_secs,
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -911,9 +1128,7 @@ mod tests {
     async fn fresh_store() -> (TempDir, EvolutionStore) {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("evolution.sqlite");
-        let store = EvolutionStore::open_with_pool_size(&path, 1)
-            .await
-            .unwrap();
+        let store = EvolutionStore::open_with_pool_size(&path, 1).await.unwrap();
         (tmp, store)
     }
 
@@ -1835,7 +2050,11 @@ mod tests {
         .await
         .unwrap();
         let got = repo.get(&pid).await.unwrap();
-        assert_eq!(got.metadata, Some(blob), "JSON must round-trip byte-for-byte");
+        assert_eq!(
+            got.metadata,
+            Some(blob),
+            "JSON must round-trip byte-for-byte"
+        );
     }
 
     /// Corrupted TEXT in the metadata column (operator hand-edit, stale
@@ -1874,5 +2093,383 @@ mod tests {
         let got = repo.get(&pid).await.unwrap();
         assert!(got.metadata.is_none(), "corrupt metadata decodes as None");
         assert_eq!(got.id, pid, "rest of the row still loads cleanly");
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 4 W2 B1 iter 3 — dual-clause meta recursion guard.
+    //
+    // The guard fires only when both: the repo opted in via
+    // `with_guard` AND the inserted row's kind is meta. Tests below
+    // pin both clauses end-to-end against a real SQLite-backed repo so
+    // a future refactor that bypasses the guard surface (e.g. raw SQL
+    // insert) shows up here.
+    // -------------------------------------------------------------------
+
+    /// Build a meta proposal fixture with a known kind / id /
+    /// `created_at`. `metadata` is left as `None`; tests that need the
+    /// descent clause inject `parent_meta_proposal_id` themselves so
+    /// the field's namespace is visible at the call site.
+    fn meta_proposal(
+        id: &str,
+        kind: EvolutionKind,
+        created_at: i64,
+        status: EvolutionStatus,
+        applied_at: Option<i64>,
+        metadata: Option<serde_json::Value>,
+    ) -> EvolutionProposal {
+        debug_assert!(kind.is_meta(), "fixture is for meta kinds only");
+        EvolutionProposal {
+            id: ProposalId::new(id),
+            kind,
+            target: format!("meta-target-{id}"),
+            diff: String::new(),
+            reasoning: "guard fixture".into(),
+            risk: EvolutionRisk::High,
+            budget_cost: 1,
+            status,
+            shadow_metrics: None,
+            signal_ids: vec![],
+            trace_ids: vec![],
+            created_at,
+            decided_at: applied_at.map(|t| t - 1),
+            decided_by: applied_at.map(|_| "operator".into()),
+            applied_at,
+            rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
+            metadata,
+        }
+    }
+
+    /// Baseline: a meta proposal with no `parent_meta_proposal_id`
+    /// pointer in its metadata is always allowed past clause A. The
+    /// engine emits these on first-pass meta proposals (no parent
+    /// chain). Pinning this so a future tightening doesn't accidentally
+    /// require parentage on every meta row.
+    #[tokio::test]
+    async fn meta_insert_with_no_parent_succeeds() {
+        let (_tmp, store) = fresh_store().await;
+        let repo =
+            ProposalsRepo::new(store.pool().clone()).with_guard(EvolutionGuardConfig::default());
+        repo.insert(&meta_proposal(
+            "evol-meta-orphan",
+            EvolutionKind::EnginePrompt,
+            1_000,
+            EvolutionStatus::Pending,
+            None,
+            // No `parent_meta_proposal_id` key in the blob — clause A skips.
+            Some(json!({"trace_descent": ["t1"]})),
+        ))
+        .await
+        .expect("orphan meta proposal must pass guard");
+    }
+
+    /// Clause A — semantic descent. An applied meta proposal becomes
+    /// the parent of a second meta proposal whose
+    /// `metadata.parent_meta_proposal_id` points at it. Reject with
+    /// `RecursionGuardViolation` carrying the parent id + kind so the
+    /// operator-facing surface can surface a precise message.
+    #[tokio::test]
+    async fn meta_insert_rejects_when_parent_is_also_meta() {
+        let (_tmp, store) = fresh_store().await;
+        let repo =
+            ProposalsRepo::new(store.pool().clone()).with_guard(EvolutionGuardConfig::default());
+        // First meta proposal — applied. Use the unguarded plain
+        // `new()` for the seed insert so we don't fight the cooldown
+        // clause while setting up clause A's fixture: a real engine
+        // would have queued + approved this one earlier than the
+        // window we test below.
+        let seed = ProposalsRepo::new(store.pool().clone());
+        let parent_id = "evol-meta-parent";
+        seed.insert(&meta_proposal(
+            parent_id,
+            EvolutionKind::EnginePrompt,
+            1_000,
+            EvolutionStatus::Applied,
+            Some(2_000),
+            None,
+        ))
+        .await
+        .unwrap();
+
+        // Child meta proposal of the same kind, pointing at the parent
+        // via the guard's namespaced metadata key. `created_at` is
+        // *outside* the cooldown window so clause B doesn't fire and
+        // mask the descent rejection — guard rails must surface the
+        // most-specific error.
+        let child_created = 1_000 + 7_200_000; // 2h after parent.applied_at
+        let child = meta_proposal(
+            "evol-meta-child",
+            EvolutionKind::EnginePrompt,
+            child_created,
+            EvolutionStatus::Pending,
+            None,
+            Some(json!({ "parent_meta_proposal_id": parent_id })),
+        );
+        let err = repo.insert(&child).await.unwrap_err();
+        match err {
+            RepoError::RecursionGuardViolation {
+                parent_id: got_parent,
+                parent_kind,
+            } => {
+                assert_eq!(got_parent, parent_id);
+                assert_eq!(parent_kind, EvolutionKind::EnginePrompt);
+            }
+            other => panic!("expected RecursionGuardViolation, got {other:?}"),
+        }
+    }
+
+    /// Clause A — non-meta parent is allowed. The engine learning from
+    /// an agent-asset proposal (e.g. a `memory_op` chain that yielded a
+    /// pattern worth promoting into engine config) is the canonical
+    /// path. Refusing this would defeat the whole "engine improves
+    /// engine" loop.
+    #[tokio::test]
+    async fn meta_insert_allows_non_meta_parent() {
+        let (_tmp, store) = fresh_store().await;
+        let repo =
+            ProposalsRepo::new(store.pool().clone()).with_guard(EvolutionGuardConfig::default());
+        let seed = ProposalsRepo::new(store.pool().clone());
+        let parent_id = "evol-mem-parent";
+        // Plain (non-meta) parent — direct insert via the unguarded
+        // repo so the guard logic doesn't get involved on this one.
+        seed.insert(&EvolutionProposal {
+            id: ProposalId::new(parent_id),
+            kind: EvolutionKind::MemoryOp,
+            target: "merge_chunks:1,2".into(),
+            diff: String::new(),
+            reasoning: "fixture parent".into(),
+            risk: EvolutionRisk::Low,
+            budget_cost: 0,
+            status: EvolutionStatus::Applied,
+            shadow_metrics: None,
+            signal_ids: vec![],
+            trace_ids: vec![],
+            created_at: 1_000,
+            decided_at: Some(1_500),
+            decided_by: Some("operator".into()),
+            applied_at: Some(2_000),
+            rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+        let child = meta_proposal(
+            "evol-meta-from-mem",
+            EvolutionKind::EnginePrompt,
+            10_000_000,
+            EvolutionStatus::Pending,
+            None,
+            Some(json!({ "parent_meta_proposal_id": parent_id })),
+        );
+        repo.insert(&child)
+            .await
+            .expect("non-meta parent must not trigger clause A");
+    }
+
+    /// Clause B — temporal cooldown. Insert + apply one meta proposal,
+    /// then a second meta proposal of the same kind 30 minutes later
+    /// hits the 1h cooldown and gets rejected. Both error fields
+    /// (last_applied_at_ms + remaining_secs) carry numbers the operator
+    /// surface can render verbatim — no further math at the call site.
+    #[tokio::test]
+    async fn meta_cooldown_rejects_within_window() {
+        let (_tmp, store) = fresh_store().await;
+        let seed = ProposalsRepo::new(store.pool().clone());
+        // Seed the prior applied meta row so the cooldown query returns
+        // a non-NULL MAX(applied_at).
+        let first_applied = 5_000_000_i64;
+        seed.insert(&meta_proposal(
+            "evol-meta-first",
+            EvolutionKind::EngineConfig,
+            first_applied - 1_000,
+            EvolutionStatus::Applied,
+            Some(first_applied),
+            None,
+        ))
+        .await
+        .unwrap();
+
+        let repo =
+            ProposalsRepo::new(store.pool().clone()).with_guard(EvolutionGuardConfig::default());
+        // Second proposal lands 30 minutes (1_800_000ms) later — well
+        // inside the default 1h (3_600_000ms) window.
+        let second_created = first_applied + 1_800_000;
+        let second = meta_proposal(
+            "evol-meta-second",
+            EvolutionKind::EngineConfig,
+            second_created,
+            EvolutionStatus::Pending,
+            None,
+            None,
+        );
+        let err = repo.insert(&second).await.unwrap_err();
+        match err {
+            RepoError::RecursionGuardCooldown {
+                last_applied_at_ms,
+                window_secs,
+                remaining_secs,
+            } => {
+                assert_eq!(last_applied_at_ms, first_applied);
+                assert_eq!(window_secs, 3_600);
+                // 30m left in a 60m window → 1800s remaining (allow
+                // ±1s wiggle for the round-up applied to remaining_ms).
+                assert!(
+                    (1_799..=1_801).contains(&remaining_secs),
+                    "remaining_secs={remaining_secs} should be ≈1800",
+                );
+            }
+            other => panic!("expected RecursionGuardCooldown, got {other:?}"),
+        }
+    }
+
+    /// Clause B — once the cooldown elapses, the same `(tenant, kind)`
+    /// can land another meta proposal. Bypass the wall clock by
+    /// rewinding the prior row's `applied_at` 2h into the past, so the
+    /// new proposal's `created_at` sits comfortably outside the 1h
+    /// window even with an absurdly low test-time clock.
+    #[tokio::test]
+    async fn meta_cooldown_allows_after_window() {
+        let (_tmp, store) = fresh_store().await;
+        let seed = ProposalsRepo::new(store.pool().clone());
+        let first_applied = 10_000_000_i64;
+        seed.insert(&meta_proposal(
+            "evol-meta-old",
+            EvolutionKind::ClusterThreshold,
+            first_applied - 1_000,
+            EvolutionStatus::Applied,
+            Some(first_applied),
+            None,
+        ))
+        .await
+        .unwrap();
+
+        // SQL-level rewind so we don't have to plumb a clock injector.
+        // 7_200_000ms = 2h, well past the 1h default cooldown.
+        sqlx::query(
+            "UPDATE evolution_proposals SET applied_at = applied_at - 7200000 WHERE id = ?",
+        )
+        .bind("evol-meta-old")
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let repo =
+            ProposalsRepo::new(store.pool().clone()).with_guard(EvolutionGuardConfig::default());
+        let second = meta_proposal(
+            "evol-meta-new",
+            EvolutionKind::ClusterThreshold,
+            first_applied,
+            EvolutionStatus::Pending,
+            None,
+            None,
+        );
+        repo.insert(&second)
+            .await
+            .expect("post-window insert must succeed");
+    }
+
+    /// Clause B — cooldown is per-tenant. Tenant A's recent meta apply
+    /// must NOT block tenant B's brand-new meta proposal. Today the
+    /// proposal struct has no `tenant_id` field (insert defaults to
+    /// `'default'` via the schema column default), so we simulate the
+    /// cross-tenant scenario by direct-UPDATE'ing the seed row's
+    /// tenant_id to a non-default value. The new insert keeps the
+    /// schema default, so the cooldown query — which binds `'default'`
+    /// — sees zero rows for that tenant and the insert succeeds.
+    #[tokio::test]
+    async fn meta_cooldown_per_tenant_independent() {
+        let (_tmp, store) = fresh_store().await;
+        let seed = ProposalsRepo::new(store.pool().clone());
+        let first_applied = 50_000_000_i64;
+        seed.insert(&meta_proposal(
+            "evol-meta-tenantA",
+            EvolutionKind::ObserverFilter,
+            first_applied - 1_000,
+            EvolutionStatus::Applied,
+            Some(first_applied),
+            None,
+        ))
+        .await
+        .unwrap();
+
+        // Move tenant A's row out of the default bucket.
+        sqlx::query("UPDATE evolution_proposals SET tenant_id = ? WHERE id = ?")
+            .bind("tenant-a")
+            .bind("evol-meta-tenantA")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        // Tenant B (default) inserts an immediately-following meta —
+        // would collide with tenant A under a global window, but the
+        // per-tenant query scopes correctly so this passes.
+        let repo =
+            ProposalsRepo::new(store.pool().clone()).with_guard(EvolutionGuardConfig::default());
+        let cross_tenant = meta_proposal(
+            "evol-meta-tenantB",
+            EvolutionKind::ObserverFilter,
+            first_applied + 60_000, // 1m after — would FAIL same tenant
+            EvolutionStatus::Pending,
+            None,
+            None,
+        );
+        repo.insert(&cross_tenant)
+            .await
+            .expect("tenant isolation must let tenant B insert despite tenant A's recent apply");
+    }
+
+    /// Non-meta inserts skip the guard entirely — the fast path stays
+    /// branchless beyond a single `is_meta()` call. Pin this with a
+    /// burst of 100 same-kind / same-target inserts at the same wall
+    /// clock; if any of them spuriously trips a cooldown / descent
+    /// check we'd see the test fail with a guard error, not a perf
+    /// regression. (Performance is NOT what this test asserts;
+    /// correctness of the early-exit is.)
+    #[tokio::test]
+    async fn non_meta_kinds_skip_guard_entirely() {
+        let (_tmp, store) = fresh_store().await;
+        let repo =
+            ProposalsRepo::new(store.pool().clone()).with_guard(EvolutionGuardConfig::default());
+        for i in 0..100 {
+            let pid = ProposalId::new(format!("evol-mem-burst-{i:03}"));
+            // Same `created_at` across all rows — under the guard,
+            // *and* if memory_op were meta-kind, this would be a
+            // textbook cooldown collision. The test relies on
+            // `is_meta() == false` short-circuiting before the
+            // cooldown query ever runs.
+            repo.insert(&EvolutionProposal {
+                id: pid.clone(),
+                kind: EvolutionKind::MemoryOp,
+                target: "merge_chunks:1,2".into(),
+                diff: String::new(),
+                reasoning: "burst".into(),
+                risk: EvolutionRisk::Low,
+                budget_cost: 0,
+                status: EvolutionStatus::Pending,
+                shadow_metrics: None,
+                signal_ids: vec![],
+                trace_ids: vec![],
+                created_at: 1_000,
+                decided_at: None,
+                decided_by: None,
+                applied_at: None,
+                rollback_of: None,
+                eval_run_id: None,
+                baseline_metrics_json: None,
+                auto_rollback_at: None,
+                auto_rollback_reason: None,
+                metadata: None,
+            })
+            .await
+            .unwrap_or_else(|e| panic!("non-meta insert #{i} hit guard path: {e:?}"));
+        }
     }
 }
