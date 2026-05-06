@@ -26,6 +26,7 @@
 
 use std::path::Path;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
@@ -33,6 +34,17 @@ use sqlx::sqlite::{
 use sqlx::{Row, SqlitePool};
 
 use crate::TenantId;
+
+/// Wall-clock unix-millis. Saturates at `i64::MAX` rather than panic
+/// if the system clock is set absurdly far in the future; clamps to
+/// 0 on pre-1970 clocks. Local helper so the federation API doesn't
+/// pull in chrono / time just to stamp a row.
+fn unix_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
 
 /// CREATE TABLE script for `tenants.sqlite`. Idempotent: re-applying
 /// is safe against an existing file. New columns must land via an
@@ -57,6 +69,25 @@ CREATE TABLE IF NOT EXISTS tenant_admins (
 
 CREATE INDEX IF NOT EXISTS idx_tenants_active
     ON tenants(deleted_at) WHERE deleted_at IS NULL;
+
+-- Phase 4 W2 B3 iter 1: per-tenant evolution federation opt-in roster.
+-- Asymmetric directional peering: a row reads "tenant `peer_tenant_id`
+-- accepts federated proposals from tenant `source_tenant_id`". A → B
+-- opt-in does NOT imply B → A. Both slugs are TenantId values; the
+-- crate enforces shape at the API boundary, not at the SQL layer, to
+-- keep this table forward-compatible with future ID shapes.
+-- `accepted_by` is the operator (admin username) who accepted on the
+-- peer side; nullable so historical / system-seeded rows don't have to
+-- pretend a human approved them.
+CREATE TABLE IF NOT EXISTS tenant_federation_peers (
+    peer_tenant_id   TEXT NOT NULL,
+    source_tenant_id TEXT NOT NULL,
+    accepted_at_ms   INTEGER NOT NULL,
+    accepted_by      TEXT,
+    PRIMARY KEY (peer_tenant_id, source_tenant_id)
+);
+CREATE INDEX IF NOT EXISTS idx_federation_peers_source
+    ON tenant_federation_peers(source_tenant_id);
 "#;
 
 /// One row from `tenants`. `deleted_at` is `Some` only on soft-
@@ -77,6 +108,19 @@ pub struct AdminRow {
     pub username: String,
     pub password_hash: String,
     pub created_at: i64,
+}
+
+/// One row from `tenant_federation_peers` (Phase 4 W2 B3 iter 1).
+///
+/// Reads as: tenant `peer_tenant_id` accepts federated proposals
+/// **from** tenant `source_tenant_id`. The opt-in is asymmetric — A
+/// accepting from B does not imply B accepts from A.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FederationPeer {
+    pub peer_tenant_id: TenantId,
+    pub source_tenant_id: TenantId,
+    pub accepted_at_ms: i64,
+    pub accepted_by: Option<String>,
 }
 
 /// Thin CRUD wrapper over the `tenants.sqlite` admin DB.
@@ -263,6 +307,123 @@ impl AdminDb {
             })
             .collect())
     }
+
+    /// Phase 4 W2 B3 iter 1: register that `peer` accepts federated
+    /// proposals from `source`. `accepted_at_ms` is sampled from
+    /// `SystemTime::now()` at insert time so callers don't have to
+    /// thread a clock — federation opt-in is an operator action, not
+    /// a replayable signal. Idempotent via the composite primary
+    /// key: adding the same `(peer, source)` pair twice is a no-op
+    /// at the row level (the existing row's timestamp / `accepted_by`
+    /// are preserved). Callers that want last-writer-wins semantics
+    /// should `remove_federation_peer` first.
+    pub async fn add_federation_peer(
+        &self,
+        peer: &TenantId,
+        source: &TenantId,
+        accepted_by: &str,
+    ) -> Result<(), AdminDbError> {
+        let accepted_at_ms = unix_now_ms();
+        sqlx::query(
+            "INSERT OR IGNORE INTO tenant_federation_peers \
+             (peer_tenant_id, source_tenant_id, accepted_at_ms, accepted_by) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(peer.as_str())
+        .bind(source.as_str())
+        .bind(accepted_at_ms)
+        .bind(accepted_by)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Revoke a federation opt-in. Returns `true` when a row was
+    /// actually deleted, `false` when no matching row existed (so
+    /// callers can distinguish idempotent revoke vs operator typo
+    /// without a separate existence check).
+    pub async fn remove_federation_peer(
+        &self,
+        peer: &TenantId,
+        source: &TenantId,
+    ) -> Result<bool, AdminDbError> {
+        let res = sqlx::query(
+            "DELETE FROM tenant_federation_peers \
+             WHERE peer_tenant_id = ?1 AND source_tenant_id = ?2",
+        )
+        .bind(peer.as_str())
+        .bind(source.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// "What does tenant `peer` accept from?" — returns every row
+    /// where this tenant is the receiving side, ordered by
+    /// `source_tenant_id` for stable output.
+    pub async fn list_federation_sources_for(
+        &self,
+        peer: &TenantId,
+    ) -> Result<Vec<FederationPeer>, AdminDbError> {
+        let rows = sqlx::query(
+            "SELECT peer_tenant_id, source_tenant_id, accepted_at_ms, accepted_by \
+             FROM tenant_federation_peers \
+             WHERE peer_tenant_id = ?1 \
+             ORDER BY source_tenant_id ASC",
+        )
+        .bind(peer.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        Self::decode_federation_rows(rows)
+    }
+
+    /// "Who accepts from tenant `source`?" — returns every row where
+    /// this tenant is the publishing side, ordered by
+    /// `peer_tenant_id` for stable output. Used at rebroadcast time
+    /// to fan a source apply out to interested peers (driven by the
+    /// `idx_federation_peers_source` index).
+    pub async fn list_federation_peers_of(
+        &self,
+        source: &TenantId,
+    ) -> Result<Vec<FederationPeer>, AdminDbError> {
+        let rows = sqlx::query(
+            "SELECT peer_tenant_id, source_tenant_id, accepted_at_ms, accepted_by \
+             FROM tenant_federation_peers \
+             WHERE source_tenant_id = ?1 \
+             ORDER BY peer_tenant_id ASC",
+        )
+        .bind(source.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        Self::decode_federation_rows(rows)
+    }
+
+    fn decode_federation_rows(
+        rows: Vec<sqlx::sqlite::SqliteRow>,
+    ) -> Result<Vec<FederationPeer>, AdminDbError> {
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let peer_slug: String = r.get("peer_tenant_id");
+            let source_slug: String = r.get("source_tenant_id");
+            let peer_tenant_id = TenantId::new(peer_slug.clone()).map_err(|e| {
+                AdminDbError::Sqlx(sqlx::Error::Decode(
+                    format!("invalid peer_tenant_id '{peer_slug}': {e}").into(),
+                ))
+            })?;
+            let source_tenant_id = TenantId::new(source_slug.clone()).map_err(|e| {
+                AdminDbError::Sqlx(sqlx::Error::Decode(
+                    format!("invalid source_tenant_id '{source_slug}': {e}").into(),
+                ))
+            })?;
+            out.push(FederationPeer {
+                peer_tenant_id,
+                source_tenant_id,
+                accepted_at_ms: r.get("accepted_at_ms"),
+                accepted_by: r.get("accepted_by"),
+            });
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -366,6 +527,123 @@ mod tests {
         let (db, _tmp) = fresh().await;
         let nope = TenantId::new("never-existed").unwrap();
         assert!(db.get(&nope).await.unwrap().is_none());
+    }
+
+    // ----- Phase 4 W2 B3 iter 1: tenant_federation_peers -----
+
+    #[tokio::test]
+    async fn add_then_list_round_trip() {
+        let (db, _tmp) = fresh().await;
+        let acme = TenantId::new("acme").unwrap();
+        let bravo = TenantId::new("bravo").unwrap();
+
+        db.add_federation_peer(&acme, &bravo, "alice").await.unwrap();
+
+        let sources = db.list_federation_sources_for(&acme).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].peer_tenant_id, acme);
+        assert_eq!(sources[0].source_tenant_id, bravo);
+        assert_eq!(sources[0].accepted_by.as_deref(), Some("alice"));
+        // Stamp must be a sane unix-millis (post-2001) without us
+        // having to thread a clock.
+        assert!(sources[0].accepted_at_ms > 1_000_000_000_000);
+
+        let peers = db.list_federation_peers_of(&bravo).await.unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_tenant_id, acme);
+        assert_eq!(peers[0].source_tenant_id, bravo);
+    }
+
+    #[tokio::test]
+    async fn add_is_idempotent_via_unique_pk() {
+        let (db, _tmp) = fresh().await;
+        let acme = TenantId::new("acme").unwrap();
+        let bravo = TenantId::new("bravo").unwrap();
+
+        db.add_federation_peer(&acme, &bravo, "alice").await.unwrap();
+        // Second add must not error and must not duplicate the row.
+        db.add_federation_peer(&acme, &bravo, "bob").await.unwrap();
+
+        let sources = db.list_federation_sources_for(&acme).await.unwrap();
+        assert_eq!(sources.len(), 1, "INSERT OR IGNORE must not duplicate");
+        // First-writer-wins on idempotent re-add: the original
+        // `accepted_by` is preserved so callers can rely on the stored
+        // value being the operator who actually accepted.
+        assert_eq!(sources[0].accepted_by.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn remove_returns_true_on_hit_false_on_miss() {
+        let (db, _tmp) = fresh().await;
+        let acme = TenantId::new("acme").unwrap();
+        let bravo = TenantId::new("bravo").unwrap();
+        let charlie = TenantId::new("charlie").unwrap();
+
+        db.add_federation_peer(&acme, &bravo, "alice").await.unwrap();
+
+        // Hit: row exists, gets deleted.
+        let hit = db.remove_federation_peer(&acme, &bravo).await.unwrap();
+        assert!(hit, "first remove must report rows_affected > 0");
+
+        // Miss: row already gone.
+        let miss_repeat = db.remove_federation_peer(&acme, &bravo).await.unwrap();
+        assert!(!miss_repeat, "second remove on same pair must be false");
+
+        // Miss: pair never existed.
+        let miss_unknown = db.remove_federation_peer(&acme, &charlie).await.unwrap();
+        assert!(!miss_unknown, "remove on never-added pair must be false");
+
+        // Post-condition: no rows remain.
+        assert!(db.list_federation_sources_for(&acme).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn asymmetry_holds() {
+        // A → B opt-in (A accepts from B) must NOT show up when
+        // listing what B accepts from. Asymmetric directional
+        // peering is the entire point of the schema.
+        let (db, _tmp) = fresh().await;
+        let a = TenantId::new("alpha").unwrap();
+        let b = TenantId::new("bravo").unwrap();
+
+        db.add_federation_peer(&a, &b, "alice").await.unwrap();
+
+        // A's perspective: yes, accepts from B.
+        let a_sources = db.list_federation_sources_for(&a).await.unwrap();
+        assert_eq!(a_sources.len(), 1);
+        assert_eq!(a_sources[0].source_tenant_id, b);
+
+        // B's perspective: accepts from nobody.
+        let b_sources = db.list_federation_sources_for(&b).await.unwrap();
+        assert!(b_sources.is_empty(), "B must not inherit A's opt-in");
+
+        // From B's publishing side: A is a peer.
+        let b_peers = db.list_federation_peers_of(&b).await.unwrap();
+        assert_eq!(b_peers.len(), 1);
+        assert_eq!(b_peers[0].peer_tenant_id, a);
+
+        // From A's publishing side: nobody listens.
+        let a_peers = db.list_federation_peers_of(&a).await.unwrap();
+        assert!(a_peers.is_empty(), "A is not a source for anyone");
+    }
+
+    #[tokio::test]
+    async fn accepted_by_is_recorded() {
+        let (db, _tmp) = fresh().await;
+        let acme = TenantId::new("acme").unwrap();
+        let bravo = TenantId::new("bravo").unwrap();
+        let charlie = TenantId::new("charlie").unwrap();
+
+        db.add_federation_peer(&acme, &bravo, "alice-the-operator").await.unwrap();
+        db.add_federation_peer(&acme, &charlie, "bob-the-operator").await.unwrap();
+
+        let sources = db.list_federation_sources_for(&acme).await.unwrap();
+        // Ordered by source_tenant_id ASC: bravo before charlie.
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].source_tenant_id, bravo);
+        assert_eq!(sources[0].accepted_by.as_deref(), Some("alice-the-operator"));
+        assert_eq!(sources[1].source_tenant_id, charlie);
+        assert_eq!(sources[1].accepted_by.as_deref(), Some("bob-the-operator"));
     }
 
     #[tokio::test]
