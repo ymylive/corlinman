@@ -9,7 +9,10 @@
 //!   - No mock-outs of internal state. Every scenario composes public APIs.
 //!   - Loopback + ephemeral ports only (`127.0.0.1:0`).
 //!   - `tokio::time::pause()` / `advance()` where timing matters.
-//!   - Every test must complete well under 5 seconds on a dev machine.
+//!   - Per-phase deadlines (reqwest timeout, hook-bus spin) are tight;
+//!     overall wall-clock budgets are catastrophic-regression sentinels
+//!     and must absorb workspace-level CPU contention. See
+//!     `full_batch_chain`'s closing assertion for the rationale.
 //!
 //! These are the "did someone quietly regress a B5 behaviour?" regression
 //! tripwires; detailed behaviour is covered by each crate's own test
@@ -609,9 +612,26 @@ async fn full_batch_chain() {
     gw.shutdown().await;
     nb_server.shutdown().await;
 
+    // Wall-clock budget is a catastrophic-regression sentinel, not a
+    // micro-benchmark. The internal sub-deadlines (3s reqwest, 2s
+    // nodebridge spin, 1s hook-bus spin) already pin each phase tightly;
+    // this assertion only catches a multi-second regression slipping
+    // past every per-phase guard.
+    //
+    // Workspace-pressure flake fix: under `cargo test --workspace`
+    // there are 25+ test binaries racing for CPU and the scheduler. Two
+    // argon2 hashes (handler-side verify on POST + the test-side hash
+    // in `canvas_config`), a NodeBridge WS handshake, two server
+    // boots and the reqwest client init can credibly run past 5s of
+    // wall clock even though no individual sub-deadline trips. Per-run
+    // local timing on a hot cache stays ~150-300ms, but contended runs
+    // observed up to ~6-8s — well below the per-deadline ceilings, but
+    // over the previous 5s sentinel. Bump to 30s so this stays a
+    // catastrophic-regression catch (e.g. an accidentally synchronous
+    // server boot loop) and stops red-flagging healthy contended runs.
     let elapsed = overall.elapsed();
     assert!(
-        elapsed < Duration::from_secs(5),
-        "full_batch_chain must complete under 5s, took {elapsed:?}",
+        elapsed < Duration::from_secs(30),
+        "full_batch_chain must complete under 30s, took {elapsed:?}",
     );
 }
