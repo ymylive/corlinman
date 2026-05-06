@@ -163,6 +163,7 @@ impl Default for Config {
             evolution: EvolutionConfig::default(),
             memory: MemoryConfig::default(),
             persona: PersonaConfig::default(),
+            tenants: TenantsConfig::default(),
             meta: Meta::default(),
         }
     }
