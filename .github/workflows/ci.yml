@@ -9,15 +9,19 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Unified workspace gate. Each tool runs as its own job for parallelism so a
+# slow rust-test doesn't block the python lint feedback loop. Commands here
+# mirror the Makefile (`make lint` / `make test`) so CI cannot drift from
+# local-dev. See docs/ci-status.md for per-job expectations.
 jobs:
-  rust:
-    name: rust (fmt / clippy / nextest)
+  # ---------------------------------------------------------------------------
+  # Rust plane (fmt / clippy / nextest split into parallel jobs)
+  # ---------------------------------------------------------------------------
+  rust-fmt:
+    name: rust-fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install protobuf-compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
 
       # rust-toolchain.toml pins the channel (currently 1.95.0) and components
       # (rustfmt, clippy); dtolnay/rust-toolchain@master honours that file so
@@ -26,7 +30,48 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
-          components: rustfmt, clippy
+          components: rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  rust-clippy:
+    name: rust-clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ci
+          cache-on-failure: true
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-test:
+    name: rust-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -39,17 +84,14 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: fmt
-        run: cargo fmt --all -- --check
-
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: nextest
+      - name: cargo nextest run
         run: cargo nextest run --workspace
 
-  python:
-    name: python (ruff / mypy / pytest)
+  # ---------------------------------------------------------------------------
+  # Python plane (ruff / mypy / pytest split into parallel jobs)
+  # ---------------------------------------------------------------------------
+  py-ruff:
+    name: py-ruff
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,20 +110,74 @@ jobs:
       - name: uv sync
         run: uv sync --dev
 
-      - name: ruff
+      - name: ruff check
         run: uv run ruff check .
 
-      # mypy is scoped to source packages (tests are excluded in pyproject);
-      # strict mode is off while the Python plane is still landing — see
-      # docs/ci-status.md for the re-enablement plan.
-      - name: mypy
-        run: uv run mypy python/packages/
+  py-mypy:
+    name: py-mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: pytest
+      - name: Install protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync
+        run: uv sync --dev
+
+      # Generated proto stubs are imported by the python plane; without them
+      # mypy can't resolve corlinman_grpc symbols.
+      - name: generate Python stubs
+        run: bash scripts/gen-proto.sh
+
+      - name: mypy
+        run: uv run mypy .
+
+  py-test:
+    name: py-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: uv sync
+        run: uv sync --dev
+
+      - name: generate Python stubs
+        run: bash scripts/gen-proto.sh
+
+      - name: pytest (non-live)
         run: uv run pytest -m "not live_llm and not live_transport"
 
-  ui:
-    name: ui (typecheck / lint / test)
+  # ---------------------------------------------------------------------------
+  # UI plane (typecheck / lint / test split into parallel jobs)
+  # ---------------------------------------------------------------------------
+  ui-typecheck:
+    name: ui-typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -91,9 +187,10 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Enable pnpm
+      - name: Enable pnpm 9
         uses: pnpm/action-setup@v4
         with:
+          version: 9
           run_install: false
 
       - name: Get pnpm store dir
@@ -114,15 +211,80 @@ jobs:
       - name: typecheck
         run: pnpm -C ui typecheck
 
+  ui-lint:
+    name: ui-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable pnpm 9
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Get pnpm store dir
+        id: pnpm-store
+        run: echo "dir=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.dir }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
       - name: lint
         run: pnpm -C ui lint
 
-      # vitest exits non-zero when no test files match; until the UI gains
-      # real unit tests (M7), pass `--passWithNoTests` at invocation time so
-      # we exercise the full `pnpm test` wiring without red-flagging CI.
-      - name: test
-        run: pnpm -C ui exec vitest run --passWithNoTests
+  ui-test:
+    name: ui-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable pnpm 9
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Get pnpm store dir
+        id: pnpm-store
+        run: echo "dir=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.dir }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: test
+        run: pnpm -C ui test
+
+  # ---------------------------------------------------------------------------
+  # Auxiliary gates (kept from the previous ci.yml; not part of the 9-job
+  # core gate but still run on every PR + push to main).
+  # ---------------------------------------------------------------------------
   proto-sync:
     name: proto-sync (generated stubs committed)
     runs-on: ubuntu-latest
@@ -240,3 +402,31 @@ jobs:
 
       - name: cargo deny check
         run: cargo deny --all-features check
+
+  # ---------------------------------------------------------------------------
+  # Aggregator: a single required check that fans-in the 9 core gate jobs so
+  # branch protection only needs one rule. Auxiliary jobs above run alongside
+  # but are not fanned-in here.
+  # ---------------------------------------------------------------------------
+  gate:
+    name: gate (all required checks)
+    if: always()
+    needs:
+      - rust-fmt
+      - rust-clippy
+      - rust-test
+      - py-ruff
+      - py-mypy
+      - py-test
+      - ui-typecheck
+      - ui-lint
+      - ui-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "One or more required gate jobs failed or were cancelled."
+            exit 1
+          fi
+          echo "All required gate jobs succeeded."
