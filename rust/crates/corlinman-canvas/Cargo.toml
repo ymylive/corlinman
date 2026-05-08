@@ -1,0 +1,20 @@
+[package]
+name = "corlinman-canvas"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Canvas Host renderer (Phase 4 W3 C3). Pure-function transform from producer-submitted Canvas frame payloads (code, mermaid, table, latex, sparkline) into Tidepool-styled HTML fragments suitable for the admin UI transcript and other Canvas consumers."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
