@@ -903,6 +903,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "corlinman-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "corlinman-memory-host"
 version = "0.1.0"
 dependencies = [

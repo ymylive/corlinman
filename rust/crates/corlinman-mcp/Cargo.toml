@@ -1,0 +1,21 @@
+[package]
+name = "corlinman-mcp"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Model Context Protocol (2024-11-05) server for corlinman. Hosts /mcp WebSocket endpoint and bridges MCP capabilities (tools/resources/prompts) to corlinman's PluginRegistry / MemoryHost / SkillRegistry. Schema crate is also reused by the C2 outbound MCP-stdio plugin client."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
