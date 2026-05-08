@@ -7,8 +7,10 @@
 //! capability adapters on top. The `schema` module is also reused
 //! verbatim by the C2 outbound MCP-stdio plugin client.
 
+pub mod error;
 pub mod schema;
 
+pub use error::McpError;
 pub use schema::{
     error_codes, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JSONRPC_VERSION,
     MCP_PROTOCOL_VERSION,
