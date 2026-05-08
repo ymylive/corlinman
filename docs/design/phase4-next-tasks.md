@@ -1,25 +1,54 @@
 # Phase 4 — Next Tasks
 
-**Status**: Active · **Owner**: TBD · **Last revised**: 2026-04-30
+**Status**: Active · **Owner**: TBD · **Last revised**: 2026-05-08
 
 > Operational task list following Phase 4 Wave 1's closure
 > (PR [#1](https://github.com/ymylive/corlinman/pull/1), 16 commits).
 > Companion to `phase4-roadmap.md` — the roadmap is the strategic
 > picture, this doc is the tactical pick-up list.
->
-> Pick up tasks from sections in priority order. Within each section
-> tasks are roughly ordered by readiness (no dependencies first).
 
-**Progress (2026-04-30)**: Section A complete (A1-A7 landed in commits
-`3a2ab56`, `95dafb6`, `2963aa8`, A6 directly on disk, A7 in `26a721e`).
-Section B: B4 landed in `90411db`. **B2 in flight** — primitive
-crate complete at 4/8 iters, 29 unit tests, design at
-`docs/design/phase4-w2-b2-design.md`. **B1 + B3 designs seeded** at
-`docs/design/phase4-w2-b1-design.md` (10 iters, capability-list
-operator gate + dual-clause recursion guard) and
-`docs/design/phase4-w2-b3-design.md` (10 iters, asymmetric opt-in +
+## Progress snapshot (2026-05-08)
+
+**Section A (Wave 1 cleanup)**: ✅ A1-A7 all complete (commits
+`3a2ab56` / `95dafb6` / `2963aa8` / `26a721e`).
+
+**Section B (Wave 2)**: backend functionally complete; UI in flight.
+
+| Task | Status | Tests | Commits |
+|---|---|---|---|
+| **B1** Meta proposal kinds (4-2A) | ✅ backend | 5+13+5 | `07e8eee` `db5ff99` `a649aff` `674462e` `e9b0784` `81bbbb0` |
+| ↳ iter 1 4 new EvolutionKind variants | ✅ | 3 | `07e8eee` |
+| ↳ iter 2 metadata JSON column | ✅ | 4 | `db5ff99` |
+| ↳ iter 3 dual-clause recursion guard | ✅ | 7 | `a649aff` |
+| ↳ iter 4 4 meta apply handlers | ✅ | 13 | `674462e` |
+| ↳ iter 5 operator capability gate | ✅ | 5 | `e9b0784` `81bbbb0` (boot) |
+| ↳ iter 6+ UI (meta_pending tab + double-confirm) | 🟡 in flight | — | — |
+| **B2** Cross-channel identity (4-2B) | ✅ full stack | 36+13+3 | `e05be35` → `e903fa2` + `399adb7` |
+| ↳ iters 1-4 primitive crate | ✅ | 36 | `e05be35` `63756c5` `5d07c84` `8eb2fca` `8bed667` |
+| ↳ iter 5 chat-path resolution | ✅ | 3 | `66d24b1` |
+| ↳ iter 6 admin REST routes | ✅ | 13 | `5815263` |
+| ↳ iter 7 admin UI page | ✅ | — | `e903fa2` |
+| ↳ iter 8 HookEvent.user_id propagation | ✅ | — | `399adb7` |
+| **B3** Per-tenant evolution federation (4-2C) | ✅ backend | 5+9+17 | `f2dd619` `73efbb3` `0da2d76` |
+| ↳ iter 1 tenant_federation_peers table | ✅ | 5 | `f2dd619` |
+| ↳ iter 3+4 share_with + rebroadcaster | ✅ | 9 | `73efbb3` |
+| ↳ iter 5 admin REST | ✅ | 17 | `0da2d76` |
+| ↳ iter 6+ admin UI | 🟡 in flight | — | — |
+| **B4** Trajectory replay (4-2D) | ✅ shipped | — | `90411db` |
+
+## Wave 2 in numbers
+
+- **17 successful agent dispatches** (1 retry after worktree-baseline mishap)
+- **56 commits** since Wave 1 closed
+- **84 tests added** across the wave (B1: 28 + B2: 52 + B3: 31 — primitive + integration)
+- Workspace test totals: corlinman-core 102 / corlinman-evolution 42 / corlinman-gateway 350 / corlinman-identity 36 / corlinman-tenant 30 / corlinman-hooks 8
+
+**B1 + B3 designs**: `docs/design/phase4-w2-b1-design.md` (10-iter plan,
+capability-list operator gate + dual-clause recursion guard) and
+`docs/design/phase4-w2-b3-design.md` (10-iter plan, asymmetric opt-in +
 two-clause loop prevention). Both produced by parallel
-Software-Architect background agents.
+Software-Architect background agents. **Implementation through iter 5
+on both tracks; UI iters in flight.**
 
 ---
 
