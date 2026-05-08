@@ -25,8 +25,10 @@
 //! the [`ChatBackend`] trait. `grpc::GrpcBackend` is the production wiring;
 //! tests inject `mock::MockBackend`.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::{
     extract::State,
@@ -39,8 +41,11 @@ use axum::{
     Json, Router,
 };
 use corlinman_agent_client::tool_callback::{PlaceholderExecutor, ToolExecutor};
-use corlinman_core::session::{SessionMessage, SessionRole, SessionStore};
-use corlinman_core::CorlinmanError;
+use corlinman_core::{
+    config::Config,
+    session::{SessionMessage, SessionRole, SessionStore},
+    CorlinmanError,
+};
 use corlinman_identity::IdentityStore;
 use corlinman_plugins::runtime::jsonrpc_stdio::{execute as stdio_execute, DEFAULT_TIMEOUT_MS};
 use corlinman_plugins::runtime::service_grpc::ServiceRuntime;
@@ -178,21 +183,57 @@ pub type BackendRx = Pin<Box<dyn Stream<Item = Result<ServerFrame, CorlinmanErro
 #[derive(Debug, Clone, Default)]
 pub struct ModelRedirect {
     /// Alias map: request model → resolved model.
-    pub aliases: std::collections::HashMap<String, String>,
+    pub aliases: HashMap<String, String>,
     /// Fallback target when the request model is unknown. Empty = no fallback.
     pub default: String,
     /// Known models (typically provider `supports` union). Empty = skip the
     /// fallback check entirely (treat every model as known).
-    pub known_models: std::collections::HashSet<String>,
+    pub known_models: HashSet<String>,
 }
 
 impl ModelRedirect {
     /// Convenience constructor for tests / boot code.
     pub fn new(
-        aliases: std::collections::HashMap<String, String>,
+        aliases: HashMap<String, String>,
         default: String,
-        known_models: std::collections::HashSet<String>,
+        known_models: HashSet<String>,
     ) -> Self {
+        Self {
+            aliases,
+            default,
+            known_models,
+        }
+    }
+
+    /// Build the chat-route view of `[models]` from the live gateway config.
+    ///
+    /// The config schema does not currently expose provider-level `supports`,
+    /// so the conservative known set is aliases + alias targets + the resolved
+    /// default model. That is enough to make an obviously unknown request use
+    /// `models.default` instead of leaking through to the Python provider
+    /// registry where it becomes an upstream ModelNotFound.
+    pub fn from_config(cfg: &Config) -> Self {
+        let aliases: HashMap<String, String> = cfg
+            .models
+            .aliases
+            .iter()
+            .map(|(alias, entry)| (alias.clone(), entry.target().to_string()))
+            .collect();
+        let mut known_models = HashSet::new();
+        for (alias, target) in &aliases {
+            known_models.insert(alias.clone());
+            known_models.insert(target.clone());
+        }
+
+        let configured_default = cfg.models.default.trim();
+        let default = aliases
+            .get(configured_default)
+            .cloned()
+            .unwrap_or_else(|| configured_default.to_string());
+        if !default.is_empty() {
+            known_models.insert(default.clone());
+        }
+
         Self {
             aliases,
             default,
@@ -266,6 +307,10 @@ pub struct ChatState {
     /// Model alias + fallback configuration. Default = pass-through for every
     /// model (empty aliases + empty known_models).
     pub model_redirect: Arc<ModelRedirect>,
+    /// Live config source for model aliases/default. When present, the handler
+    /// rebuilds a small [`ModelRedirect`] snapshot per request so config reloads
+    /// affect the chat route without rebuilding the router.
+    pub model_config: Option<Arc<ArcSwap<Config>>>,
     /// Optional tool-approval gate (Sprint 2 T3). When present, every tool
     /// call is wrapped in an [`ApprovalToolExecutor`] for the duration of
     /// the request, so `Denied` / `Timeout` short-circuit to structured
@@ -301,6 +346,7 @@ impl ChatState {
             session_store: None,
             session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
             model_redirect: Arc::new(ModelRedirect::default()),
+            model_config: None,
             approval_gate: None,
             identity_store: None,
         }
@@ -316,6 +362,7 @@ impl ChatState {
             session_store: None,
             session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
             model_redirect: Arc::new(ModelRedirect::default()),
+            model_config: None,
             approval_gate: None,
             identity_store: None,
         }
@@ -336,6 +383,7 @@ impl ChatState {
             session_store: None,
             session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
             model_redirect: Arc::new(ModelRedirect::default()),
+            model_config: None,
             approval_gate: None,
             identity_store: None,
         }
@@ -365,6 +413,7 @@ impl ChatState {
             session_store: None,
             session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
             model_redirect: Arc::new(ModelRedirect::default()),
+            model_config: None,
             approval_gate: None,
             identity_store: None,
         }
@@ -375,6 +424,13 @@ impl ChatState {
     /// unknown-model fallback to `config.models.default`.
     pub fn with_model_redirect(mut self, redirect: ModelRedirect) -> Self {
         self.model_redirect = Arc::new(redirect);
+        self.model_config = None;
+        self
+    }
+
+    /// Attach the shared live config handle for model alias/default resolution.
+    pub fn with_live_model_config(mut self, config: Arc<ArcSwap<Config>>) -> Self {
+        self.model_config = Some(config);
         self
     }
 
@@ -811,7 +867,15 @@ async fn handle_chat(
     // load so the request `model` field is final by the time we build the
     // `ChatStart` frame and run downstream provider routing.
     let original_model = req.model.clone();
-    match apply_model_aliases(&req.model, &state.model_redirect) {
+    let live_redirect;
+    let redirect = if let Some(config) = state.model_config.as_ref() {
+        let cfg = config.load();
+        live_redirect = ModelRedirect::from_config(&cfg);
+        &live_redirect
+    } else {
+        state.model_redirect.as_ref()
+    };
+    match apply_model_aliases(&req.model, redirect) {
         ResolvedModel::Aliased { resolved } => {
             tracing::debug!(
                 requested = %original_model,
@@ -1713,8 +1777,10 @@ mod mock {
 mod tests {
     use super::mock::MockBackend;
     use super::*;
+    use arc_swap::ArcSwap;
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
+    use corlinman_core::config::Config;
     use corlinman_proto::v1::{Done, ErrorInfo, TokenDelta};
     use tower::ServiceExt;
 
@@ -1726,10 +1792,7 @@ mod tests {
 
     #[test]
     fn parse_session_key_splits_first_colon() {
-        assert_eq!(
-            parse_session_key("qq:1234"),
-            Some(("qq", "1234")),
-        );
+        assert_eq!(parse_session_key("qq:1234"), Some(("qq", "1234")),);
         // Channel-internal sub-namespacing must survive — we only split
         // on the first colon, not every colon.
         assert_eq!(
@@ -2182,6 +2245,50 @@ mod tests {
 
     fn app_with_redirect(backend: Arc<dyn ChatBackend>, redirect: ModelRedirect) -> Router {
         router_with_state(ChatState::new(backend).with_model_redirect(redirect))
+    }
+
+    #[test]
+    fn model_redirect_from_config_marks_default_as_known() {
+        let mut cfg = Config::default();
+        cfg.models.default = "gpt-5.5".into();
+
+        let redirect = ModelRedirect::from_config(&cfg);
+
+        assert_eq!(redirect.default, "gpt-5.5");
+        assert!(redirect.known_models.contains("gpt-5.5"));
+        assert!(matches!(
+            apply_model_aliases("definitely-not-real", &redirect),
+            ResolvedModel::FallbackDefault { ref resolved } if resolved == "gpt-5.5"
+        ));
+    }
+
+    #[tokio::test]
+    async fn live_model_config_unknown_model_falls_back_to_default() {
+        let mut cfg = Config::default();
+        cfg.models.default = "gpt-5.5".into();
+        let config = Arc::new(ArcSwap::from_pointee(cfg));
+        let backend = Arc::new(MockBackend::with_frames(vec![token("ok"), done("stop")]));
+        let captured_start = backend.captured_start.clone();
+        let app = router_with_state(ChatState::new(backend).with_live_model_config(config));
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "model": "definitely-not-real",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": false
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let captured = captured_start.lock().await.clone().expect("start captured");
+        assert_eq!(captured.model, "gpt-5.5");
     }
 
     #[tokio::test]
