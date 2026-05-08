@@ -174,6 +174,9 @@ async fn second_request_sees_previous_assistant_message_prepended() {
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["choices"][0]["message"]["content"], "I said I am an AI.");
 
     // The backend's second ChatStart must contain the prior user+assistant
     // ahead of the new user turn — that's the whole point of T4.
@@ -198,7 +201,11 @@ async fn second_request_sees_previous_assistant_message_prepended() {
 
     // Store now holds 4 messages total after the second turn.
     let history = store.load("s1").await.unwrap();
-    assert_eq!(history.len(), 4);
+    assert_eq!(
+        history.len(),
+        4,
+        "expected 4 persisted messages after turn 2, got {history:?}"
+    );
     assert_eq!(history[2].content, "what did you say?");
     assert_eq!(history[3].content, "I said I am an AI.");
 }

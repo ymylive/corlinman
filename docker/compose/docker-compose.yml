@@ -19,9 +19,15 @@ services:
     env_file:
       - ../../.env
     environment:
+      BIND: 0.0.0.0
+      CORLINMAN_PY_ADDR: 127.0.0.1:50051
       CORLINMAN_DATA_DIR: /data
       CORLINMAN_UI_DIR: /app/ui-static
+    command: ["/app/start.sh"]
     volumes:
+      # Single-container supervisor: bootstrap py-config, start Python agent,
+      # then exec the Rust gateway.
+      - ../start.sh:/app/start.sh:ro
       # Data directory (config.toml / plugins/ / agents/ / knowledge/ / vector/ / logs/)
       - ~/.corlinman:/data
       # Docker socket for plugin sandbox (read-only; bollard uses it to spawn children)

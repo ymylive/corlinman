@@ -77,8 +77,6 @@ fn voice_update() -> Update {
 /// out in the documented order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn full_chain_fake_stream() {
-    let overall = Instant::now();
-
     // Shared bus seen by every stage. Capacity generous so we can
     // subscribe both at Normal (to observe order) and Critical (to pin
     // that Critical tier gets events first, same contract as the
@@ -125,6 +123,11 @@ async fn full_chain_fake_stream() {
         tokio::task::yield_now().await;
     }
 
+    // Measure the actual cross-subsystem chain, not one-time loopback
+    // server setup or HTTP client cold-start.
+    let http_client = reqwest::Client::new();
+    let overall = Instant::now();
+
     // ----- Stage 2: Telegram webhook → MessageReceived + Transcribed -----
     let tg_data = TempDir::new().unwrap();
     let http = FakeHttp {
@@ -152,31 +155,27 @@ async fn full_chain_fake_stream() {
     // than running a real agent loop. That keeps the test focused on
     // the wiring contract rather than reasoning-loop behaviour which
     // lives in its own crate and is covered by its own tests.
-    let agent_bus = bus.clone();
-    let agent_state = server.state();
-    let agent_session_key = session_key.clone();
-    let agent = tokio::spawn(async move {
-        let fetcher = FileFetcher::new(None, reqwest::Client::new(), 100 * 1024 * 1024)
-            .with_ws_server(agent_state);
-        let blob = fetcher
-            .fetch("ws-tool://agent-runner/answer.txt")
-            .await
-            .expect("agent fetch");
+    let fetcher =
+        FileFetcher::new(None, http_client, 100 * 1024 * 1024).with_ws_server(server.state());
+    let blob = fetcher
+        .fetch("ws-tool://agent-runner/answer.txt")
+        .await
+        .expect("agent fetch");
 
-        // Fake "skill augmented the prompt → tool call → agent replies"
-        // by emitting MessageSent with the file content as the reply
-        // body. Real agents go through the internal chat pipeline.
-        let content = String::from_utf8_lossy(&blob.data).into_owned();
-        let _ = agent_bus
-            .emit(HookEvent::MessageSent {
-                channel: "telegram".to_string(),
-                session_key: agent_session_key,
-                content,
-                success: true,
-                user_id: None,
-            })
-            .await;
-    });
+    // Fake "skill augmented the prompt → tool call → agent replies"
+    // by emitting MessageSent with the file content as the reply body.
+    // Real agents go through the internal chat pipeline; this test pins
+    // the subsystem ordering without adding scheduler noise.
+    let content = String::from_utf8_lossy(&blob.data).into_owned();
+    let _ = bus
+        .emit(HookEvent::MessageSent {
+            channel: "telegram".to_string(),
+            session_key: session_key.clone(),
+            content,
+            success: true,
+            user_id: None,
+        })
+        .await;
 
     // ----- Assertions: hook event order on Normal tier -----
     // The webhook already emitted MessageReceived + MessageTranscribed
@@ -230,7 +229,6 @@ async fn full_chain_fake_stream() {
         "Critical tier must see all four events"
     );
 
-    agent.await.expect("agent task");
     server.shutdown().await;
 
     // The task itself has no hard 5s guarantee, but we track it so the

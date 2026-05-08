@@ -176,7 +176,7 @@ const shouldRun = process.env.CORLINMAN_E2E === "1";
     // Monaco needs a moment to mount before the Save button is enabled.
     await expect(page.getByTestId("agent-save-btn")).toBeEnabled({ timeout: 5000 });
     await page.getByTestId("agent-save-btn").click();
-    await expect(page.getByText("保存成功")).toBeVisible();
+    await expect(page.getByText(/^(保存成功|Saved)$/)).toBeVisible();
   });
 
   test("config save round-trips and surfaces version", async ({ page }) => {
