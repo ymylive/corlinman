@@ -10,7 +10,7 @@
 //! Five artifact kinds are pinned for C3:
 //!
 //! - `code`      → syntect-highlighted HTML — **iter 2 (live)**
-//! - `table`     → markdown / CSV → `<table>` — iter 3
+//! - `table`     → markdown / CSV → `<table>` — **iter 3 (live)**
 //! - `latex`     → katex-rs → MathML — iter 4
 //! - `sparkline` → hand-rolled SVG — iter 5
 //! - `mermaid`   → deno_core sandbox → SVG — iter 6
@@ -68,6 +68,13 @@ impl Renderer {
         match &payload.body {
             ArtifactBody::Code { language, source } => {
                 adapters::code::render(language, source, theme)
+            }
+            ArtifactBody::Table { markdown, csv } => {
+                adapters::table::render(
+                    markdown.as_deref(),
+                    csv.as_deref(),
+                    theme,
+                )
             }
             other_kind => Err(CanvasError::Unimplemented {
                 kind: artifact_body_kind(other_kind),

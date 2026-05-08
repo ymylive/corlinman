@@ -123,18 +123,13 @@ fn unknown_kind_round_trips_as_error() {
 fn renderer_stub_returns_unimplemented_for_unwired_kinds() {
     let renderer = Renderer::new();
 
+    // Iter 2 wired Code, iter 3 wired Table. Mermaid / Latex /
+    // Sparkline still stub.
     let unwired: Vec<(ArtifactKind, ArtifactBody)> = vec![
         (
             ArtifactKind::Mermaid,
             ArtifactBody::Mermaid {
                 diagram: "graph LR; A-->B".into(),
-            },
-        ),
-        (
-            ArtifactKind::Table,
-            ArtifactBody::Table {
-                markdown: Some("| a |\n|---|\n| 1 |".into()),
-                csv: None,
             },
         ),
         (

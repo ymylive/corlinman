@@ -26,6 +26,14 @@ syntect = { version = "5", default-features = false, features = [
     "html",
     "parsing",
 ] }
+# Iter 3 — GFM markdown tables. `pulldown-cmark` is pure-Rust, no
+# C deps, ~30 KB to the build. We only enable the parser; HTML
+# emission goes through our own writer so we can scope class names
+# and avoid the wrapper `<p>` tags `push_html` would emit.
+pulldown-cmark = { version = "0.10", default-features = false }
+# Iter 3 — CSV table source. Tiny crate; the `serde` feature is
+# off because we hand-walk records.
+csv = "1"
 
 [dev-dependencies]
 serde_json = { workspace = true }
