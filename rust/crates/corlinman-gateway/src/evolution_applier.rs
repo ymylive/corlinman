@@ -451,6 +451,36 @@ impl EvolutionApplier {
                 self.apply_agent_card(&proposal.target, &proposal.diff)
                     .await?
             }
+            // ─── Phase 4 W2 B1 iter 4 — meta proposal handlers ──────────
+            //
+            // The engine emits one of `meta::*Payload` shapes (see
+            // `corlinman-evolution::types`) into `proposal.diff`; we
+            // decode, drift-check the on-disk value against `previous_*`,
+            // write the `proposed_*` value, and capture an inverse_diff
+            // with proposed/previous swapped so the existing
+            // `EvolutionApplier::revert` path can flip it back.
+            //
+            // Layout per `docs/design/phase4-w2-b1-design.md` §"What each
+            // modifies": all four kinds live under a per-tenant
+            // `<data_dir>/tenants/<tenant>/engine/` subtree. Sharing the
+            // existing `tenants_root_dir()` helper keeps the directory-
+            // escape guard (`assert_under_tenants_root`) reusable.
+            EvolutionKind::EngineConfig => {
+                self.apply_engine_config(&proposal.target, &proposal.diff)
+                    .await?
+            }
+            EvolutionKind::EnginePrompt => {
+                self.apply_engine_prompt(&proposal.target, &proposal.diff)
+                    .await?
+            }
+            EvolutionKind::ObserverFilter => {
+                self.apply_observer_filter(&proposal.target, &proposal.diff)
+                    .await?
+            }
+            EvolutionKind::ClusterThreshold => {
+                self.apply_cluster_threshold(&proposal.target, &proposal.diff)
+                    .await?
+            }
             other => return Err(ApplyError::UnsupportedKind(other.as_str().to_string())),
         };
 
@@ -1489,6 +1519,392 @@ impl EvolutionApplier {
         Ok(())
     }
 
+    // ─── Phase 4 W2 B1 iter 4 — meta proposal apply handlers ────────────
+    //
+    // Four kinds, all per-tenant, all live under
+    // `<data_dir>/tenants/<tenant>/engine/`:
+    //
+    //   engine_config       → engine/config.toml (key path mutation)
+    //   engine_prompt       → engine/prompts/<id>.md (full text rewrite)
+    //   observer_filter     → engine/observer_filter.toml (filter blob)
+    //   cluster_threshold   → engine/cluster_thresholds.toml (float key)
+    //
+    // ## Why a file-on-disk layout instead of mutating `Config`?
+    //
+    // The iter 4 brief asked whether `engine_config` should mutate the
+    // live `corlinman-core::config::Config` via a hypothetical
+    // `Config::set_path` primitive. We deliberately do **not** introduce
+    // that primitive in this iteration:
+    //
+    // 1. The live `Config` is read once at gateway start and threaded
+    //    through `Arc<Config>` everywhere. A mid-flight mutation would
+    //    need either interior mutability (RwLock around the entire tree)
+    //    or a typed-path setter that forks the struct and atomically
+    //    swaps the Arc. Both are large surface changes for the
+    //    follow-up iterations to invalidate.
+    // 2. The Python `corlinman-evolution-engine` package — the actual
+    //    consumer of these values — re-reads its config from disk each
+    //    scheduled run (`engine.py:120,241` per the design doc). A
+    //    file-shaped target lands in the place the next engine pass
+    //    reads from; a process-local `Arc<Config>` mutation would not.
+    // 3. The design table at `phase4-w2-b1-design.md` lines 36-41
+    //    explicitly pins the on-disk targets. The "config_path"
+    //    mutation is a dotted-path write into the per-tenant
+    //    `engine/config.toml` — orthogonal to the gateway's own
+    //    `corlinman.toml`.
+    //
+    // The minimal "config-mutation primitive" we need is therefore a
+    // small helper that resolves a dotted path inside a `toml::Table`
+    // and replaces the leaf — see `set_toml_dotted_path` below. This
+    // keeps the apply pipeline kind-agnostic and avoids a follow-up
+    // refactor when the Python engine grows additional configurable
+    // surface.
+    //
+    // ## Inverse_diff shape
+    //
+    // Per the iter 4 brief: "same shape the engine wrote, but with
+    // proposed and previous swapped." Each handler emits an `op`
+    // discriminator + the swapped-value payload. Future revert handlers
+    // (a separate iteration) decode by `op` and rewrite the file.
+
+    /// Apply for `EvolutionKind::EngineConfig`. Decodes the
+    /// `meta::EngineConfigPayload` JSON from `diff`, locates the dotted
+    /// path inside the per-tenant `engine/config.toml`, drift-checks
+    /// the current value against `previous_value`, replaces it with
+    /// `proposed_value`, and emits an inverse_diff carrying the swapped
+    /// pair so revert can restore.
+    ///
+    /// `target` is informational (operator-facing summary) — the
+    /// authoritative path lives in `payload.config_path`. Optional
+    /// `<tenant>::` prefix on `target` selects the tenant; bare targets
+    /// fall back to `default`.
+    async fn apply_engine_config(
+        &self,
+        target: &str,
+        diff: &str,
+    ) -> Result<MutationOutcome, ApplyError> {
+        let (tenant, _rest) = split_target_with_tenant(target);
+        validate_tenant_id(tenant)?;
+
+        let payload: corlinman_evolution::meta::EngineConfigPayload =
+            serde_json::from_str(diff).map_err(|e| {
+                ApplyError::MalformedDiff(format!("engine_config payload parse: {e}"))
+            })?;
+        validate_dotted_config_path(&payload.config_path)?;
+
+        let (engine_dir, path) = self.engine_state_path(tenant, "config.toml").await?;
+        let prior_text = read_or_empty(&path).await?;
+        let mut doc: toml::Table = parse_toml_table(&prior_text, "engine/config.toml")?;
+
+        // Drift check. Convert the on-disk leaf to JSON and compare to
+        // payload.previous_value byte-for-byte (serde_json::Value
+        // implements Eq with stable shape semantics: numbers compare
+        // structurally, objects key-set-equal). Absence of the leaf is
+        // its own drift case so a stale proposal can't silently install
+        // a "default" value the operator never reviewed.
+        let actual_value = get_toml_dotted_path(&doc, &payload.config_path);
+        let actual_json = actual_value.map(toml_to_json).unwrap_or(serde_json::Value::Null);
+        if actual_json != payload.previous_value {
+            return Err(ApplyError::DriftMismatch {
+                target: payload.config_path.clone(),
+                expected: payload.previous_value.to_string(),
+                actual: actual_json.to_string(),
+            });
+        }
+
+        let proposed_toml = json_to_toml(&payload.proposed_value).ok_or_else(|| {
+            ApplyError::MalformedDiff(format!(
+                "engine_config: proposed_value not representable as TOML: {}",
+                payload.proposed_value
+            ))
+        })?;
+        set_toml_dotted_path(&mut doc, &payload.config_path, proposed_toml)?;
+
+        let new_text = toml::to_string_pretty(&doc).map_err(|e| {
+            ApplyError::TenantStateIo(anyhow::Error::msg(format!(
+                "engine/config.toml serialize: {e}"
+            )))
+        })?;
+        atomic_write(&engine_dir, &path, new_text.as_bytes(), &self.tenants_root_dir()).await?;
+
+        let before_sha = sha256_hex(prior_text.as_bytes());
+        let after_sha = sha256_hex(new_text.as_bytes());
+        // Inverse: previous and proposed swapped. Same struct shape
+        // engine emits — the next applier pass over an inverse-shaped
+        // proposal would be valid input for `apply_engine_config` again.
+        let inverse_diff = json!({
+            "op": "engine_config",
+            "tenant": tenant,
+            "config_path": payload.config_path,
+            "previous_value": payload.proposed_value,
+            "proposed_value": payload.previous_value,
+            "reason": format!("revert: {}", payload.reason),
+        })
+        .to_string();
+
+        Ok(MutationOutcome {
+            before_sha,
+            after_sha,
+            inverse_diff,
+        })
+    }
+
+    /// Apply for `EvolutionKind::EnginePrompt`. Rewrites the engine's
+    /// own prompt segment under `<tenant>/engine/prompts/<id>.md`.
+    /// Drift check compares the live file contents to
+    /// `payload.previous_text` byte-for-byte; mismatch
+    /// (or absent file when `previous_text` is non-empty) → DriftMismatch.
+    async fn apply_engine_prompt(
+        &self,
+        target: &str,
+        diff: &str,
+    ) -> Result<MutationOutcome, ApplyError> {
+        let (tenant, _rest) = split_target_with_tenant(target);
+        validate_tenant_id(tenant)?;
+
+        let payload: corlinman_evolution::meta::EnginePromptPayload =
+            serde_json::from_str(diff).map_err(|e| {
+                ApplyError::MalformedDiff(format!("engine_prompt payload parse: {e}"))
+            })?;
+        validate_prompt_segment_id(&payload.prompt_id)?;
+
+        let tenants_root = self.tenants_root_dir();
+        tokio::fs::create_dir_all(&tenants_root)
+            .await
+            .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+        let prompts_dir = tenants_root.join(tenant).join("engine").join("prompts");
+        tokio::fs::create_dir_all(&prompts_dir)
+            .await
+            .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+        let path = prompts_dir.join(format!("{}.md", payload.prompt_id));
+        assert_under_tenants_root(&prompts_dir, &tenants_root)?;
+
+        let (prior_text, prior_present) = match tokio::fs::read_to_string(&path).await {
+            Ok(s) => (s, true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
+            Err(e) => return Err(ApplyError::TenantStateIo(anyhow::Error::from(e))),
+        };
+
+        // Drift check: an absent file is treated as the empty string
+        // (matches `prompt_template`'s "first-time creation" semantics)
+        // BUT the inverse_diff records `prior_present` so revert can
+        // remove the file rather than leave an empty husk.
+        if prior_text != payload.previous_text {
+            return Err(ApplyError::DriftMismatch {
+                target: payload.prompt_id.clone(),
+                expected: format!("<{} bytes>", payload.previous_text.len()),
+                actual: format!("<{} bytes>", prior_text.len()),
+            });
+        }
+
+        atomic_write(
+            &prompts_dir,
+            &path,
+            payload.proposed_text.as_bytes(),
+            &tenants_root,
+        )
+        .await?;
+
+        let before_sha = sha256_hex(prior_text.as_bytes());
+        let after_sha = sha256_hex(payload.proposed_text.as_bytes());
+        let inverse_diff = json!({
+            "op": "engine_prompt",
+            "tenant": tenant,
+            "prompt_id": payload.prompt_id,
+            "previous_text": payload.proposed_text,
+            "proposed_text": payload.previous_text,
+            "prior_present": prior_present,
+            "reason": format!("revert: {}", payload.reason),
+        })
+        .to_string();
+
+        Ok(MutationOutcome {
+            before_sha,
+            after_sha,
+            inverse_diff,
+        })
+    }
+
+    /// Apply for `EvolutionKind::ObserverFilter`. Writes a filter blob
+    /// into `<tenant>/engine/observer_filter.toml` keyed by the
+    /// `event_kind_pattern` from the payload. Drift check compares the
+    /// current `[filters.<pattern>]` table contents to
+    /// `payload.previous_filter`.
+    ///
+    /// File schema:
+    /// ```toml
+    /// [filters.<event_kind_pattern>]
+    /// rule = <json-encoded filter blob>
+    /// ```
+    /// We store the filter as a single string-typed `rule = "<json>"`
+    /// so any future filter DSL extension stays schema-stable on disk.
+    async fn apply_observer_filter(
+        &self,
+        target: &str,
+        diff: &str,
+    ) -> Result<MutationOutcome, ApplyError> {
+        let (tenant, _rest) = split_target_with_tenant(target);
+        validate_tenant_id(tenant)?;
+
+        let payload: corlinman_evolution::meta::ObserverFilterPayload =
+            serde_json::from_str(diff).map_err(|e| {
+                ApplyError::MalformedDiff(format!("observer_filter payload parse: {e}"))
+            })?;
+        validate_event_kind_pattern(&payload.event_kind_pattern)?;
+
+        let (engine_dir, path) = self.engine_state_path(tenant, "observer_filter.toml").await?;
+        let prior_text = read_or_empty(&path).await?;
+        let mut doc: toml::Table = parse_toml_table(&prior_text, "engine/observer_filter.toml")?;
+
+        // Read current filter for this pattern. Stored as a JSON-encoded
+        // string under `[filters.<pattern>].rule`; absent → null.
+        let actual_filter =
+            read_filter_rule(&doc, &payload.event_kind_pattern).map_err(|e| {
+                ApplyError::TenantStateIo(anyhow::Error::msg(format!(
+                    "observer_filter.toml read: {e}"
+                )))
+            })?;
+        if actual_filter != payload.previous_filter {
+            return Err(ApplyError::DriftMismatch {
+                target: payload.event_kind_pattern.clone(),
+                expected: payload.previous_filter.to_string(),
+                actual: actual_filter.to_string(),
+            });
+        }
+
+        write_filter_rule(&mut doc, &payload.event_kind_pattern, &payload.proposed_filter);
+
+        let new_text = toml::to_string_pretty(&doc).map_err(|e| {
+            ApplyError::TenantStateIo(anyhow::Error::msg(format!(
+                "observer_filter.toml serialize: {e}"
+            )))
+        })?;
+        atomic_write(&engine_dir, &path, new_text.as_bytes(), &self.tenants_root_dir()).await?;
+
+        let before_sha = sha256_hex(prior_text.as_bytes());
+        let after_sha = sha256_hex(new_text.as_bytes());
+        let inverse_diff = json!({
+            "op": "observer_filter",
+            "tenant": tenant,
+            "event_kind_pattern": payload.event_kind_pattern,
+            "previous_filter": payload.proposed_filter,
+            "proposed_filter": payload.previous_filter,
+            "reason": format!("revert: {}", payload.reason),
+        })
+        .to_string();
+
+        Ok(MutationOutcome {
+            before_sha,
+            after_sha,
+            inverse_diff,
+        })
+    }
+
+    /// Apply for `EvolutionKind::ClusterThreshold`. Mutates a single
+    /// float key under `[clustering]` in
+    /// `<tenant>/engine/cluster_thresholds.toml`. Drift checks the
+    /// f64 value byte-for-byte (NaN never matches itself, so a NaN
+    /// drift always rejects — desired).
+    async fn apply_cluster_threshold(
+        &self,
+        target: &str,
+        diff: &str,
+    ) -> Result<MutationOutcome, ApplyError> {
+        let (tenant, _rest) = split_target_with_tenant(target);
+        validate_tenant_id(tenant)?;
+
+        let payload: corlinman_evolution::meta::ClusterThresholdPayload =
+            serde_json::from_str(diff).map_err(|e| {
+                ApplyError::MalformedDiff(format!("cluster_threshold payload parse: {e}"))
+            })?;
+        validate_threshold_name(&payload.threshold_name)?;
+
+        let (engine_dir, path) = self
+            .engine_state_path(tenant, "cluster_thresholds.toml")
+            .await?;
+        let prior_text = read_or_empty(&path).await?;
+        let mut doc: toml::Table = parse_toml_table(&prior_text, "engine/cluster_thresholds.toml")?;
+
+        // Schema: `[clustering] <name> = <float>`. Pulling the
+        // sub-table by name keeps the file path stable when the engine
+        // grows additional non-threshold knobs at the top level.
+        let clustering = doc
+            .get("clustering")
+            .and_then(|v| v.as_table())
+            .cloned()
+            .unwrap_or_default();
+        let actual = clustering
+            .get(&payload.threshold_name)
+            .and_then(|v| v.as_float());
+        let drift = match actual {
+            Some(v) => v.to_bits() != payload.previous_value.to_bits(),
+            None => true,
+        };
+        if drift {
+            return Err(ApplyError::DriftMismatch {
+                target: payload.threshold_name.clone(),
+                expected: payload.previous_value.to_string(),
+                actual: actual
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "<absent>".into()),
+            });
+        }
+
+        let mut clustering = clustering;
+        clustering.insert(
+            payload.threshold_name.clone(),
+            toml::Value::Float(payload.proposed_value),
+        );
+        doc.insert("clustering".into(), toml::Value::Table(clustering));
+
+        let new_text = toml::to_string_pretty(&doc).map_err(|e| {
+            ApplyError::TenantStateIo(anyhow::Error::msg(format!(
+                "cluster_thresholds.toml serialize: {e}"
+            )))
+        })?;
+        atomic_write(&engine_dir, &path, new_text.as_bytes(), &self.tenants_root_dir()).await?;
+
+        let before_sha = sha256_hex(prior_text.as_bytes());
+        let after_sha = sha256_hex(new_text.as_bytes());
+        let inverse_diff = json!({
+            "op": "cluster_threshold",
+            "tenant": tenant,
+            "threshold_name": payload.threshold_name,
+            "previous_value": payload.proposed_value,
+            "proposed_value": payload.previous_value,
+            "reason": format!("revert: {}", payload.reason),
+        })
+        .to_string();
+
+        Ok(MutationOutcome {
+            before_sha,
+            after_sha,
+            inverse_diff,
+        })
+    }
+
+    /// Resolve `<tenants_root>/<tenant>/engine/<file>`, creating the
+    /// `engine/` directory if absent. Returns `(engine_dir, file_path)`.
+    /// `engine_dir` is what `assert_under_tenants_root` re-canonicalises
+    /// against the tenants root before the rename.
+    async fn engine_state_path(
+        &self,
+        tenant: &str,
+        file_name: &str,
+    ) -> Result<(PathBuf, PathBuf), ApplyError> {
+        let tenants_root = self.tenants_root_dir();
+        tokio::fs::create_dir_all(&tenants_root)
+            .await
+            .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+        let engine_dir = tenants_root.join(tenant).join("engine");
+        tokio::fs::create_dir_all(&engine_dir)
+            .await
+            .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+        assert_under_tenants_root(&engine_dir, &tenants_root)?;
+        let path = engine_dir.join(file_name);
+        Ok((engine_dir, path))
+    }
+
     /// Phase 4 W1 4-1D: per-tenant root directory for prompt_segment
     /// files + tool_policy.toml. Derived as a sibling of `skills_dir`
     /// because both live under `<data_dir>` and the applier already
@@ -2200,6 +2616,315 @@ fn validate_rule_id(rule_id: &str) -> Result<(), ApplyError> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 W2 B1 iter 4 — meta proposal helpers.
+//
+// The four meta-kind handlers above share filesystem and TOML path
+// machinery. We isolate it here so each handler stays kind-specific and
+// the apply pipeline keeps its small per-handler surface.
+// ---------------------------------------------------------------------------
+
+/// Cap on dotted config-path lengths. 256 chars covers every realistic
+/// `evolution.budget.*.*` shape and keeps oversized targets from
+/// eating tail bytes of the inverse_diff string. Same discipline as
+/// `MAX_INVERSE_DIFF_STRING_LEN`.
+const MAX_CONFIG_PATH_LEN: usize = 256;
+
+/// Cap on observer-filter `event_kind_pattern` strings. Same shape as
+/// segment ids — dotted lowercase alphanumerics with a `*` permitted as
+/// a glob terminator (e.g. `tool.call.*`).
+const MAX_EVENT_KIND_PATTERN_LEN: usize = 128;
+
+/// Validate a dotted config path used by `engine_config`. Same shape as
+/// `validate_prompt_segment_id` plus we explicitly reject empty
+/// segments (which `Table::get` would silently swallow during the
+/// dotted descent below). The grammar matches what the engine emits in
+/// practice (`evolution.budget.weekly_total`, `clustering.min_signals`).
+fn validate_dotted_config_path(path: &str) -> Result<(), ApplyError> {
+    if path.is_empty() || path.len() > MAX_CONFIG_PATH_LEN {
+        return Err(ApplyError::MalformedDiff(format!(
+            "engine_config: config_path length out of range: {path:?}"
+        )));
+    }
+    if path.starts_with('.') || path.ends_with('.') {
+        return Err(ApplyError::MalformedDiff(format!(
+            "engine_config: config_path starts/ends with dot: {path:?}"
+        )));
+    }
+    for part in path.split('.') {
+        if part.is_empty() {
+            return Err(ApplyError::MalformedDiff(format!(
+                "engine_config: empty dotted part in {path:?}"
+            )));
+        }
+        for ch in part.chars() {
+            if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_') {
+                return Err(ApplyError::MalformedDiff(format!(
+                    "engine_config: config_path rejected character {ch:?} in {path:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate an `event_kind_pattern`. Lowercase alphanumeric segments
+/// joined by `.`, optionally terminated with `*` for the glob form.
+fn validate_event_kind_pattern(pattern: &str) -> Result<(), ApplyError> {
+    if pattern.is_empty() || pattern.len() > MAX_EVENT_KIND_PATTERN_LEN {
+        return Err(ApplyError::MalformedDiff(format!(
+            "observer_filter: event_kind_pattern length out of range: {pattern:?}"
+        )));
+    }
+    // Strip a trailing `.*` so the validation below treats the prefix
+    // exactly like a regular dotted id. Bare `*` (no leading dot) is
+    // rejected — operators must scope to at least one dotted segment.
+    let core = pattern.strip_suffix(".*").unwrap_or(pattern);
+    if core.is_empty() {
+        return Err(ApplyError::MalformedDiff(format!(
+            "observer_filter: event_kind_pattern must scope to at least one segment: {pattern:?}"
+        )));
+    }
+    if core.starts_with('.') || core.ends_with('.') {
+        return Err(ApplyError::MalformedDiff(format!(
+            "observer_filter: event_kind_pattern starts/ends with dot: {pattern:?}"
+        )));
+    }
+    for part in core.split('.') {
+        if part.is_empty() {
+            return Err(ApplyError::MalformedDiff(format!(
+                "observer_filter: empty dotted part in {pattern:?}"
+            )));
+        }
+        for ch in part.chars() {
+            if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_') {
+                return Err(ApplyError::MalformedDiff(format!(
+                    "observer_filter: event_kind_pattern rejected character {ch:?} in {pattern:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a `threshold_name` (single dotted-id-shaped key under
+/// `[clustering]`). Same grammar as a single config-path segment so
+/// `min_similarity` and `min_signals_per_cluster` both pass.
+fn validate_threshold_name(name: &str) -> Result<(), ApplyError> {
+    if name.is_empty() || name.len() > MAX_TENANT_PART_LEN {
+        return Err(ApplyError::MalformedDiff(format!(
+            "cluster_threshold: threshold_name length out of range: {name:?}"
+        )));
+    }
+    for ch in name.chars() {
+        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_') {
+            return Err(ApplyError::MalformedDiff(format!(
+                "cluster_threshold: threshold_name rejected character {ch:?} in {name:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Read a file as a String. Missing file maps to an empty String —
+/// the meta apply path treats absent state as "empty TOML / empty
+/// markdown" so first-time creation works the same as overwrite.
+async fn read_or_empty(path: &std::path::Path) -> Result<String, ApplyError> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(ApplyError::TenantStateIo(anyhow::Error::from(e))),
+    }
+}
+
+/// Parse a TOML string into a `toml::Table` with a context-tagged error.
+/// Empty input → empty table.
+fn parse_toml_table(text: &str, ctx: &'static str) -> Result<toml::Table, ApplyError> {
+    if text.is_empty() {
+        return Ok(toml::Table::new());
+    }
+    text.parse::<toml::Table>().map_err(|e| {
+        ApplyError::TenantStateIo(anyhow::Error::msg(format!("{ctx} parse: {e}")))
+    })
+}
+
+/// Atomic tmp + rename, with a re-canonicalise of `dir` against
+/// `tenants_root` immediately before the rename to defeat parent-dir
+/// symlink swaps. Same belt-and-suspenders pattern as the rest of the
+/// applier.
+async fn atomic_write(
+    dir: &std::path::Path,
+    final_path: &std::path::Path,
+    bytes: &[u8],
+    tenants_root: &std::path::Path,
+) -> Result<(), ApplyError> {
+    let mut tmp = final_path.to_path_buf();
+    let mut name = tmp
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".tmp");
+    tmp.set_file_name(name);
+    tokio::fs::write(&tmp, bytes)
+        .await
+        .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+    assert_under_tenants_root(dir, tenants_root)?;
+    tokio::fs::rename(&tmp, final_path)
+        .await
+        .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::from(e)))?;
+    Ok(())
+}
+
+/// Resolve a dotted path inside a `toml::Table`. Returns the leaf
+/// `toml::Value` if every intermediate part is a table; `None` if any
+/// segment is missing or wrong type.
+fn get_toml_dotted_path<'a>(doc: &'a toml::Table, path: &str) -> Option<&'a toml::Value> {
+    let mut parts = path.split('.');
+    let first = parts.next()?;
+    let mut cur = doc.get(first)?;
+    for part in parts {
+        cur = cur.as_table()?.get(part)?;
+    }
+    Some(cur)
+}
+
+/// Set a dotted path inside a `toml::Table`, creating intermediate
+/// tables as needed. Replaces any leaf already at the path. Errors when
+/// an intermediate segment exists but is not a table — refusing to
+/// silently rewrite a scalar leaf as a table is part of the drift
+/// contract: the previous_value check upstream already caught the
+/// shape mismatch and short-circuited; reaching this branch means a
+/// concurrent writer mutated the file between our read and our write,
+/// and the safe response is to surface the I/O failure rather than
+/// blow away their value.
+fn set_toml_dotted_path(
+    doc: &mut toml::Table,
+    path: &str,
+    value: toml::Value,
+) -> Result<(), ApplyError> {
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.is_empty() {
+        return Err(ApplyError::MalformedDiff(format!(
+            "engine_config: empty dotted path: {path:?}"
+        )));
+    }
+    let (last, prefix) = parts.split_last().unwrap();
+    let mut cur = doc;
+    for seg in prefix {
+        let entry = cur
+            .entry((*seg).to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if !entry.is_table() {
+            return Err(ApplyError::TenantStateIo(anyhow::Error::msg(format!(
+                "engine_config: expected table at intermediate path segment {seg:?} in {path:?}"
+            ))));
+        }
+        cur = entry.as_table_mut().unwrap();
+    }
+    cur.insert((*last).to_string(), value);
+    Ok(())
+}
+
+/// Convert `toml::Value` → `serde_json::Value` for drift comparison.
+/// Lossless for the value shapes meta proposals use (numbers / bools /
+/// strings / arrays / tables). Datetime values are stringified — the
+/// engine never emits them, so the round-trip would never come up.
+fn toml_to_json(v: &toml::Value) -> serde_json::Value {
+    match v {
+        toml::Value::String(s) => serde_json::Value::String(s.clone()),
+        toml::Value::Integer(i) => serde_json::Value::Number((*i).into()),
+        toml::Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
+        toml::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(toml_to_json).collect())
+        }
+        toml::Value::Table(t) => serde_json::Value::Object(
+            t.iter()
+                .map(|(k, v)| (k.clone(), toml_to_json(v)))
+                .collect(),
+        ),
+    }
+}
+
+/// Convert `serde_json::Value` → `toml::Value` for the apply path.
+/// Returns `None` for shapes TOML can't represent (`null` is the
+/// canonical example — TOML has no null sentinel). Numbers prefer
+/// integer when the JSON is an exact i64; otherwise float. Nested
+/// objects walk recursively.
+fn json_to_toml(v: &serde_json::Value) -> Option<toml::Value> {
+    match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(b) => Some(toml::Value::Boolean(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(toml::Value::Integer(i))
+            } else {
+                n.as_f64().map(toml::Value::Float)
+            }
+        }
+        serde_json::Value::String(s) => Some(toml::Value::String(s.clone())),
+        serde_json::Value::Array(arr) => {
+            let mapped: Option<Vec<toml::Value>> = arr.iter().map(json_to_toml).collect();
+            mapped.map(toml::Value::Array)
+        }
+        serde_json::Value::Object(obj) => {
+            let mut t = toml::Table::new();
+            for (k, v) in obj {
+                let v = json_to_toml(v)?;
+                t.insert(k.clone(), v);
+            }
+            Some(toml::Value::Table(t))
+        }
+    }
+}
+
+/// Read the JSON-encoded filter rule for `pattern` from
+/// `[filters.<pattern>].rule`. Returns `serde_json::Value::Null` when
+/// the table is absent (treated identically to "no filter installed").
+fn read_filter_rule(
+    doc: &toml::Table,
+    pattern: &str,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let Some(filters) = doc.get("filters").and_then(|v| v.as_table()) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(entry) = filters.get(pattern).and_then(|v| v.as_table()) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(rule) = entry.get("rule").and_then(|v| v.as_str()) else {
+        return Ok(serde_json::Value::Null);
+    };
+    serde_json::from_str(rule)
+}
+
+/// Write a JSON-encoded filter rule to `[filters.<pattern>].rule`,
+/// creating the parent tables as needed. We store the rule as a
+/// string-typed `rule` so future filter DSL changes don't break the
+/// TOML schema — operators read the on-disk file once with a JSON
+/// inner-decode and the engine's filter parser owns the rest.
+fn write_filter_rule(doc: &mut toml::Table, pattern: &str, rule: &serde_json::Value) {
+    let filters = doc
+        .entry("filters".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if !filters.is_table() {
+        // Should be unreachable in practice — the apply path read the
+        // file as a Table earlier, so any non-table here means a
+        // concurrent writer corrupted the file. Replace defensively
+        // so the rename below still produces a parseable file.
+        *filters = toml::Value::Table(toml::Table::new());
+    }
+    let filters = filters.as_table_mut().unwrap();
+    let mut entry = toml::Table::new();
+    entry.insert(
+        "rule".into(),
+        toml::Value::String(serde_json::to_string(rule).unwrap_or_else(|_| "null".into())),
+    );
+    filters.insert(pattern.to_string(), toml::Value::Table(entry));
 }
 
 /// Read the current `[tool] mode` from a parsed toml document. Returns
@@ -4372,5 +5097,577 @@ mod tests {
             Err(ApplyError::TenantPathEscape(_)) => {}
             other => panic!("expected TenantPathEscape, got {other:?}"),
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Phase 4 W2 B1 iter 4 — meta proposal apply handlers.
+    //
+    // Each kind gets the trio specified in the iter 4 brief:
+    //   - apply_<kind>_writes_change_and_records_inverse
+    //   - apply_<kind>_drift_mismatch_rejects
+    //   - apply_<kind>_invalid_payload_rejects
+    // plus one cross-cutting test that asserts evolution_history rows
+    // carry the meta-kind label so future operator dashboards can
+    // distinguish meta from non-meta applies.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn engine_dir_path(tmp: &TempDir, tenant: &str) -> std::path::PathBuf {
+        tenants_root_for(tmp).join(tenant).join("engine")
+    }
+
+    fn engine_config_path(tmp: &TempDir, tenant: &str) -> std::path::PathBuf {
+        engine_dir_path(tmp, tenant).join("config.toml")
+    }
+
+    fn engine_prompt_path(tmp: &TempDir, tenant: &str, prompt_id: &str) -> std::path::PathBuf {
+        engine_dir_path(tmp, tenant)
+            .join("prompts")
+            .join(format!("{prompt_id}.md"))
+    }
+
+    fn observer_filter_path(tmp: &TempDir, tenant: &str) -> std::path::PathBuf {
+        engine_dir_path(tmp, tenant).join("observer_filter.toml")
+    }
+
+    fn cluster_thresholds_path(tmp: &TempDir, tenant: &str) -> std::path::PathBuf {
+        engine_dir_path(tmp, tenant).join("cluster_thresholds.toml")
+    }
+
+    fn engine_config_payload(
+        path: &str,
+        previous: serde_json::Value,
+        proposed: serde_json::Value,
+    ) -> String {
+        json!({
+            "config_path": path,
+            "previous_value": previous,
+            "proposed_value": proposed,
+            "reason": "iter4 test",
+        })
+        .to_string()
+    }
+
+    fn engine_prompt_payload(prompt_id: &str, previous: &str, proposed: &str) -> String {
+        json!({
+            "prompt_id": prompt_id,
+            "previous_text": previous,
+            "proposed_text": proposed,
+            "reason": "iter4 prompt test",
+        })
+        .to_string()
+    }
+
+    fn observer_filter_payload(
+        pattern: &str,
+        previous: serde_json::Value,
+        proposed: serde_json::Value,
+    ) -> String {
+        json!({
+            "event_kind_pattern": pattern,
+            "previous_filter": previous,
+            "proposed_filter": proposed,
+            "reason": "iter4 filter test",
+        })
+        .to_string()
+    }
+
+    fn cluster_threshold_payload(name: &str, previous: f64, proposed: f64) -> String {
+        json!({
+            "threshold_name": name,
+            "previous_value": previous,
+            "proposed_value": proposed,
+            "reason": "iter4 threshold test",
+        })
+        .to_string()
+    }
+
+    // ── engine_config ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn apply_engine_config_writes_change_and_records_inverse() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        // Pre-seed config.toml so the drift check has a concrete prior
+        // value to match. The dotted key is `clustering.min_signals`.
+        let path = engine_config_path(&tmp, "default");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[clustering]\nmin_signals = 3\n").unwrap();
+
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-cfg-001",
+            EvolutionKind::EngineConfig,
+            "clustering.min_signals",
+            &engine_config_payload(
+                "clustering.min_signals",
+                serde_json::json!(3),
+                serde_json::json!(5),
+            ),
+        )
+        .await;
+
+        let history = applier.apply(&pid).await.unwrap();
+        assert_eq!(history.kind, EvolutionKind::EngineConfig);
+        assert_ne!(history.before_sha, history.after_sha);
+
+        // Disk reflects proposed value.
+        let written = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Table = written.parse().unwrap();
+        assert_eq!(
+            parsed["clustering"]["min_signals"].as_integer(),
+            Some(5),
+            "proposed value landed at the dotted path",
+        );
+
+        // Inverse round-trips: applying the inverse-shaped payload back
+        // would restore the original. Spot-check the swap.
+        let inv: serde_json::Value = serde_json::from_str(&history.inverse_diff).unwrap();
+        assert_eq!(inv["op"], "engine_config");
+        assert_eq!(inv["tenant"], "default");
+        assert_eq!(inv["config_path"], "clustering.min_signals");
+        assert_eq!(inv["previous_value"], serde_json::json!(5));
+        assert_eq!(inv["proposed_value"], serde_json::json!(3));
+
+        let after = ProposalsRepo::new(evol.pool().clone())
+            .get(&pid)
+            .await
+            .unwrap();
+        assert_eq!(after.status, EvolutionStatus::Applied);
+    }
+
+    #[tokio::test]
+    async fn apply_engine_config_drift_mismatch_rejects() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        // On-disk value diverged: file says `min_signals = 9` while the
+        // proposal claims previous was 3.
+        let path = engine_config_path(&tmp, "default");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[clustering]\nmin_signals = 9\n").unwrap();
+
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-cfg-drift-001",
+            EvolutionKind::EngineConfig,
+            "clustering.min_signals",
+            &engine_config_payload(
+                "clustering.min_signals",
+                serde_json::json!(3),
+                serde_json::json!(5),
+            ),
+        )
+        .await;
+
+        match applier.apply(&pid).await {
+            Err(ApplyError::DriftMismatch {
+                target,
+                expected,
+                actual,
+            }) => {
+                assert_eq!(target, "clustering.min_signals");
+                assert_eq!(expected, "3");
+                assert_eq!(actual, "9");
+            }
+            other => panic!("expected DriftMismatch, got {other:?}"),
+        }
+
+        // Disk untouched.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[clustering]\nmin_signals = 9\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_engine_config_invalid_payload_rejects() {
+        let (_tmp, applier, _kb, evol) = fresh_applier().await;
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-cfg-bad-001",
+            EvolutionKind::EngineConfig,
+            "clustering.min_signals",
+            "{not valid json",
+        )
+        .await;
+        match applier.apply(&pid).await {
+            Err(ApplyError::MalformedDiff(_)) => {}
+            other => panic!("expected MalformedDiff, got {other:?}"),
+        }
+    }
+
+    // ── engine_prompt ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn apply_engine_prompt_writes_change_and_records_inverse() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        // Pre-seed the engine prompt with prior content so drift
+        // matches and the inverse captures the original bytes.
+        let path = engine_prompt_path(&tmp, "default", "clustering");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "old engine prompt").unwrap();
+
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-prompt-001",
+            EvolutionKind::EnginePrompt,
+            "clustering",
+            &engine_prompt_payload("clustering", "old engine prompt", "new engine prompt"),
+        )
+        .await;
+
+        let history = applier.apply(&pid).await.unwrap();
+        assert_eq!(history.kind, EvolutionKind::EnginePrompt);
+        assert_ne!(history.before_sha, history.after_sha);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "new engine prompt"
+        );
+
+        let inv: serde_json::Value = serde_json::from_str(&history.inverse_diff).unwrap();
+        assert_eq!(inv["op"], "engine_prompt");
+        assert_eq!(inv["tenant"], "default");
+        assert_eq!(inv["prompt_id"], "clustering");
+        // Swap: inverse's previous = forward's proposed; inverse's
+        // proposed = forward's previous.
+        assert_eq!(inv["previous_text"], "new engine prompt");
+        assert_eq!(inv["proposed_text"], "old engine prompt");
+        assert_eq!(inv["prior_present"], true);
+    }
+
+    #[tokio::test]
+    async fn apply_engine_prompt_drift_mismatch_rejects() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        // On-disk file diverged: someone hand-edited mid-flight.
+        let path = engine_prompt_path(&tmp, "default", "clustering");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "operator hand-tuned content").unwrap();
+
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-prompt-drift-001",
+            EvolutionKind::EnginePrompt,
+            "clustering",
+            &engine_prompt_payload("clustering", "old engine prompt", "new engine prompt"),
+        )
+        .await;
+
+        match applier.apply(&pid).await {
+            Err(ApplyError::DriftMismatch { target, .. }) => {
+                assert_eq!(target, "clustering");
+            }
+            other => panic!("expected DriftMismatch, got {other:?}"),
+        }
+        // File untouched.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "operator hand-tuned content"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_engine_prompt_invalid_payload_rejects() {
+        let (_tmp, applier, _kb, evol) = fresh_applier().await;
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-prompt-bad-001",
+            EvolutionKind::EnginePrompt,
+            "clustering",
+            "{ malformed",
+        )
+        .await;
+        match applier.apply(&pid).await {
+            Err(ApplyError::MalformedDiff(_)) => {}
+            other => panic!("expected MalformedDiff, got {other:?}"),
+        }
+    }
+
+    // ── observer_filter ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn apply_observer_filter_writes_change_and_records_inverse() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        // Pre-seed observer_filter.toml so drift matches.
+        let path = observer_filter_path(&tmp, "default");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Encode the prior filter rule as `{"action":"allow"}`.
+        std::fs::write(
+            &path,
+            "[filters.\"tool.call.failed\"]\nrule = \"{\\\"action\\\":\\\"allow\\\"}\"\n",
+        )
+        .unwrap();
+
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-filter-001",
+            EvolutionKind::ObserverFilter,
+            "tool.call.failed",
+            &observer_filter_payload(
+                "tool.call.failed",
+                serde_json::json!({"action": "allow"}),
+                serde_json::json!({"action": "deny", "until_ms": 1000}),
+            ),
+        )
+        .await;
+
+        let history = applier.apply(&pid).await.unwrap();
+        assert_eq!(history.kind, EvolutionKind::ObserverFilter);
+        assert_ne!(history.before_sha, history.after_sha);
+
+        // Disk reflects proposed filter.
+        let written = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Table = written.parse().unwrap();
+        let rule_str = parsed["filters"]["tool.call.failed"]["rule"]
+            .as_str()
+            .unwrap();
+        let rule: serde_json::Value = serde_json::from_str(rule_str).unwrap();
+        assert_eq!(rule, serde_json::json!({"action": "deny", "until_ms": 1000}));
+
+        let inv: serde_json::Value = serde_json::from_str(&history.inverse_diff).unwrap();
+        assert_eq!(inv["op"], "observer_filter");
+        assert_eq!(inv["tenant"], "default");
+        assert_eq!(inv["event_kind_pattern"], "tool.call.failed");
+        assert_eq!(
+            inv["previous_filter"],
+            serde_json::json!({"action": "deny", "until_ms": 1000})
+        );
+        assert_eq!(inv["proposed_filter"], serde_json::json!({"action": "allow"}));
+    }
+
+    #[tokio::test]
+    async fn apply_observer_filter_drift_mismatch_rejects() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        // Disk says `{"action":"deny"}` but proposal claims previous
+        // was `{"action":"allow"}`.
+        let path = observer_filter_path(&tmp, "default");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[filters.\"tool.call.failed\"]\nrule = \"{\\\"action\\\":\\\"deny\\\"}\"\n",
+        )
+        .unwrap();
+
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-filter-drift-001",
+            EvolutionKind::ObserverFilter,
+            "tool.call.failed",
+            &observer_filter_payload(
+                "tool.call.failed",
+                serde_json::json!({"action": "allow"}),
+                serde_json::json!({"action": "deny", "until_ms": 1000}),
+            ),
+        )
+        .await;
+
+        match applier.apply(&pid).await {
+            Err(ApplyError::DriftMismatch { target, .. }) => {
+                assert_eq!(target, "tool.call.failed");
+            }
+            other => panic!("expected DriftMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_observer_filter_invalid_payload_rejects() {
+        let (_tmp, applier, _kb, evol) = fresh_applier().await;
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-filter-bad-001",
+            EvolutionKind::ObserverFilter,
+            "tool.call.failed",
+            "not.json",
+        )
+        .await;
+        match applier.apply(&pid).await {
+            Err(ApplyError::MalformedDiff(_)) => {}
+            other => panic!("expected MalformedDiff, got {other:?}"),
+        }
+    }
+
+    // ── cluster_threshold ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn apply_cluster_threshold_writes_change_and_records_inverse() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        let path = cluster_thresholds_path(&tmp, "default");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[clustering]\nmin_similarity = 0.7\n").unwrap();
+
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-thresh-001",
+            EvolutionKind::ClusterThreshold,
+            "min_similarity",
+            &cluster_threshold_payload("min_similarity", 0.7, 0.85),
+        )
+        .await;
+
+        let history = applier.apply(&pid).await.unwrap();
+        assert_eq!(history.kind, EvolutionKind::ClusterThreshold);
+        assert_ne!(history.before_sha, history.after_sha);
+
+        let parsed: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            parsed["clustering"]["min_similarity"].as_float(),
+            Some(0.85)
+        );
+
+        let inv: serde_json::Value = serde_json::from_str(&history.inverse_diff).unwrap();
+        assert_eq!(inv["op"], "cluster_threshold");
+        assert_eq!(inv["tenant"], "default");
+        assert_eq!(inv["threshold_name"], "min_similarity");
+        assert_eq!(inv["previous_value"], serde_json::json!(0.85));
+        assert_eq!(inv["proposed_value"], serde_json::json!(0.7));
+    }
+
+    #[tokio::test]
+    async fn apply_cluster_threshold_drift_mismatch_rejects() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        // Disk says 0.5 but proposal claims previous was 0.7.
+        let path = cluster_thresholds_path(&tmp, "default");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[clustering]\nmin_similarity = 0.5\n").unwrap();
+
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-thresh-drift-001",
+            EvolutionKind::ClusterThreshold,
+            "min_similarity",
+            &cluster_threshold_payload("min_similarity", 0.7, 0.85),
+        )
+        .await;
+
+        match applier.apply(&pid).await {
+            Err(ApplyError::DriftMismatch {
+                target,
+                expected,
+                actual,
+            }) => {
+                assert_eq!(target, "min_similarity");
+                assert_eq!(expected, "0.7");
+                assert_eq!(actual, "0.5");
+            }
+            other => panic!("expected DriftMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_cluster_threshold_invalid_payload_rejects() {
+        let (_tmp, applier, _kb, evol) = fresh_applier().await;
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-thresh-bad-001",
+            EvolutionKind::ClusterThreshold,
+            "min_similarity",
+            "{",
+        )
+        .await;
+        match applier.apply(&pid).await {
+            Err(ApplyError::MalformedDiff(_)) => {}
+            other => panic!("expected MalformedDiff, got {other:?}"),
+        }
+    }
+
+    // ── cross-cutting ────────────────────────────────────────────────
+
+    /// History rows for meta applies must carry the meta-kind label so
+    /// the future `meta_pending` admin tab + dashboards can filter on
+    /// `kind` without re-resolving via `is_meta()`.
+    #[tokio::test]
+    async fn apply_meta_kind_records_history_row_with_kind_label() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        // Apply one of each meta kind and assert the history row's
+        // `kind` column matches the proposal's kind.
+        // 1) engine_config
+        let cfg_path = engine_config_path(&tmp, "default");
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&cfg_path, "[clustering]\nmin_signals = 3\n").unwrap();
+        let cfg_pid = seed_approved_kind(
+            &evol,
+            "evol-meta-mix-cfg-001",
+            EvolutionKind::EngineConfig,
+            "clustering.min_signals",
+            &engine_config_payload(
+                "clustering.min_signals",
+                serde_json::json!(3),
+                serde_json::json!(5),
+            ),
+        )
+        .await;
+        let cfg_hist = applier.apply(&cfg_pid).await.unwrap();
+        assert_eq!(cfg_hist.kind, EvolutionKind::EngineConfig);
+        assert_eq!(cfg_hist.kind.as_str(), "engine_config");
+        assert!(cfg_hist.kind.is_meta(), "engine_config must be is_meta");
+
+        // 2) engine_prompt
+        let prompt_path = engine_prompt_path(&tmp, "default", "clustering");
+        std::fs::create_dir_all(prompt_path.parent().unwrap()).unwrap();
+        std::fs::write(&prompt_path, "v1").unwrap();
+        let prompt_pid = seed_approved_kind(
+            &evol,
+            "evol-meta-mix-prompt-001",
+            EvolutionKind::EnginePrompt,
+            "clustering",
+            &engine_prompt_payload("clustering", "v1", "v2"),
+        )
+        .await;
+        let prompt_hist = applier.apply(&prompt_pid).await.unwrap();
+        assert_eq!(prompt_hist.kind, EvolutionKind::EnginePrompt);
+        assert_eq!(prompt_hist.kind.as_str(), "engine_prompt");
+
+        // 3) observer_filter — first install (drift check matches null).
+        let filter_pid = seed_approved_kind(
+            &evol,
+            "evol-meta-mix-filter-001",
+            EvolutionKind::ObserverFilter,
+            "tool.call.failed",
+            &observer_filter_payload(
+                "tool.call.failed",
+                serde_json::Value::Null,
+                serde_json::json!({"action": "deny"}),
+            ),
+        )
+        .await;
+        let filter_hist = applier.apply(&filter_pid).await.unwrap();
+        assert_eq!(filter_hist.kind, EvolutionKind::ObserverFilter);
+        assert_eq!(filter_hist.kind.as_str(), "observer_filter");
+
+        // 4) cluster_threshold
+        let thresh_path = cluster_thresholds_path(&tmp, "default");
+        std::fs::create_dir_all(thresh_path.parent().unwrap()).unwrap();
+        std::fs::write(&thresh_path, "[clustering]\nmin_similarity = 0.5\n").unwrap();
+        let thresh_pid = seed_approved_kind(
+            &evol,
+            "evol-meta-mix-thresh-001",
+            EvolutionKind::ClusterThreshold,
+            "min_similarity",
+            &cluster_threshold_payload("min_similarity", 0.5, 0.6),
+        )
+        .await;
+        let thresh_hist = applier.apply(&thresh_pid).await.unwrap();
+        assert_eq!(thresh_hist.kind, EvolutionKind::ClusterThreshold);
+        assert_eq!(thresh_hist.kind.as_str(), "cluster_threshold");
+
+        // Verify all four landed as distinct rows in evolution_history
+        // with the meta-kind label preserved on the SQL side. The
+        // dispatch from the proposal into the applier is what the
+        // admin meta_pending filter will read.
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            r#"SELECT proposal_id, kind FROM evolution_history
+                WHERE proposal_id LIKE 'evol-meta-mix-%'
+                ORDER BY id ASC"#,
+        )
+        .fetch_all(evol.pool())
+        .await
+        .unwrap();
+        let labels: Vec<String> = rows.into_iter().map(|(_, k)| k).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "engine_config",
+                "engine_prompt",
+                "observer_filter",
+                "cluster_threshold",
+            ],
+            "history rows must distinguish meta from non-meta via the kind column",
+        );
     }
 }
