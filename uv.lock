@@ -12,6 +12,7 @@ members = [
     "corlinman",
     "corlinman-agent",
     "corlinman-embedding",
+    "corlinman-episodes",
     "corlinman-evolution-engine",
     "corlinman-grpc",
     "corlinman-persona",
@@ -247,6 +248,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "corlinman-agent" },
     { name = "corlinman-embedding" },
+    { name = "corlinman-episodes" },
     { name = "corlinman-evolution-engine" },
     { name = "corlinman-grpc" },
     { name = "corlinman-persona" },
@@ -275,6 +277,7 @@ dev = [
 requires-dist = [
     { name = "corlinman-agent", editable = "python/packages/corlinman-agent" },
     { name = "corlinman-embedding", editable = "python/packages/corlinman-embedding" },
+    { name = "corlinman-episodes", editable = "python/packages/corlinman-episodes" },
     { name = "corlinman-evolution-engine", editable = "python/packages/corlinman-evolution-engine" },
     { name = "corlinman-grpc", editable = "python/packages/corlinman-grpc" },
     { name = "corlinman-persona", editable = "python/packages/corlinman-persona" },
@@ -349,6 +352,17 @@ requires-dist = [
     { name = "structlog", specifier = ">=25.1" },
 ]
 provides-extras = ["local"]
+
+[[package]]
+name = "corlinman-episodes"
+version = "0.1.0"
+source = { editable = "python/packages/corlinman-episodes" }
+dependencies = [
+    { name = "aiosqlite" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "aiosqlite", specifier = ">=0.20" }]
 
 [[package]]
 name = "corlinman-evolution-engine"
