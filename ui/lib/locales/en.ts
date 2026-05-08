@@ -1526,6 +1526,39 @@ export const en = {
       evalRunId: "Eval run id",
       statRolledBackThisWeek: "Rolled back · 7d",
       statRolledBackFoot: "auto + manual",
+      // ─── Phase 4 W2 B1 iter 6+7: Meta proposal review ────────────
+      filterMeta: "Meta",
+      metaSelfImprovement: "self-improvement",
+      metaTabDesc:
+        "Engine self-modification proposals — high blast radius, meta_approver only.",
+      metaReview: "Review",
+      metaKindEngineConfig: "engine_config",
+      metaKindEnginePrompt: "engine_prompt",
+      metaKindObserverFilter: "observer_filter",
+      metaKindClusterThreshold: "cluster_threshold",
+      metaDiffPrevious: "Previous",
+      metaDiffProposed: "Proposed",
+      metaDialogTitle: "Meta proposal review",
+      metaDialogClose: "Close",
+      metaApply: "Apply",
+      metaApprove: "Approve",
+      metaConfirmGenericTitle: "Confirm meta apply",
+      metaConfirmGenericBody:
+        "This applies a meta proposal — engine modifies engine. Continue?",
+      metaConfirmContinue: "Continue",
+      metaConfirmCancel: "Cancel",
+      metaPromptStep1Title: "Rewrite engine prompt",
+      metaPromptStep1Body:
+        "This rewrites the engine's own prompt. Type the proposal id to confirm.",
+      metaPromptIdLabel: "Proposal id",
+      metaPromptIdPlaceholder: "Apply enables on exact match",
+      metaPromptStep2Title: "Proposal id matches",
+      metaPromptStep2Body:
+        "Proposal id matches. This is irreversible without manual rollback. Apply?",
+      metaPromptStep2Confirm: "Apply",
+      metaApproverRequired:
+        "You aren't authorized to approve meta proposals. Add your username to `[admin].meta_approver_users` in config.toml. (current user: {{user}})",
+      emptyMeta: "No meta proposals waiting for review.",
     },
   },
 

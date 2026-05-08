@@ -25,8 +25,9 @@ import { StatsRow } from "@/components/evolution/StatsRow";
 import { ProposalCard } from "@/components/evolution/ProposalCard";
 import { ApprovedList } from "@/components/evolution/ApprovedList";
 import { HistoryList } from "@/components/evolution/HistoryList";
+import { MetaList } from "@/components/evolution/MetaList";
 import { EvolutionEmptyState } from "@/components/evolution/EmptyState";
-import type { Tab } from "@/components/evolution/types";
+import { isMetaKind, type Tab } from "@/components/evolution/types";
 
 /**
  * /evolution — Wave 1-D Phase 2 MVP.
@@ -84,27 +85,43 @@ export default function EvolutionPage() {
   const pendingRows = useMemo(() => query.data ?? [], [query.data]);
   const pendingLive = !query.isError;
 
-  // Distinct kinds for the secondary filter row.
+  // Phase 4 W2 B1 iter 6+7: meta count for the tab badge. The Meta tab
+  // itself merges pending+approved meta rows; the badge mirrors what an
+  // operator sees when they switch tabs (pending bucket).
+  const metaPendingCount = useMemo(
+    () => pendingRows.filter((p) => isMetaKind(p.kind)).length,
+    [pendingRows],
+  );
+
+  // Non-meta pending rows feed the regular Pending tab — meta is its
+  // own surface so we don't display them twice.
+  const nonMetaPendingRows = useMemo(
+    () => pendingRows.filter((p) => !isMetaKind(p.kind)),
+    [pendingRows],
+  );
+
+  // Distinct kinds for the secondary filter row (excludes meta —
+  // meta has its own tab now).
   const kinds = useMemo(() => {
     const set = new Set<string>();
-    for (const p of pendingRows) set.add(p.kind);
+    for (const p of nonMetaPendingRows) set.add(p.kind);
     return Array.from(set).sort();
-  }, [pendingRows]);
+  }, [nonMetaPendingRows]);
 
   const visibleRows = useMemo(() => {
     if (tab !== "pending") return [];
-    if (kindFilter === "__all__") return pendingRows;
-    return pendingRows.filter((p) => p.kind === kindFilter);
-  }, [tab, kindFilter, pendingRows]);
+    if (kindFilter === "__all__") return nonMetaPendingRows;
+    return nonMetaPendingRows.filter((p) => p.kind === kindFilter);
+  }, [tab, kindFilter, nonMetaPendingRows]);
 
   const oldestHeldMs = useMemo(() => {
     let oldest: number | null = null;
-    for (const p of pendingRows) {
+    for (const p of nonMetaPendingRows) {
       const held = now - p.created_at;
       if (oldest === null || held > oldest) oldest = held;
     }
     return oldest;
-  }, [pendingRows, now]);
+  }, [nonMetaPendingRows, now]);
 
   // ─── mutations ────────────────────────────────────────────────────────
   const removeFromCache = (id: string) => {
@@ -174,9 +191,11 @@ export default function EvolutionPage() {
       {
         value: "pending",
         label: t("evolution.tp.filterPending"),
-        count: pendingRows.length,
+        count: nonMetaPendingRows.length,
         tone:
-          pendingRows.length > 0 ? ("warn" as const) : ("neutral" as const),
+          nonMetaPendingRows.length > 0
+            ? ("warn" as const)
+            : ("neutral" as const),
       },
       {
         value: "approved",
@@ -188,8 +207,17 @@ export default function EvolutionPage() {
         label: t("evolution.tp.filterHistory"),
         tone: "neutral" as const,
       },
+      {
+        value: "meta",
+        label: t("evolution.tp.filterMeta"),
+        count: metaPendingCount,
+        // Amber tone whenever there's a self-improvement proposal waiting,
+        // so meta visually pops out from the regular tabs.
+        tone:
+          metaPendingCount > 0 ? ("warn" as const) : ("neutral" as const),
+      },
     ],
-    [pendingRows.length, t],
+    [nonMetaPendingRows.length, metaPendingCount, t],
   );
 
   const kindOptions = useMemo(
@@ -310,7 +338,7 @@ export default function EvolutionPage() {
           {query.isPending ? (
             <ListSkeleton />
           ) : listIsEmpty ? (
-            kindFilter !== "__all__" && pendingRows.length > 0 ? (
+            kindFilter !== "__all__" && nonMetaPendingRows.length > 0 ? (
               <FilteredEmpty />
             ) : (
               <EvolutionEmptyState tab="pending" />
@@ -333,6 +361,8 @@ export default function EvolutionPage() {
         </section>
       ) : tab === "approved" ? (
         <ApprovedList />
+      ) : tab === "meta" ? (
+        <MetaList />
       ) : (
         <HistoryList />
       )}

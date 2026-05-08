@@ -1504,6 +1504,38 @@ export const zhCN = {
       evalRunId: "评估运行 ID",
       statRolledBackThisWeek: "本周回滚",
       statRolledBackFoot: "auto + manual",
+      // ─── Phase 4 W2 B1 iter 6+7: Meta proposal review ────────────
+      filterMeta: "Meta",
+      metaSelfImprovement: "self-improvement",
+      metaTabDesc: "引擎自我修改提案 —— 高爆炸半径，仅限 meta_approver。",
+      metaReview: "Review",
+      metaKindEngineConfig: "engine_config",
+      metaKindEnginePrompt: "engine_prompt",
+      metaKindObserverFilter: "observer_filter",
+      metaKindClusterThreshold: "cluster_threshold",
+      metaDiffPrevious: "当前值",
+      metaDiffProposed: "提案值",
+      metaDialogTitle: "Meta 提案审议",
+      metaDialogClose: "关闭",
+      metaApply: "Apply",
+      metaApprove: "Approve",
+      metaConfirmGenericTitle: "确认应用 meta 提案",
+      metaConfirmGenericBody:
+        "这是一个 meta 提案 —— 引擎自我修改。继续？",
+      metaConfirmContinue: "继续",
+      metaConfirmCancel: "取消",
+      metaPromptStep1Title: "重写引擎 prompt",
+      metaPromptStep1Body:
+        "此操作会改写引擎自身的 prompt。请输入提案 ID 以确认。",
+      metaPromptIdLabel: "提案 ID",
+      metaPromptIdPlaceholder: "完整提案 ID 才会启用 Apply",
+      metaPromptStep2Title: "提案 ID 匹配",
+      metaPromptStep2Body:
+        "提案 ID 匹配。此操作不可逆，需要手动回滚才能撤销。是否应用？",
+      metaPromptStep2Confirm: "应用",
+      metaApproverRequired:
+        "你没有 meta 提案的审批权限。请在 config.toml 的 `[admin].meta_approver_users` 中加入你的用户名。（当前用户：{{user}}）",
+      emptyMeta: "当前没有等待审议的 meta 提案。",
     },
   },
 
