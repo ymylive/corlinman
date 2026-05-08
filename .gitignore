@@ -47,3 +47,6 @@ dist/
 # Generated
 /proto/_generated/
 **/src/_generated/
+
+# Design assets (mockups, palettes, screenshots) — kept locally / external store
+/_design/
