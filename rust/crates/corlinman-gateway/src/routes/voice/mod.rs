@@ -17,9 +17,11 @@
 //!
 //! See `docs/design/phase4-w4-d4-design.md`.
 
+pub mod cost;
 pub mod framing;
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
 use axum::{
@@ -36,20 +38,68 @@ use corlinman_core::config::Config;
 use serde_json::json;
 use tracing::{debug, warn};
 
+use cost::{
+    evaluate_budget, next_utc_midnight, utc_day_epoch, BudgetDecision, BudgetDenyReason,
+    InMemoryVoiceSpend, VoiceSpend,
+};
 use framing::{accept_subprotocol, encode_server_control, ServerControl, SubprotocolDecision};
 
-/// State carried by the `/voice` route. We snapshot the live config so
-/// flipping `[voice] enabled` at runtime via the config-watcher takes
-/// effect without a server restart.
+/// State carried by the `/voice` route.
+///
+/// - `config` — live `ArcSwap` so flipping `[voice] enabled` /
+///   budget knobs at runtime takes effect without restart.
+/// - `spend` — process-local minute counter (iter 3); iter 8 swaps
+///   to a SQLite-backed `voice_spend` table without touching this
+///   handler.
+/// - `tenant_id_for_request` — resolver hook so multi-tenant
+///   deployments can scope the budget per tenant. The default
+///   resolver returns `"default"` matching the schema-level fallback
+///   from Phase 4 W1 4-1A; iter 4+ wires the real header / session
+///   token plumbing.
 #[derive(Clone)]
 pub struct VoiceState {
     pub config: Arc<ArcSwap<Config>>,
+    pub spend: Arc<dyn VoiceSpend>,
 }
 
 impl VoiceState {
     pub fn new(config: Arc<ArcSwap<Config>>) -> Self {
-        Self { config }
+        Self {
+            config,
+            spend: Arc::new(InMemoryVoiceSpend::new()),
+        }
     }
+
+    /// Test seam for plumbing a custom spend store (e.g. one
+    /// pre-populated with day usage to exercise the over-budget
+    /// branch).
+    pub fn with_spend(config: Arc<ArcSwap<Config>>, spend: Arc<dyn VoiceSpend>) -> Self {
+        Self { config, spend }
+    }
+}
+
+/// Best-effort tenant resolution from request headers. Iter 3 ships a
+/// minimal version: an explicit `X-Tenant-Id` header wins, otherwise
+/// fall back to the configured default tenant slug. Iter 4+ replaces
+/// this with the real session-token / multi-tenant middleware lookup.
+fn resolve_tenant(headers: &HeaderMap, cfg: &Config) -> String {
+    if let Some(v) = headers.get("x-tenant-id").and_then(|v| v.to_str().ok()) {
+        if !v.trim().is_empty() {
+            return v.trim().to_string();
+        }
+    }
+    cfg.tenants.default.clone()
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // The platform clock can't be before the epoch in practice; if
+        // it is, the budget gate degrades to a max-session-only check
+        // (returning 0 makes today the unix epoch which is harmless
+        // for budget arithmetic).
+        .unwrap_or(0)
 }
 
 /// Stub router used by the legacy [`super::router`] composition that
@@ -121,25 +171,53 @@ async fn voice_handler(
         }
     };
 
-    // At this point the flag is on AND the subprotocol matches. The
-    // request still has to be a real WebSocket upgrade — a plain GET
-    // with the right `Sec-WebSocket-Protocol` header but no `Upgrade:
-    // websocket` is a malformed client, not a security event.
+    // ---- iter 3: per-tenant minutes-per-day budget gate ---------------
+    //
+    // Runs **before** the upgrade attempt so an over-budget tenant
+    // gets a clean HTTP 429 instead of a half-opened WebSocket. The
+    // unwrap is safe: the early `enabled` check above guarantees
+    // `snap.voice` is `Some`. Defensive `clone()` so we drop the
+    // ArcSwap guard before doing any blocking spend-store work.
+    let voice_cfg = snap
+        .voice
+        .as_ref()
+        .expect("voice config must be present once enabled was true")
+        .clone();
+    let tenant = resolve_tenant(&headers, &snap);
+    let now = now_unix_secs();
+    let day_epoch = utc_day_epoch(now);
+    let reset_at = next_utc_midnight(now);
+    let today = state.spend.snapshot(&tenant, day_epoch);
+    match evaluate_budget(&voice_cfg, today, reset_at) {
+        BudgetDecision::Allow { .. } => {}
+        BudgetDecision::Deny { reason, reset_at } => {
+            warn!(
+                target: "voice",
+                tenant = %tenant,
+                day_epoch,
+                ?reason,
+                "voice session refused: budget gate"
+            );
+            return budget_exhausted_response(&reason, reset_at);
+        }
+    }
+
+    // At this point the flag is on AND the subprotocol matches AND the
+    // tenant has budget. The request still has to be a real WebSocket
+    // upgrade — a plain GET with the right `Sec-WebSocket-Protocol`
+    // header but no `Upgrade: websocket` is a malformed client, not a
+    // security event.
     let ws = match ws {
         Some(ws) => ws,
         None => return upgrade_required_response(),
     };
 
-    // Resolve the provider alias *now* so the upgrade response carries
-    // a stable identifier into `started`. Falls back to default_voice
-    // if the section is unexpectedly None at this point (which would
-    // be a bug; the early-return above should have caught it).
-    let provider = snap
-        .voice
-        .as_ref()
-        .map(|v| v.provider_alias.clone())
-        .unwrap_or_else(|| "openai-realtime".to_string());
+    // Record the attempt in the spend store so iter 8's audit table
+    // sees one row per session-start regardless of subsequent failure
+    // (provider unavailable, immediate disconnect, etc.).
+    let _post = state.spend.record_session_start(&tenant, day_epoch);
 
+    let provider = voice_cfg.provider_alias.clone();
     ws.protocols([accepted])
         .on_upgrade(move |socket| run_voice_session(socket, provider))
 }
@@ -201,6 +279,36 @@ fn subprotocol_rejected_response(reason: &str) -> Response {
         "expected_subprotocol": framing::SUBPROTOCOL,
     }));
     (StatusCode::BAD_REQUEST, body).into_response()
+}
+
+/// 429 Too Many Requests body for the budget-gate refusal. Carries
+/// `reset_at` (UNIX seconds, next UTC midnight) so the client can
+/// schedule a retry at the right time without polling.
+fn budget_exhausted_response(reason: &BudgetDenyReason, reset_at: u64) -> Response {
+    let (code, message) = match reason {
+        BudgetDenyReason::DayBudgetExhausted {
+            used_seconds,
+            cap_seconds,
+        } => (
+            "budget_exhausted",
+            format!(
+                "tenant has used {}s of the {}s daily voice budget",
+                used_seconds, cap_seconds
+            ),
+        ),
+        BudgetDenyReason::BudgetIsZero => (
+            "budget_exhausted",
+            "voice.budget_minutes_per_tenant_per_day is set to 0; \
+             voice is administratively disabled for this tenant"
+                .to_string(),
+        ),
+    };
+    let body = Json(json!({
+        "error": code,
+        "message": message,
+        "reset_at": reset_at,
+    }));
+    (StatusCode::TOO_MANY_REQUESTS, body).into_response()
 }
 
 /// Returned when the request looked correct on the surface (flag on +
@@ -423,5 +531,114 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ----- iter 3: cost gate -----
+
+    fn router_for_with_spend(cfg: Config, spend: Arc<dyn cost::VoiceSpend>) -> Router {
+        let state = VoiceState::with_spend(Arc::new(ArcSwap::from_pointee(cfg)), spend);
+        router_with_state(state)
+    }
+
+    fn enabled_cfg(budget_min: u32) -> Config {
+        let mut cfg = Config::default();
+        cfg.voice = Some(VoiceConfig {
+            enabled: true,
+            budget_minutes_per_tenant_per_day: budget_min,
+            ..VoiceConfig::default()
+        });
+        cfg
+    }
+
+    #[tokio::test]
+    async fn budget_check_allows_when_under_cap() {
+        // 30 min/day cap, fresh spend store → upgrade reaches the
+        // negotiation-success path (which oneshot can't fully drive,
+        // so we land on 426 / Upgrade Required). The important
+        // contract: 429 was NOT returned.
+        let resp = router_for(enabled_cfg(30))
+            .oneshot(ws_upgrade_request(Some("corlinman.voice.v1")))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UPGRADE_REQUIRED,
+            "should reach upgrade attempt, not 429"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_check_refuses_when_at_cap() {
+        // Pre-populate the spend store so today's seconds_used >= cap.
+        let spend: Arc<dyn cost::VoiceSpend> = Arc::new(InMemoryVoiceSpend::new());
+        let day = utc_day_epoch(now_unix_secs());
+        spend.add_seconds("default", day, 30 * 60);
+
+        let resp = router_for_with_spend(enabled_cfg(30), spend)
+            .oneshot(ws_upgrade_request(Some("corlinman.voice.v1")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "budget_exhausted");
+        assert!(v["reset_at"].is_u64());
+    }
+
+    #[tokio::test]
+    async fn budget_check_refuses_when_cap_is_zero() {
+        // Operator zeroed the cap as a kill-switch.
+        let resp = router_for(enabled_cfg(0))
+            .oneshot(ws_upgrade_request(Some("corlinman.voice.v1")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn budget_check_isolates_per_tenant() {
+        // Tenant A has burned the cap; tenant B is fresh — only A
+        // gets refused.
+        let spend: Arc<dyn cost::VoiceSpend> = Arc::new(InMemoryVoiceSpend::new());
+        let day = utc_day_epoch(now_unix_secs());
+        spend.add_seconds("a", day, 30 * 60);
+
+        // Build the router once and reuse — both tenants hit the same
+        // shared spend store via the X-Tenant-Id header.
+        let state = VoiceState::with_spend(
+            Arc::new(ArcSwap::from_pointee(enabled_cfg(30))),
+            spend,
+        );
+        let router = router_with_state(state);
+
+        let mut req_a = ws_upgrade_request(Some("corlinman.voice.v1"));
+        req_a
+            .headers_mut()
+            .insert("x-tenant-id", "a".parse().unwrap());
+        let resp_a = router.clone().oneshot(req_a).await.unwrap();
+        assert_eq!(resp_a.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let mut req_b = ws_upgrade_request(Some("corlinman.voice.v1"));
+        req_b
+            .headers_mut()
+            .insert("x-tenant-id", "b".parse().unwrap());
+        let resp_b = router.oneshot(req_b).await.unwrap();
+        assert_eq!(resp_b.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn budget_check_runs_after_subprotocol_check() {
+        // Wrong subprotocol must still 400 even when budget is at cap.
+        // (Don't burn an HTTP-cycle telling the operator about budget
+        // when the request couldn't have completed anyway.)
+        let spend: Arc<dyn cost::VoiceSpend> = Arc::new(InMemoryVoiceSpend::new());
+        let day = utc_day_epoch(now_unix_secs());
+        spend.add_seconds("default", day, 30 * 60);
+
+        let resp = router_for_with_spend(enabled_cfg(30), spend)
+            .oneshot(ws_upgrade_request(Some("corlinman.voice.v0")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
