@@ -30,12 +30,9 @@ import { TranscriptView } from "./transcript-view";
  * Replay dialog — opens from a session-row Replay button. Defaults to
  * `mode = "transcript"` (the read-only deterministic dump).
  *
- * The `rerun` mode is rendered as a disabled radio with a `title` tooltip
- * "coming in Wave 2.5". When the Rust backend ships its full diff renderer
- * (Wave 2.5) the disabled flag flips off and the response's `summary.rerun_diff`
- * sentinel goes from `"not_implemented_yet"` to a real diff payload — at
- * that point this component renders the diff view via a follow-up component;
- * v1 just shows the placeholder explainer block when it sees the sentinel.
+ * `rerun` calls the live replay path and renders generated assistant output
+ * when the gateway returns it. Older gateways can still emit the legacy
+ * `"not_implemented_yet"` sentinel, which we keep rendering as a placeholder.
  *
  * The dialog also surfaces breadcrumbs as `Admin / Sessions / <key>` so the
  * navigation context matches the rest of the admin shell. Breadcrumbs proper
@@ -52,7 +49,7 @@ interface ReplayDialogProps {
 
 export function ReplayDialog({ session, onClose }: ReplayDialogProps) {
   const { t } = useTranslation();
-  const [mode] = React.useState<ReplayMode>("transcript");
+  const [mode, setMode] = React.useState<ReplayMode>("transcript");
   const sessionKey = session?.session_key ?? null;
 
   const mutation = useMutation<ReplayResult, Error, { mode: ReplayMode }>({
@@ -67,9 +64,11 @@ export function ReplayDialog({ session, onClose }: ReplayDialogProps) {
   // stale result so the next open doesn't flash old data.
   React.useEffect(() => {
     if (!sessionKey) {
+      setMode("transcript");
       mutation.reset();
       return;
     }
+    setMode("transcript");
     mutation.mutate({ mode: "transcript" });
     // We intentionally exclude `mutation` from deps — adding it triggers a
     // re-fetch loop because react-query rebuilds the closure on every render.
@@ -79,6 +78,11 @@ export function ReplayDialog({ session, onClose }: ReplayDialogProps) {
   const open = sessionKey !== null;
   const onOpenChange = (next: boolean): void => {
     if (!next) onClose();
+  };
+  const handleModeChange = (next: ReplayMode): void => {
+    if (!sessionKey) return;
+    setMode(next);
+    mutation.mutate({ mode: next });
   };
 
   return (
@@ -102,7 +106,7 @@ export function ReplayDialog({ session, onClose }: ReplayDialogProps) {
         </DialogHeader>
 
         <div className="max-h-[70vh] overflow-y-auto px-6 py-4">
-          <ModeSelector mode={mode} />
+          <ModeSelector mode={mode} onModeChange={handleModeChange} />
           <div className="mt-4">
             <ReplayBody result={mutation.data} mutation={mutation} />
           </div>
@@ -146,11 +150,15 @@ function ReplayBreadcrumbs({ sessionKey }: { sessionKey: string }) {
 
 /**
  * Mode picker. Native radios — matches the W1 tenant-switcher discipline of
- * "no extra primitives unless we need them". `rerun` is disabled in v1 with
- * a `title` tooltip; once Wave 2.5 ships the diff renderer, the `disabled`
- * flag flips off.
+ * "no extra primitives unless we need them".
  */
-function ModeSelector({ mode }: { mode: ReplayMode }) {
+function ModeSelector({
+  mode,
+  onModeChange,
+}: {
+  mode: ReplayMode;
+  onModeChange: (mode: ReplayMode) => void;
+}) {
   const { t } = useTranslation();
   return (
     <fieldset
@@ -166,32 +174,26 @@ function ModeSelector({ mode }: { mode: ReplayMode }) {
           name="replay-mode"
           value="transcript"
           checked={mode === "transcript"}
-          readOnly
+          onChange={() => onModeChange("transcript")}
           data-testid="replay-mode-transcript"
           className="accent-tp-amber"
         />
         <span>{t("sessions.modeTranscript")}</span>
       </label>
       <label
-        className="flex cursor-not-allowed items-center gap-2 text-xs text-tp-ink-3 opacity-60"
-        title={t("sessions.modeRerunComingSoon")}
+        className="flex items-center gap-2 text-xs text-tp-ink-2"
         data-testid="replay-mode-rerun-label"
       >
         <input
           type="radio"
           name="replay-mode"
           value="rerun"
-          checked={false}
-          disabled
-          aria-disabled="true"
-          readOnly
+          checked={mode === "rerun"}
+          onChange={() => onModeChange("rerun")}
           data-testid="replay-mode-rerun"
           className="accent-tp-amber"
         />
         <span>{t("sessions.modeRerun")}</span>
-        <span className="ml-auto rounded-full border border-tp-glass-edge bg-tp-glass-inner px-1.5 py-0.5 font-mono text-[10px] text-tp-ink-3">
-          {t("sessions.modeRerunComingSoon")}
-        </span>
       </label>
     </fieldset>
   );
@@ -260,6 +262,23 @@ function ReplayBody({ result, mutation }: ReplayBodyProps) {
     );
   }
 
+  if (result.kind === "rerun_disabled") {
+    return (
+      <div
+        role="alert"
+        className="rounded-md border border-tp-glass-edge bg-tp-glass-inner px-4 py-3 text-xs text-tp-ink-2"
+        data-testid="replay-rerun-disabled"
+      >
+        <div className="font-medium text-tp-ink">
+          {t("sessions.rerunDisabledTitle")}
+        </div>
+        <div className="mt-1 text-tp-ink-3">
+          {t("sessions.rerunDisabledHint")}
+        </div>
+      </div>
+    );
+  }
+
   return <ReplayPayload replay={result.replay} />;
 }
 
@@ -268,6 +287,7 @@ function ReplayPayload({ replay }: { replay: ReplayResponse }) {
   const isRerunStub =
     replay.mode === "rerun" &&
     replay.summary.rerun_diff === RERUN_NOT_IMPLEMENTED;
+  const generated = replay.rerun?.generated ?? [];
 
   return (
     <div className="space-y-3">
@@ -282,6 +302,36 @@ function ReplayPayload({ replay }: { replay: ReplayResponse }) {
           </div>
           <div className="mt-1 text-tp-ink-3">
             {t("sessions.rerunNotImplementedHint")}
+          </div>
+        </div>
+      ) : null}
+
+      {generated.length > 0 ? (
+        <div
+          className="rounded-md border border-tp-glass-edge bg-tp-glass-inner px-4 py-3 text-xs text-tp-ink-2"
+          data-testid="replay-rerun-generated"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-tp-ink">
+              {t("sessions.rerunGeneratedTitle")}
+            </span>
+            {replay.rerun?.finish_reason ? (
+              <span className="font-mono text-[10px] text-tp-ink-3">
+                {t("sessions.rerunFinishReason", {
+                  reason: replay.rerun.finish_reason,
+                })}
+              </span>
+            ) : null}
+          </div>
+          <div className="mt-2 space-y-2">
+            {generated.map((message, index) => (
+              <div
+                key={`${message.role}-${index}`}
+                className="whitespace-pre-wrap rounded-sm border border-tp-glass-edge/70 bg-tp-glass-2 px-3 py-2 text-tp-ink"
+              >
+                {message.content}
+              </div>
+            ))}
           </div>
         </div>
       ) : null}

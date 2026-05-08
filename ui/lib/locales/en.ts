@@ -1583,10 +1583,14 @@ export const en = {
     modeLabel: "Mode",
     modeTranscript: "Transcript (read-only)",
     modeRerun: "Rerun (simulate)",
-    modeRerunComingSoon: "coming in Wave 2.5",
     rerunNotImplementedTitle: "Rerun mode is not implemented yet",
     rerunNotImplementedHint:
       "The diff renderer ships in Wave 2.5. The backend currently returns this placeholder.",
+    rerunGeneratedTitle: "Rerun output",
+    rerunFinishReason: "finish: {{reason}}",
+    rerunDisabledTitle: "Rerun is unavailable",
+    rerunDisabledHint:
+      "The gateway is not connected to an agent backend for this replay.",
     transcriptEmpty: "This session has no replayable messages.",
     transcriptRoleUser: "User",
     transcriptRoleAssistant: "Assistant",

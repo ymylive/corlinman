@@ -9,7 +9,8 @@
  *   - Replay `200` happy path returns tagged `{ kind: "ok", replay }`
  *   - Replay `404 not_found` → `{ kind: "not_found", session_key }`
  *   - Replay `503 sessions_disabled` → `{ kind: "disabled" }`
- *   - Replay rerun mode includes the `rerun_diff` sentinel
+ *   - Replay `503 rerun_disabled` → `{ kind: "rerun_disabled" }`
+ *   - Replay rerun mode includes generated assistant output
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -195,8 +196,46 @@ describe("replaySession", () => {
     expect(result.kind).toBe("disabled");
   });
 
-  it("forwards rerun mode in the request body and surfaces the rerun_diff sentinel", async () => {
+  it("returns the rerun_disabled tag on 503 rerun_disabled", async () => {
+    const { fn } = makeFetchStub(() =>
+      jsonResponse(503, { error: "rerun_disabled" }),
+    );
+    vi.stubGlobal("fetch", fn);
+
+    const result = await replaySession("qq:1234", { mode: "rerun" });
+    expect(result.kind).toBe("rerun_disabled");
+  });
+
+  it("forwards rerun mode in the request body and surfaces generated output", async () => {
     const { fn, calls } = makeFetchStub(() =>
+      jsonResponse(200, {
+        session_key: "qq:1234",
+        mode: "rerun",
+        transcript: [],
+        summary: {
+          message_count: 0,
+          tenant_id: "default",
+          rerun_diff: "changed",
+        },
+        rerun: {
+          finish_reason: "stop",
+          generated: [{ role: "assistant", content: "fresh answer" }],
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fn);
+
+    const result = await replaySession("qq:1234", { mode: "rerun" });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    const body = JSON.parse(String(calls[0]?.init.body ?? "{}"));
+    expect(body.mode).toBe("rerun");
+    expect(result.replay.summary.rerun_diff).toBe("changed");
+    expect(result.replay.rerun?.generated[0]?.content).toBe("fresh answer");
+  });
+
+  it("keeps the legacy rerun_diff sentinel shape readable", async () => {
+    const { fn } = makeFetchStub(() =>
       jsonResponse(200, {
         session_key: "qq:1234",
         mode: "rerun",
@@ -213,8 +252,6 @@ describe("replaySession", () => {
     const result = await replaySession("qq:1234", { mode: "rerun" });
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") throw new Error("expected ok");
-    const body = JSON.parse(String(calls[0]?.init.body ?? "{}"));
-    expect(body.mode).toBe("rerun");
     expect(result.replay.summary.rerun_diff).toBe(RERUN_NOT_IMPLEMENTED);
   });
 });

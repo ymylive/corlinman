@@ -6,8 +6,7 @@
  *   - Transcript renders with role-based styling (user / assistant rows)
  *   - 404 from the API surfaces an inline "session not found" block
  *   - 503 from the API surfaces the disabled banner inside the dialog
- *   - Rerun mode placeholder (`rerun_diff = "not_implemented_yet"`)
- *     renders the deferral notice
+ *   - Rerun mode can be selected and renders generated assistant output
  *   - Close button fires onClose
  *
  * The Sessions API client (`@/lib/api/sessions`) is mocked at the module
@@ -214,7 +213,7 @@ describe("ReplayDialog", () => {
     expect(await screen.findByTestId("replay-rerun-stub")).toBeInTheDocument();
   });
 
-  it("disables the rerun radio with a 'coming in Wave 2.5' tooltip", async () => {
+  it("runs rerun mode and renders generated assistant output", async () => {
     replayMock.mockResolvedValueOnce({
       kind: "ok",
       replay: {
@@ -222,6 +221,28 @@ describe("ReplayDialog", () => {
         mode: "transcript",
         transcript: [],
         summary: { message_count: 0, tenant_id: "default" },
+      },
+    });
+    replayMock.mockResolvedValueOnce({
+      kind: "ok",
+      replay: {
+        session_key: "qq:1234",
+        mode: "rerun",
+        transcript: [],
+        summary: {
+          message_count: 0,
+          tenant_id: "default",
+          rerun_diff: "changed",
+        },
+        rerun: {
+          finish_reason: "stop",
+          generated: [
+            {
+              role: "assistant",
+              content: "fresh answer",
+            },
+          ],
+        },
       },
     });
 
@@ -232,9 +253,15 @@ describe("ReplayDialog", () => {
     );
 
     const rerun = await screen.findByTestId("replay-mode-rerun");
-    expect(rerun).toBeDisabled();
-    const label = screen.getByTestId("replay-mode-rerun-label");
-    expect(label.getAttribute("title")).toMatch(/Wave 2.5/i);
+    expect(rerun).not.toBeDisabled();
+    fireEvent.click(rerun);
+
+    await waitFor(() => {
+      expect(replayMock).toHaveBeenLastCalledWith("qq:1234", { mode: "rerun" });
+    });
+    expect(await screen.findByTestId("replay-rerun-generated")).toHaveTextContent(
+      "fresh answer",
+    );
   });
 
   it("fires onClose when the close button is pressed", async () => {

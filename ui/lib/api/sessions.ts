@@ -18,11 +18,9 @@
  * UI formats it via `new Date(ms).toLocaleString()`. Transcript message `ts`
  * is RFC-3339 / ISO-8601 (matches the `tenants.created_at` convention).
  *
- * The `rerun` mode is stubbed in v1: the response carries
- * `summary.rerun_diff = "not_implemented_yet"` and the same transcript shape.
- * The page renders a placeholder explaining the deferral when it sees that
- * sentinel; the dialog UI keeps `rerun` disabled with a "coming in Wave 2.5"
- * tooltip until W2.5 ships the full diff renderer.
+ * The `rerun` mode replays recorded user turns through the live agent backend.
+ * Newer gateways include a `rerun.generated` assistant transcript; older
+ * gateways may still return `summary.rerun_diff = "not_implemented_yet"`.
  */
 
 import { CorlinmanApiError, apiFetch } from "@/lib/api";
@@ -58,10 +56,20 @@ export interface ReplaySummary {
   message_count: number;
   tenant_id: string;
   /**
-   * Sentinel string `"not_implemented_yet"` when `mode === "rerun"` in v1.
-   * Absent otherwise. The UI keys off this to render the deferral notice.
+   * `"changed"` / `"unchanged"` for live reruns, or the legacy
+   * `"not_implemented_yet"` sentinel from older gateways.
    */
   rerun_diff?: string;
+}
+
+export interface RerunGeneratedMessage {
+  role: "assistant";
+  content: string;
+}
+
+export interface ReplayRerun {
+  generated: RerunGeneratedMessage[];
+  finish_reason?: string | null;
 }
 
 export interface ReplayResponse {
@@ -69,6 +77,7 @@ export interface ReplayResponse {
   mode: ReplayMode;
   transcript: TranscriptMessage[];
   summary: ReplaySummary;
+  rerun?: ReplayRerun;
 }
 
 /** Tagged result so callers can branch on `503 sessions_disabled` without
@@ -80,7 +89,8 @@ export type SessionsListResult =
 export type ReplayResult =
   | { kind: "ok"; replay: ReplayResponse }
   | { kind: "not_found"; session_key: string }
-  | { kind: "disabled" };
+  | { kind: "disabled" }
+  | { kind: "rerun_disabled" };
 
 /* ------------------------------------------------------------------ */
 /*                          URL builders                              */
@@ -101,12 +111,20 @@ export function sessionsReplayPath(sessionKey: string): string {
 /*                          Error helpers                             */
 /* ------------------------------------------------------------------ */
 
-function is503(err: unknown): boolean {
-  return err instanceof CorlinmanApiError && err.status === 503;
-}
-
 function is404(err: unknown): boolean {
   return err instanceof CorlinmanApiError && err.status === 404;
+}
+
+function hasErrorCode(err: unknown, status: number, code: string): boolean {
+  if (!(err instanceof CorlinmanApiError) || err.status !== status) {
+    return false;
+  }
+  try {
+    const body = JSON.parse(err.message) as { error?: unknown };
+    return body.error === code;
+  } catch {
+    return err.message.includes(code);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -127,13 +145,15 @@ export async function fetchSessions(): Promise<SessionsListResult> {
     );
     return { kind: "ok", sessions: res.sessions ?? [] };
   } catch (err) {
-    if (is503(err)) return { kind: "disabled" };
+    if (hasErrorCode(err, 503, "sessions_disabled")) {
+      return { kind: "disabled" };
+    }
     throw err;
   }
 }
 
 /**
- * POST /admin/sessions/:key/replay → deterministic transcript dump.
+ * POST /admin/sessions/:key/replay → transcript dump or live rerun.
  *
  * Defaults `mode` to `"transcript"` when omitted (matches Agent A's Rust
  * route default). Returns a tagged result so the dialog can render an inline
@@ -155,10 +175,15 @@ export async function replaySession(
     return { kind: "ok", replay };
   } catch (err) {
     if (is404(err)) return { kind: "not_found", session_key: sessionKey };
-    if (is503(err)) return { kind: "disabled" };
+    if (hasErrorCode(err, 503, "sessions_disabled")) {
+      return { kind: "disabled" };
+    }
+    if (hasErrorCode(err, 503, "rerun_disabled")) {
+      return { kind: "rerun_disabled" };
+    }
     throw err;
   }
 }
 
-/** Sentinel value emitted by Agent A's stub for `mode === "rerun"`. */
+/** Legacy sentinel value emitted by older gateways for `mode === "rerun"`. */
 export const RERUN_NOT_IMPLEMENTED = "not_implemented_yet" as const;

@@ -22,6 +22,7 @@ use arc_swap::ArcSwap;
 use axum::{routing::any, Router};
 use corlinman_core::config::Config;
 use corlinman_evolution::{EvolutionStore, HistoryRepo, ProposalsRepo};
+use corlinman_gateway_api::ChatService as ReplayChatService;
 use corlinman_identity::IdentityStore;
 use corlinman_plugins::registry::PluginRegistry;
 use corlinman_tenant::{AdminDb, TenantId, TenantPool};
@@ -46,6 +47,7 @@ pub mod config;
 pub mod embedding;
 pub mod evolution;
 pub mod federation;
+pub mod identity;
 pub mod logs;
 pub mod memory;
 pub mod models;
@@ -54,7 +56,6 @@ pub mod plugins;
 pub mod providers;
 pub mod rag;
 pub mod scheduler;
-pub mod identity;
 pub mod sessions;
 pub mod tenants;
 
@@ -180,6 +181,10 @@ pub struct AdminState {
     /// `SqliteIdentityStore` opened against the tenant's
     /// `user_identity.sqlite`; tests build one over a tempdir.
     pub identity_store: Option<Arc<dyn IdentityStore>>,
+    /// Executor for `/admin/sessions/:key/replay` with `mode = "rerun"`.
+    /// Transcript replay remains available without it; rerun returns
+    /// `rerun_disabled` when no agent backend is wired.
+    pub replay_chat_service: Option<Arc<dyn ReplayChatService>>,
 }
 
 impl AdminState {
@@ -205,6 +210,7 @@ impl AdminState {
             sessions_disabled: false,
             data_dir: None,
             identity_store: None,
+            replay_chat_service: None,
         }
     }
 
@@ -352,6 +358,12 @@ impl AdminState {
     /// 503 `identity_disabled` gate.
     pub fn with_identity_store(mut self, store: Arc<dyn IdentityStore>) -> Self {
         self.identity_store = Some(store);
+        self
+    }
+
+    /// Attach the chat service used to re-run stored user turns.
+    pub fn with_replay_chat_service(mut self, service: Arc<dyn ReplayChatService>) -> Self {
+        self.replay_chat_service = Some(service);
         self
     }
 

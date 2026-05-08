@@ -31,7 +31,7 @@
 //! Single-tenant deployments resolve to `TenantId::legacy_default()`,
 //! which collapses to the legacy unscoped path segment.
 
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 
 use axum::{
     extract::{Path, State},
@@ -40,9 +40,19 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use corlinman_replay::{list_sessions, replay, ReplayError, ReplayMode, ReplayOutput};
+use corlinman_core::{SessionStore, SqliteSessionStore};
+use corlinman_gateway_api::{
+    InternalChatEvent, InternalChatRequest, Message as ApiMessage, Role as ApiRole,
+};
+use corlinman_replay::{
+    list_sessions, replay, replay_from_messages, ReplayError, ReplayMode, ReplayOutput,
+    SessionListRow,
+};
+use corlinman_tenant::TenantId;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::AdminState;
@@ -156,13 +166,34 @@ fn storage_error(err: impl std::fmt::Display, ctx: &'static str) -> Response {
         .into_response()
 }
 
+fn rerun_disabled_503() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "rerun_disabled",
+        })),
+    )
+        .into_response()
+}
+
+fn rerun_failed_502(message: impl std::fmt::Display) -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({
+            "error": "rerun_failed",
+            "message": message.to_string(),
+        })),
+    )
+        .into_response()
+}
+
 async fn list_handler(State(state): State<AdminState>, Tenant(tenant): Tenant) -> Response {
     if state.sessions_disabled {
         return sessions_disabled_503();
     }
 
     let data_dir = resolve_data_dir(&state);
-    match list_sessions(&data_dir, &tenant).await {
+    match list_sessions_for_request(&state, &data_dir, &tenant).await {
         Ok(rows) => {
             let sessions = rows
                 .into_iter()
@@ -178,11 +209,7 @@ async fn list_handler(State(state): State<AdminState>, Tenant(tenant): Tenant) -
             // No sessions.sqlite for this tenant yet — return an empty
             // list rather than 500. New tenants legitimately hit this
             // path before the first chat lands a row.
-            (
-                StatusCode::OK,
-                Json(SessionsListOut { sessions: vec![] }),
-            )
-                .into_response()
+            (StatusCode::OK, Json(SessionsListOut { sessions: vec![] })).into_response()
         }
         Err(other) => storage_error(other, "list"),
     }
@@ -204,17 +231,199 @@ async fn replay_handler(
         .unwrap_or(ReplayMode::Transcript);
 
     let data_dir = resolve_data_dir(&state);
-    match replay(&data_dir, &tenant, &session_key, mode).await {
-        Ok(out) => {
+    match replay_for_request(
+        &state,
+        &data_dir,
+        &tenant,
+        &session_key,
+        ReplayMode::Transcript,
+    )
+    .await
+    {
+        Ok(mut out) => {
             // The primitive's wire shape already matches the UI
-            // contract — pass it through.
-            let out: ReplayOutput = out;
-            (StatusCode::OK, Json(out)).into_response()
+            // contract. Transcript mode passes through; rerun augments
+            // it with a fresh generated assistant turn below.
+            if mode == ReplayMode::Transcript {
+                let out: ReplayOutput = out;
+                return (StatusCode::OK, Json(out)).into_response();
+            }
+
+            let Some(service) = state.replay_chat_service.clone() else {
+                return rerun_disabled_503();
+            };
+            let req = rerun_request(&state, &session_key, &out);
+            match collect_rerun(service, req).await {
+                Ok(rerun) => {
+                    out.mode = ReplayMode::Rerun.as_str().to_string();
+                    out.summary.rerun_diff = Some(if rerun.generated.is_empty() {
+                        "unchanged".to_string()
+                    } else {
+                        "changed".to_string()
+                    });
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "session_key": out.session_key,
+                            "mode": out.mode,
+                            "transcript": out.transcript,
+                            "summary": out.summary,
+                            "rerun": rerun,
+                        })),
+                    )
+                        .into_response()
+                }
+                Err(err) => rerun_failed_502(err),
+            }
         }
         Err(ReplayError::SessionNotFound(_)) => session_not_found_404(&session_key),
         Err(ReplayError::StoreOpen { .. }) => session_not_found_404(&session_key),
         Err(other) => storage_error(other, "replay"),
     }
+}
+
+async fn list_sessions_for_request(
+    state: &AdminState,
+    data_dir: &FsPath,
+    tenant: &TenantId,
+) -> Result<Vec<SessionListRow>, ReplayError> {
+    if should_use_flat_legacy_sessions(state, tenant) {
+        return list_flat_legacy_sessions(data_dir).await;
+    }
+    list_sessions(data_dir, tenant).await
+}
+
+async fn replay_for_request(
+    state: &AdminState,
+    data_dir: &FsPath,
+    tenant: &TenantId,
+    session_key: &str,
+    mode: ReplayMode,
+) -> Result<ReplayOutput, ReplayError> {
+    if should_use_flat_legacy_sessions(state, tenant) {
+        return replay_flat_legacy_session(data_dir, tenant, session_key, mode).await;
+    }
+    replay(data_dir, tenant, session_key, mode).await
+}
+
+fn should_use_flat_legacy_sessions(state: &AdminState, tenant: &TenantId) -> bool {
+    !state.config.load().tenants.enabled && tenant.is_legacy_default()
+}
+
+async fn list_flat_legacy_sessions(data_dir: &FsPath) -> Result<Vec<SessionListRow>, ReplayError> {
+    let path = data_dir.join("sessions.sqlite");
+    let store = SqliteSessionStore::open(&path)
+        .await
+        .map_err(|source| ReplayError::StoreOpen {
+            path: path.clone(),
+            source,
+        })?;
+    let rows = store
+        .list_sessions()
+        .await
+        .map_err(|source| ReplayError::StoreLoad {
+            key: "<list>".into(),
+            source,
+        })?;
+    Ok(rows.into_iter().map(SessionListRow::from).collect())
+}
+
+async fn replay_flat_legacy_session(
+    data_dir: &FsPath,
+    tenant: &TenantId,
+    session_key: &str,
+    mode: ReplayMode,
+) -> Result<ReplayOutput, ReplayError> {
+    let path = data_dir.join("sessions.sqlite");
+    let store = SqliteSessionStore::open(&path)
+        .await
+        .map_err(|source| ReplayError::StoreOpen {
+            path: path.clone(),
+            source,
+        })?;
+    let messages = store
+        .load(session_key)
+        .await
+        .map_err(|source| ReplayError::StoreLoad {
+            key: session_key.to_string(),
+            source,
+        })?;
+    replay_from_messages(tenant, session_key, mode, messages)
+}
+
+#[derive(Debug, Serialize)]
+struct RerunOutput {
+    generated: Vec<RerunMessage>,
+    finish_reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RerunMessage {
+    role: &'static str,
+    content: String,
+}
+
+fn rerun_request(state: &AdminState, session_key: &str, out: &ReplayOutput) -> InternalChatRequest {
+    let cfg = state.config.load();
+    let model = if cfg.models.default.trim().is_empty() {
+        "default".to_string()
+    } else {
+        cfg.models.default.clone()
+    };
+    let messages = out
+        .transcript
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| ApiMessage {
+            role: ApiRole::User,
+            content: m.content.clone(),
+        })
+        .collect();
+    InternalChatRequest {
+        model,
+        messages,
+        session_key: format!("replay-rerun:{session_key}"),
+        stream: true,
+        max_tokens: None,
+        temperature: None,
+        attachments: Vec::new(),
+        binding: None,
+    }
+}
+
+async fn collect_rerun(
+    service: std::sync::Arc<dyn corlinman_gateway_api::ChatService>,
+    req: InternalChatRequest,
+) -> Result<RerunOutput, String> {
+    let mut stream = service.run(req, CancellationToken::new()).await;
+    let mut content = String::new();
+    let mut finish_reason = "stop".to_string();
+    while let Some(event) = stream.next().await {
+        match event {
+            InternalChatEvent::TokenDelta(delta) => content.push_str(&delta),
+            InternalChatEvent::ToolCall { .. } => {}
+            InternalChatEvent::Done {
+                finish_reason: reason,
+                ..
+            } => {
+                finish_reason = reason;
+                break;
+            }
+            InternalChatEvent::Error(err) => return Err(err.message),
+        }
+    }
+    let generated = if content.is_empty() {
+        Vec::new()
+    } else {
+        vec![RerunMessage {
+            role: "assistant",
+            content,
+        }]
+    };
+    Ok(RerunOutput {
+        generated,
+        finish_reason,
+    })
 }
 
 #[cfg(test)]
@@ -226,15 +435,22 @@ mod tests {
     use corlinman_core::{
         config::Config, SessionMessage, SessionRole, SessionStore, SqliteSessionStore,
     };
+    use corlinman_gateway_api::{
+        ChatEventStream, ChatService, InternalChatEvent, InternalChatRequest,
+    };
     use corlinman_plugins::registry::PluginRegistry;
     use corlinman_replay::sessions_db_path;
     use corlinman_tenant::TenantId;
+    use futures::stream;
     use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
-    fn test_state(tmp: &TempDir, disabled: bool) -> AdminState {
-        let cfg = Config::default();
+    fn test_state_with_tenants(tmp: &TempDir, disabled: bool, tenants_enabled: bool) -> AdminState {
+        let mut cfg = Config::default();
+        cfg.tenants.enabled = tenants_enabled;
         let mut state = AdminState::new(
             Arc::new(PluginRegistry::default()),
             Arc::new(ArcSwap::from_pointee(cfg)),
@@ -245,6 +461,10 @@ mod tests {
         // other's tempdir between resolve and read.
         state.data_dir = Some(tmp.path().to_path_buf());
         state
+    }
+
+    fn test_state(tmp: &TempDir, disabled: bool) -> AdminState {
+        test_state_with_tenants(tmp, disabled, true)
     }
 
     fn msg(role: SessionRole, content: &str, ts_secs: i64) -> SessionMessage {
@@ -291,6 +511,38 @@ mod tests {
         assert_eq!(json.sessions.len(), 2);
         assert_eq!(json.sessions[0].session_key, "session-new");
         assert_eq!(json.sessions[1].session_key, "session-old");
+    }
+
+    #[tokio::test]
+    async fn list_reads_flat_sessions_db_when_tenants_disabled() {
+        let tmp = TempDir::new().unwrap();
+
+        let path = tmp.path().join("sessions.sqlite");
+        let store = SqliteSessionStore::open(&path).await.unwrap();
+        store
+            .append(
+                "legacy-flat-session",
+                msg(SessionRole::User, "flat", 1_800_000_000),
+            )
+            .await
+            .unwrap();
+
+        let app = router(test_state_with_tenants(&tmp, false, false));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/sessions")
+                    .extension(TenantId::legacy_default())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: SessionsListOut = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.sessions.len(), 1);
+        assert_eq!(json.sessions[0].session_key, "legacy-flat-session");
     }
 
     #[tokio::test]
@@ -385,7 +637,132 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_rerun_emits_not_implemented_marker() {
+    async fn replay_reads_flat_sessions_db_when_tenants_disabled() {
+        let tmp = TempDir::new().unwrap();
+
+        let path = tmp.path().join("sessions.sqlite");
+        let store = SqliteSessionStore::open(&path).await.unwrap();
+        store
+            .append(
+                "legacy-flat-session",
+                msg(SessionRole::User, "remember me", 1_777_000_000),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "legacy-flat-session",
+                msg(SessionRole::Assistant, "remembered", 1_777_000_001),
+            )
+            .await
+            .unwrap();
+
+        let app = router(test_state_with_tenants(&tmp, false, false));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/sessions/legacy-flat-session/replay")
+                    .extension(TenantId::legacy_default())
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"mode":"transcript"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["session_key"], "legacy-flat-session");
+        assert_eq!(v["summary"]["tenant_id"], "default");
+        assert_eq!(v["transcript"].as_array().unwrap().len(), 2);
+        assert_eq!(v["transcript"][0]["content"], "remember me");
+    }
+
+    struct FakeReplayChat {
+        seen: Mutex<Vec<InternalChatRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChatService for FakeReplayChat {
+        async fn run(
+            &self,
+            req: InternalChatRequest,
+            _cancel: CancellationToken,
+        ) -> ChatEventStream {
+            self.seen.lock().await.push(req);
+            Box::pin(stream::iter(vec![
+                InternalChatEvent::TokenDelta("rerun ".into()),
+                InternalChatEvent::TokenDelta("answer".into()),
+                InternalChatEvent::Done {
+                    finish_reason: "stop".into(),
+                    usage: None,
+                },
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_rerun_uses_chat_service_and_returns_generated_output() {
+        let tmp = TempDir::new().unwrap();
+
+        let tenant = TenantId::legacy_default();
+        let path = sessions_db_path(tmp.path(), &tenant);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let store = SqliteSessionStore::open(&path).await.unwrap();
+        store
+            .append("test-session", msg(SessionRole::User, "hi", 1_777_000_000))
+            .await
+            .unwrap();
+        store
+            .append(
+                "test-session",
+                msg(SessionRole::Assistant, "old answer", 1_777_000_001),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "test-session",
+                msg(SessionRole::User, "again", 1_777_000_002),
+            )
+            .await
+            .unwrap();
+
+        let fake = Arc::new(FakeReplayChat {
+            seen: Mutex::new(Vec::new()),
+        });
+        let app = router(test_state(&tmp, false).with_replay_chat_service(fake.clone()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/sessions/test-session/replay")
+                    .extension(tenant)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"mode":"rerun"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["mode"], "rerun");
+        assert_eq!(v["summary"]["rerun_diff"], "changed");
+        assert_eq!(v["rerun"]["finish_reason"], "stop");
+        assert_eq!(v["rerun"]["generated"][0]["role"], "assistant");
+        assert_eq!(v["rerun"]["generated"][0]["content"], "rerun answer");
+
+        let seen = fake.seen.lock().await;
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].messages.len(), 2);
+        assert_eq!(seen[0].messages[0].content, "hi");
+        assert_eq!(seen[0].messages[1].content, "again");
+    }
+
+    #[tokio::test]
+    async fn replay_rerun_returns_503_when_chat_service_is_missing() {
         let tmp = TempDir::new().unwrap();
 
         let tenant = TenantId::legacy_default();
@@ -410,11 +787,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["mode"], "rerun");
-        assert_eq!(v["summary"]["rerun_diff"], "not_implemented_yet");
+        assert_eq!(v["error"], "rerun_disabled");
     }
 
     #[tokio::test]

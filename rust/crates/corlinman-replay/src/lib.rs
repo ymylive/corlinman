@@ -144,13 +144,12 @@ pub async fn list_sessions(
     tenant: &TenantId,
 ) -> Result<Vec<SessionListRow>, ReplayError> {
     let path = sessions_db_path(data_dir, tenant);
-    let store =
-        SqliteSessionStore::open(&path)
-            .await
-            .map_err(|source| ReplayError::StoreOpen {
-                path: path.clone(),
-                source,
-            })?;
+    let store = SqliteSessionStore::open(&path)
+        .await
+        .map_err(|source| ReplayError::StoreOpen {
+            path: path.clone(),
+            source,
+        })?;
 
     let rows = store
         .list_sessions()
@@ -193,15 +192,28 @@ pub async fn replay(
             source,
         })?;
 
-    let messages =
-        store
-            .load(session_key)
-            .await
-            .map_err(|source| ReplayError::StoreLoad {
-                key: session_key.to_string(),
-                source,
-            })?;
+    let messages = store
+        .load(session_key)
+        .await
+        .map_err(|source| ReplayError::StoreLoad {
+            key: session_key.to_string(),
+            source,
+        })?;
 
+    replay_from_messages(tenant, session_key, mode, messages)
+}
+
+/// Build replay output from already-loaded session messages.
+///
+/// This keeps alternate storage layouts (for example the legacy flat
+/// `sessions.sqlite` used by single-tenant deployments) on the same wire
+/// contract as the tenant-path replay primitive.
+pub fn replay_from_messages(
+    tenant: &TenantId,
+    session_key: &str,
+    mode: ReplayMode,
+    messages: Vec<corlinman_core::SessionMessage>,
+) -> Result<ReplayOutput, ReplayError> {
     if messages.is_empty() {
         return Err(ReplayError::SessionNotFound(session_key.to_string()));
     }
@@ -209,7 +221,7 @@ pub async fn replay(
     let transcript: Vec<ReplayMessage> = messages
         .iter()
         .map(|m| ReplayMessage {
-            role: format!("{}", role_str(m.role)),
+            role: role_str(m.role).to_string(),
             content: m.content.clone(),
             ts: m.ts.format(&Rfc3339).unwrap_or_default(),
         })
@@ -327,14 +339,9 @@ mod tests {
         // are seeded.
         let _store = SqliteSessionStore::open(&path).await.unwrap();
 
-        let err = replay(
-            tmp.path(),
-            &tenant,
-            "ghost-session",
-            ReplayMode::Transcript,
-        )
-        .await
-        .expect_err("missing session must error");
+        let err = replay(tmp.path(), &tenant, "ghost-session", ReplayMode::Transcript)
+            .await
+            .expect_err("missing session must error");
 
         assert!(matches!(err, ReplayError::SessionNotFound(k) if k == "ghost-session"));
     }
