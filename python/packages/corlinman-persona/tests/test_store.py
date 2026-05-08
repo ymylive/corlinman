@@ -24,9 +24,9 @@ def db_path(tmp_path: Path) -> Path:
 async def test_open_or_create_creates_schema(db_path: Path) -> None:
     """Opening a fresh path materialises both the file and the table.
 
-    Phase 3.1 added ``tenant_id`` so multi-tenant rollout in Phase 4 is
-    a single-line call-site change. This test pins the column set so
-    the next migration can't silently drop the column.
+    ``tenant_id`` is part of the primary key so the same ``agent_id`` can
+    coexist across tenants. This test pins the column set so the next
+    migration can't silently drop the column.
     """
     store = await PersonaStore.open_or_create(db_path)
     try:
@@ -34,10 +34,12 @@ async def test_open_or_create_creates_schema(db_path: Path) -> None:
         # Table must exist with the documented columns.
         conn = sqlite3.connect(db_path)
         try:
-            cols = {
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(agent_persona_state)")}
+            pk_cols = [
                 row[1]
                 for row in conn.execute("PRAGMA table_info(agent_persona_state)")
-            }
+                if row[5] > 0
+            ]
         finally:
             conn.close()
         assert cols == {
@@ -49,6 +51,7 @@ async def test_open_or_create_creates_schema(db_path: Path) -> None:
             "updated_at",
             "state_json",
         }
+        assert pk_cols == ["tenant_id", "agent_id"]
     finally:
         await store.close()
 
@@ -114,9 +117,7 @@ async def test_push_recent_topic_caps_at_twenty(db_path: Path) -> None:
     """The 21st distinct topic must evict the oldest entry."""
     async with PersonaStore(db_path) as store:
         seed = [f"t{i}" for i in range(RECENT_TOPICS_CAP)]
-        await store.upsert(
-            PersonaState(agent_id="mentor", recent_topics=seed, updated_at_ms=1)
-        )
+        await store.upsert(PersonaState(agent_id="mentor", recent_topics=seed, updated_at_ms=1))
         await store.push_recent_topic("mentor", "fresh")
         got = await store.get("mentor")
     assert got is not None
@@ -154,9 +155,7 @@ async def test_upsert_dedups_and_caps_on_write(db_path: Path) -> None:
 
 async def test_update_fatigue_clamps_high_and_low(db_path: Path) -> None:
     async with PersonaStore(db_path) as store:
-        await store.upsert(
-            PersonaState(agent_id="mentor", fatigue=0.5, updated_at_ms=1)
-        )
+        await store.upsert(PersonaState(agent_id="mentor", fatigue=0.5, updated_at_ms=1))
         await store.update_fatigue("mentor", 5.0)  # would overflow 1.0
         high = await store.get("mentor")
         assert high is not None
@@ -195,9 +194,7 @@ async def test_recent_topics_serialised_as_json_array(db_path: Path) -> None:
     using sqlite3 directly can decode the column without bespoke logic."""
     async with PersonaStore(db_path) as store:
         await store.upsert(
-            PersonaState(
-                agent_id="mentor", recent_topics=["a", "b"], updated_at_ms=1
-            )
+            PersonaState(agent_id="mentor", recent_topics=["a", "b"], updated_at_ms=1)
         )
     conn = sqlite3.connect(db_path)
     try:
@@ -256,31 +253,25 @@ async def test_use_outside_context_raises(db_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.1: tenant_id scoping
+# Tenant scoping
 #
-# v0 schema kept ``agent_id`` as PRIMARY KEY; Phase 3.1 adds the
-# ``tenant_id`` column so Phase 4's multi-tenant fan-out has a place to
-# write to without a heavyweight ALTER TABLE then. The PK rewrite to a
-# composite key is deferred to Phase 4 (SQLite can't change a PK in
-# place). Practical implication: today every row's tenant_id is
-# ``'default'``; the read path filter still scopes correctly because
-# every row matches the same value.
+# v0 schema kept ``agent_id`` as PRIMARY KEY; the current store rewrites
+# that table to ``PRIMARY KEY(tenant_id, agent_id)`` because SQLite cannot
+# alter a primary key in place.
 # ---------------------------------------------------------------------------
 
 
 async def test_list_all_default_tenant_skips_other_tenant_rows(db_path: Path) -> None:
     """A row whose ``tenant_id`` got rewritten out of band must not be
     returned by the default-tenant read. Pins the WHERE-clause scope
-    so Phase 4 can flip tenant_id at the call site and trust the
-    isolation."""
+    so callers can trust tenant isolation."""
     import sqlite3
 
     async with PersonaStore(db_path) as store:
         await store.upsert(PersonaState(agent_id="alpha", updated_at_ms=1))
         await store.upsert(PersonaState(agent_id="beta", updated_at_ms=1))
     # Re-tag one row's tenant_id without going through the
-    # store API — simulates the Phase 4 multi-tenant world where
-    # the same DB carries rows from many tenants.
+    # store API — simulates a DB carrying rows from many tenants.
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
@@ -318,3 +309,105 @@ async def test_get_filters_by_tenant_id(db_path: Path) -> None:
         got = await store.get("mentor", tenant_id="other-tenant")
         assert got is not None
         assert got.mood == "curious"
+
+
+async def test_same_agent_id_can_coexist_across_tenants(db_path: Path) -> None:
+    async with PersonaStore(db_path) as store:
+        await store.upsert(
+            PersonaState(agent_id="mentor", mood="focused", fatigue=0.2, updated_at_ms=1),
+            tenant_id="tenant-a",
+        )
+        await store.upsert(
+            PersonaState(agent_id="mentor", mood="calm", fatigue=0.7, updated_at_ms=2),
+            tenant_id="tenant-b",
+        )
+
+        tenant_a = await store.get("mentor", tenant_id="tenant-a")
+        tenant_b = await store.get("mentor", tenant_id="tenant-b")
+        list_a = await store.list_all(tenant_id="tenant-a")
+        list_b = await store.list_all(tenant_id="tenant-b")
+
+    assert tenant_a is not None
+    assert tenant_a.mood == "focused"
+    assert tenant_a.fatigue == pytest.approx(0.2)
+    assert tenant_b is not None
+    assert tenant_b.mood == "calm"
+    assert tenant_b.fatigue == pytest.approx(0.7)
+    assert [row.mood for row in list_a] == ["focused"]
+    assert [row.mood for row in list_b] == ["calm"]
+
+
+async def test_mutations_for_same_agent_id_do_not_cross_tenants(db_path: Path) -> None:
+    async with PersonaStore(db_path) as store:
+        await store.upsert(
+            PersonaState(agent_id="mentor", mood="focused", fatigue=0.2, updated_at_ms=1),
+            tenant_id="tenant-a",
+        )
+        await store.upsert(
+            PersonaState(agent_id="mentor", mood="calm", fatigue=0.7, updated_at_ms=2),
+            tenant_id="tenant-b",
+        )
+
+        await store.update_mood("mentor", "curious", tenant_id="tenant-a")
+        await store.update_fatigue("mentor", 0.1, tenant_id="tenant-a")
+        await store.push_recent_topic("mentor", "alpha", tenant_id="tenant-a")
+        assert await store.delete("mentor", tenant_id="tenant-a") is True
+
+        assert await store.get("mentor", tenant_id="tenant-a") is None
+        tenant_b = await store.get("mentor", tenant_id="tenant-b")
+
+    assert tenant_b is not None
+    assert tenant_b.mood == "calm"
+    assert tenant_b.fatigue == pytest.approx(0.7)
+    assert tenant_b.recent_topics == []
+
+
+async def test_legacy_agent_id_primary_key_schema_migrates_to_composite_pk(
+    db_path: Path,
+) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE agent_persona_state (
+                agent_id      TEXT PRIMARY KEY,
+                mood          TEXT NOT NULL DEFAULT 'neutral',
+                fatigue       REAL NOT NULL DEFAULT 0.0,
+                recent_topics TEXT NOT NULL DEFAULT '[]',
+                updated_at    INTEGER NOT NULL,
+                state_json    TEXT NOT NULL DEFAULT '{}'
+            );
+            INSERT INTO agent_persona_state
+                (agent_id, mood, fatigue, recent_topics, updated_at, state_json)
+            VALUES
+                ('mentor', 'legacy', 0.4, '["old"]', 123, '{"tone":"steady"}');
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    async with PersonaStore(db_path) as store:
+        legacy = await store.get("mentor")
+        await store.upsert(
+            PersonaState(agent_id="mentor", mood="fresh", fatigue=0.8, updated_at_ms=456),
+            tenant_id="tenant-b",
+        )
+        default_rows = await store.list_all()
+        tenant_b_rows = await store.list_all(tenant_id="tenant-b")
+
+    assert legacy is not None
+    assert legacy.mood == "legacy"
+    assert legacy.recent_topics == ["old"]
+    assert legacy.state_json == {"tone": "steady"}
+    assert [row.mood for row in default_rows] == ["legacy"]
+    assert [row.mood for row in tenant_b_rows] == ["fresh"]
+
+    conn = sqlite3.connect(db_path)
+    try:
+        pk_cols = [
+            row[1] for row in conn.execute("PRAGMA table_info(agent_persona_state)") if row[5] > 0
+        ]
+    finally:
+        conn.close()
+    assert pk_cols == ["tenant_id", "agent_id"]

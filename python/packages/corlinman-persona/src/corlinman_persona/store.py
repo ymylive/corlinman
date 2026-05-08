@@ -18,47 +18,31 @@ import aiosqlite
 
 from corlinman_persona.state import RECENT_TOPICS_CAP, PersonaState
 
-# Phase 3.1 adds ``tenant_id`` (default ``'default'``). Every read/write
-# scopes through it implicitly until Phase 4's multi-tenant fan-out flips
-# the parameter at the call site. See ``corlinman-user-model.store`` for
-# the parallel migration on user_traits.
+# ``tenant_id`` defaults to ``'default'`` for single-tenant callers, and
+# participates in the primary key so the same ``agent_id`` can coexist
+# across tenants without overwriting state.
 DEFAULT_TENANT_ID = "default"
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS agent_persona_state (
-    agent_id      TEXT PRIMARY KEY,
     tenant_id     TEXT NOT NULL DEFAULT 'default',
+    agent_id      TEXT NOT NULL,
     mood          TEXT NOT NULL DEFAULT 'neutral',
     fatigue       REAL NOT NULL DEFAULT 0.0,
     recent_topics TEXT NOT NULL DEFAULT '[]',
     updated_at    INTEGER NOT NULL,
-    state_json    TEXT NOT NULL DEFAULT '{}'
+    state_json    TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (tenant_id, agent_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_persona_tenant_agent
     ON agent_persona_state(tenant_id, agent_id);
 """
 
-# NB: ``agent_id`` stays PRIMARY KEY for now. SQLite can't change a PK
-# via ALTER TABLE, so promoting to a composite ``(tenant_id, agent_id)``
-# PK on legacy DBs would require a full table rewrite — Phase 4 will do
-# that in a versioned migration once we have real cross-tenant data and
-# can bound the rewrite cost. For Phase 3.1 the per-tenant index above
-# is enough to keep multi-tenant queries fast and the explicit
-# ``WHERE tenant_id = ? AND agent_id = ?`` predicate prevents cross-
-# tenant leaks even though the PK alone wouldn't.
-
-
-# Idempotent migrations applied after :data:`SCHEMA_SQL`. Each entry is
+# Idempotent column migrations. Each entry is
 # ``(table, column, ddl)`` — the runtime pragma-checks for the column
 # before running the ALTER. SQLite has no `ADD COLUMN IF NOT EXISTS`,
 # so we mirror the Rust crate's ``column_exists`` pattern.
-#
-# NB: pre-Phase-3.1 DBs created the table with ``agent_id`` as PRIMARY
-# KEY. ALTER TABLE can't change a primary key in SQLite, so the
-# migration only adds the column with a default of ``'default'``;
-# practically every existing row is therefore in the ``'default'``
-# tenant, which is exactly what we want.
 _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     (
         "agent_persona_state",
@@ -68,12 +52,74 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+async def _table_exists(conn: aiosqlite.Connection, table: str) -> bool:
+    cursor = await conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    return row is not None
+
+
 async def _column_exists(conn: aiosqlite.Connection, table: str, column: str) -> bool:
     """True iff ``table.column`` exists. Used by the migration runner."""
     cursor = await conn.execute(f"PRAGMA table_info({table})")
     rows = await cursor.fetchall()
     await cursor.close()
     return any(str(r[1]) == column for r in rows)
+
+
+async def _primary_key_columns(conn: aiosqlite.Connection, table: str) -> list[str]:
+    cursor = await conn.execute(f"PRAGMA table_info({table})")
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [str(r[1]) for r in sorted((r for r in rows if int(r[5]) > 0), key=lambda r: r[5])]
+
+
+async def _migrate_agent_persona_schema(conn: aiosqlite.Connection) -> None:
+    """Ensure ``agent_persona_state`` uses ``(tenant_id, agent_id)`` as PK."""
+    if not await _table_exists(conn, "agent_persona_state"):
+        await conn.executescript(SCHEMA_SQL)
+        return
+
+    for table, column, ddl in _MIGRATIONS:
+        if not await _column_exists(conn, table, column):
+            await conn.execute(ddl)
+
+    if await _primary_key_columns(conn, "agent_persona_state") == [
+        "tenant_id",
+        "agent_id",
+    ]:
+        await conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_agent_persona_tenant_agent
+               ON agent_persona_state(tenant_id, agent_id)"""
+        )
+        return
+
+    await conn.executescript(
+        """
+        DROP TABLE IF EXISTS agent_persona_state_migration_old;
+        ALTER TABLE agent_persona_state RENAME TO agent_persona_state_migration_old;
+        CREATE TABLE agent_persona_state (
+            tenant_id     TEXT NOT NULL DEFAULT 'default',
+            agent_id      TEXT NOT NULL,
+            mood          TEXT NOT NULL DEFAULT 'neutral',
+            fatigue       REAL NOT NULL DEFAULT 0.0,
+            recent_topics TEXT NOT NULL DEFAULT '[]',
+            updated_at    INTEGER NOT NULL,
+            state_json    TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, agent_id)
+        );
+        INSERT INTO agent_persona_state
+            (tenant_id, agent_id, mood, fatigue, recent_topics, updated_at, state_json)
+        SELECT tenant_id, agent_id, mood, fatigue, recent_topics, updated_at, state_json
+        FROM agent_persona_state_migration_old;
+        DROP TABLE agent_persona_state_migration_old;
+        CREATE INDEX IF NOT EXISTS idx_agent_persona_tenant_agent
+            ON agent_persona_state(tenant_id, agent_id);
+        """
+    )
 
 
 def _now_ms() -> int:
@@ -173,16 +219,11 @@ class PersonaStore:
         await self.close()
 
     async def _open(self) -> None:
-        # ``aiosqlite.connect`` will create the file on demand. We then
-        # apply the schema — ``IF NOT EXISTS`` makes it idempotent.
-        # Migrations land after the schema script: pre-Phase-3.1 DBs
-        # pick up the ``tenant_id`` column on first re-open without
-        # operator intervention.
+        # ``aiosqlite.connect`` will create the file on demand. The
+        # schema helper also rewrites legacy ``PRIMARY KEY(agent_id)``
+        # tables into the current composite-key shape.
         self._conn = await aiosqlite.connect(self._path)
-        await self._conn.executescript(SCHEMA_SQL)
-        for table, column, ddl in _MIGRATIONS:
-            if not await _column_exists(self._conn, table, column):
-                await self._conn.execute(ddl)
+        await _migrate_agent_persona_schema(self._conn)
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -204,8 +245,7 @@ class PersonaStore:
     ) -> PersonaState | None:
         """Return the row for ``(tenant_id, agent_id)`` or ``None``.
 
-        ``tenant_id`` is Phase 3.1 plumbing — defaults to ``'default'``
-        until Phase 4 wires multi-tenant ids.
+        ``tenant_id`` defaults to ``'default'`` for older call sites.
         """
         cursor = await self.conn.execute(
             """SELECT agent_id, mood, fatigue, recent_topics,
@@ -236,22 +276,12 @@ class PersonaStore:
         """
         capped = _dedup_cap(list(state.recent_topics))
         updated_at = state.updated_at_ms or _now_ms()
-        # Conflict target is ``agent_id`` because the v0 schema declares
-        # it as PRIMARY KEY and SQLite can't alter a PK in place. Phase 4
-        # will rewrite to a composite ``(tenant_id, agent_id)`` PK when
-        # multi-tenant rollout actually needs the same agent_id reused
-        # across tenants. Today every tenant_id stays ``'default'`` so
-        # the practical effect is identical and the upsert stays a single
-        # round-trip. The UPDATE clause writes ``tenant_id`` too so a
-        # migrated row that came in without the column gets stamped on
-        # first re-write.
         await self.conn.execute(
             """INSERT INTO agent_persona_state
                  (tenant_id, agent_id, mood, fatigue, recent_topics,
                   updated_at, state_json)
                VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(agent_id) DO UPDATE SET
-                 tenant_id     = excluded.tenant_id,
+               ON CONFLICT(tenant_id, agent_id) DO UPDATE SET
                  mood          = excluded.mood,
                  fatigue       = excluded.fatigue,
                  recent_topics = excluded.recent_topics,
