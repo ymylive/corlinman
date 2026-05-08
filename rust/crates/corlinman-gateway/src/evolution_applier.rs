@@ -238,6 +238,19 @@ pub enum ApplyError {
     /// prompt_template / tool_policy on-disk state failed.
     #[error("tenant state I/O failed: {0}")]
     TenantStateIo(#[source] anyhow::Error),
+    /// Phase 4 W2 B1 iter 5: meta-evolution capability gate. The
+    /// proposal's `kind.is_meta()` is true but the row's `decided_by`
+    /// is not in `[admin].meta_approver_users`. The route layer maps
+    /// this to a 403 so operators see "you/your operator must opt in
+    /// to meta approvals" rather than a generic 5xx.
+    ///
+    /// `user` carries the proposal's `decided_by` (or `"<missing>"`
+    /// when the proposal was never decided — applying a never-decided
+    /// row is already blocked by `NotApproved`, but the variant carries
+    /// a placeholder for completeness so the envelope shape stays
+    /// stable). `kind` is the meta kind that triggered the gate.
+    #[error("meta approver required (user={user}, kind={})", kind.as_str())]
+    MetaApproverRequired { user: String, kind: EvolutionKind },
 }
 
 /// Phase 4 W2 B3 iter 4 — return shape for the federation-aware apply
@@ -569,6 +582,15 @@ pub struct EvolutionApplier {
     /// `[evolution.federation] enabled = true` config flag (config
     /// knob is a follow-up; B3 iter 4 ships the in-memory wiring).
     rebroadcaster: Option<Arc<FederationRebroadcaster>>,
+    /// Phase 4 W2 B1 iter 5: operator-only meta-approver allow-list.
+    /// Sourced from `[admin].meta_approver_users` at gateway startup
+    /// and held by-value here so the applier can gate meta apply
+    /// calls without re-reading the config snapshot per request.
+    /// Empty (the default) means **no one** can approve meta — every
+    /// `is_meta()` proposal returns `MetaApproverRequired`. Operators
+    /// must explicitly opt in by adding their `decided_by` identifier
+    /// to the config list.
+    meta_approver_users: Vec<String>,
 }
 
 impl EvolutionApplier {
@@ -610,6 +632,7 @@ impl EvolutionApplier {
             skills_dir,
             source_tenant_id: TenantId::default(),
             rebroadcaster: None,
+            meta_approver_users: Vec::new(),
         }
     }
 
@@ -631,6 +654,27 @@ impl EvolutionApplier {
     /// applier.
     pub fn with_rebroadcaster(mut self, rb: Arc<FederationRebroadcaster>) -> Self {
         self.rebroadcaster = Some(rb);
+        self
+    }
+
+    /// Phase 4 W2 B1 iter 5 — fluent builder for the operator-only meta
+    /// approver allow-list. The list is the authoritative gate for
+    /// applying meta-evolution proposals (`kind.is_meta() == true`):
+    /// the route layer also enforces a parallel guard on
+    /// approve / apply, but this is the last line of defence so a
+    /// programmatic apply call (AutoRollback monitor, federation peer,
+    /// future cron-driven applier, …) can't bypass the operator opt-in.
+    ///
+    /// Default is the empty `Vec` (set in [`EvolutionApplier::new`]).
+    /// Empty means **no one** can apply meta — operators MUST set
+    /// `[admin].meta_approver_users` and wire the resulting `Vec` here
+    /// at gateway boot. Wiring TODO: the gateway main path constructs
+    /// `EvolutionApplier::new(...)` and would chain
+    /// `.with_meta_approver_users(cfg.admin.meta_approver_users.clone())`
+    /// on the result; this iter ships the fluent builder + applier-side
+    /// gate, with the boot wiring tracked as a follow-up.
+    pub fn with_meta_approver_users(mut self, users: Vec<String>) -> Self {
+        self.meta_approver_users = users;
         self
     }
 
@@ -721,6 +765,25 @@ impl EvolutionApplier {
             return Err(ApplyError::NotApproved(
                 proposal.status.as_str().to_string(),
             ));
+        }
+
+        // 1b. Phase 4 W2 B1 iter 5 — authoritative meta-approver gate.
+        //     The route layer guards approve/apply too, but this is the
+        //     last line of defence: the AutoRollback monitor, federation
+        //     peer-applies, and any future programmatic applier hit
+        //     this same code path, so the gate must live here. Empty
+        //     allow-list (the default) means *no one* can apply meta.
+        if proposal.kind.is_meta() {
+            let user = proposal
+                .decided_by
+                .clone()
+                .unwrap_or_else(|| "<missing>".to_string());
+            if !self.meta_approver_users.iter().any(|u| u == &user) {
+                return Err(ApplyError::MetaApproverRequired {
+                    user,
+                    kind: proposal.kind,
+                });
+            }
         }
 
         // 2. Open the intent log. Only proposals that survived the
@@ -3829,12 +3892,20 @@ mod tests {
         std::fs::create_dir_all(&skills_dir).unwrap();
         let kb = Arc::new(SqliteStore::open(&kb_path).await.unwrap());
         let evol = Arc::new(EvolutionStore::open(&evol_path).await.unwrap());
+        // Phase 4 W2 B1 iter 5: existing meta-apply tests seed
+        // `decided_by = "operator"` and call `applier.apply(&pid)`
+        // directly. The default applier has an empty meta-approver
+        // allow-list (deny-all), so opt the fixture into "operator"
+        // here to keep the legacy tests green. The new gate tests
+        // override this via `with_meta_approver_users` to exercise
+        // both the allowed and the blocked paths.
         let applier = EvolutionApplier::new(
             evol.clone(),
             kb.clone(),
             AutoRollbackThresholds::default(),
             skills_dir,
-        );
+        )
+        .with_meta_approver_users(vec!["operator".to_string()]);
         (tmp, applier, kb, evol)
     }
 
@@ -6464,5 +6535,95 @@ mod tests {
             Some(&["bravo".to_string()][..])
         );
         assert_eq!(count_peer_pending(&pool, &bravo).await, 0);
+    }
+
+    // ─── Phase 4 W2 B1 iter 5 — applier-side meta-approver gate ──────
+
+    /// Build a fresh applier whose `meta_approver_users` is exactly
+    /// `users` (no defaults). Mirrors `fresh_applier()` but skips the
+    /// "operator" convenience entry so the gate tests can exercise
+    /// both the empty (deny-all) and the explicit-allow cases.
+    async fn fresh_applier_with_meta_approvers(
+        users: &[&str],
+    ) -> (
+        TempDir,
+        EvolutionApplier,
+        Arc<SqliteStore>,
+        Arc<EvolutionStore>,
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let kb_path = tmp.path().join("kb.sqlite");
+        let evol_path = tmp.path().join("evolution.sqlite");
+        let skills_dir = tmp.path().join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let kb = Arc::new(SqliteStore::open(&kb_path).await.unwrap());
+        let evol = Arc::new(EvolutionStore::open(&evol_path).await.unwrap());
+        let applier = EvolutionApplier::new(
+            evol.clone(),
+            kb.clone(),
+            AutoRollbackThresholds::default(),
+            skills_dir,
+        )
+        .with_meta_approver_users(users.iter().map(|u| u.to_string()).collect());
+        (tmp, applier, kb, evol)
+    }
+
+    /// Empty allow-list (the config default) ⇒ every meta apply
+    /// returns `MetaApproverRequired` carrying the proposal's
+    /// `decided_by` and kind. The route layer maps this to the 403
+    /// envelope; the applier surfaces the typed variant for callers
+    /// that bypass the route (AutoRollback monitor, federation peer).
+    #[tokio::test]
+    async fn applier_meta_apply_blocked_when_decided_by_not_in_allowlist() {
+        let (_tmp, applier, _kb, evol) = fresh_applier_with_meta_approvers(&[]).await;
+        // Use an EngineConfig payload — the applier never reaches the
+        // payload-decoding step because the gate fires first.
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-meta-gate-block",
+            EvolutionKind::EngineConfig,
+            "clustering.min_signals",
+            r#"{"config_path":"clustering.min_signals","previous_value":3,"proposed_value":5,"reason":"x"}"#,
+        )
+        .await;
+        let err = applier.apply(&pid).await.unwrap_err();
+        match err {
+            ApplyError::MetaApproverRequired { user, kind } => {
+                // `seed_approved_kind` stamps `decided_by = "operator"`.
+                assert_eq!(user, "operator");
+                assert_eq!(kind, EvolutionKind::EngineConfig);
+            }
+            other => panic!("expected MetaApproverRequired, got {other:?}"),
+        }
+        // Proposal stays Approved — no audit row, no half-committed
+        // intent (gate fires before record_intent).
+        let row = ProposalsRepo::new(evol.pool().clone())
+            .get(&pid)
+            .await
+            .unwrap();
+        assert_eq!(row.status, EvolutionStatus::Approved);
+        assert!(row.applied_at.is_none());
+    }
+
+    /// Non-meta kinds short-circuit the gate even when the allow-list
+    /// is empty. MemoryOp must apply cleanly so non-meta operators
+    /// don't need any opt-in.
+    #[tokio::test]
+    async fn applier_non_meta_apply_unaffected_by_allowlist() {
+        let (_tmp, applier, kb, evol) = fresh_applier_with_meta_approvers(&[]).await;
+        let id = seed_chunk(&kb, "/c1", "doomed").await;
+        let pid = seed_approved(
+            &evol,
+            "evol-meta-gate-nonmeta",
+            &format!("delete_chunk:{id}"),
+        )
+        .await;
+        let history = applier.apply(&pid).await.unwrap();
+        assert_eq!(history.kind, EvolutionKind::MemoryOp);
+        let row = ProposalsRepo::new(evol.pool().clone())
+            .get(&pid)
+            .await
+            .unwrap();
+        assert_eq!(row.status, EvolutionStatus::Applied);
     }
 }

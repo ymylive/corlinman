@@ -222,6 +222,52 @@ fn storage_error(err: RepoError, ctx: &'static str) -> Response {
         .into_response()
 }
 
+/// Phase 4 W2 B1 iter 5 — operator-only meta-approver capability gate.
+///
+/// Returns `Ok(())` when:
+/// - `kind.is_meta()` is false (non-meta proposals are universally
+///   approvable — same authz as before this iter), OR
+/// - `decided_by` appears in `[admin].meta_approver_users`.
+///
+/// Returns `Err(403)` envelope `{"error": "meta_approver_required",
+/// "user": "<decided_by>", "kind": "<kind>"}` otherwise. Empty
+/// allow-list (the config default) means **no one** can approve meta
+/// — operators MUST opt in by listing their `decided_by` identifier.
+///
+/// Wired into `approve_proposal` and `apply_proposal`. `deny_proposal`
+/// is intentionally unaffected: denying a proposal is universally
+/// allowed regardless of kind so operators can always reject anything.
+/// The applier (`EvolutionApplier::apply`) carries a parallel guard
+/// for the programmatic path (AutoRollback monitor, federation peer
+/// applies, future cron-driven applier) — both layers are needed.
+fn assert_meta_approver(
+    state: &AdminState,
+    kind: EvolutionKind,
+    decided_by: &str,
+) -> Result<(), Response> {
+    if !kind.is_meta() {
+        return Ok(());
+    }
+    let cfg = state.config.load();
+    if cfg
+        .admin
+        .meta_approver_users
+        .iter()
+        .any(|u| u == decided_by)
+    {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "meta_approver_required",
+            "user": decided_by,
+            "kind": kind.as_str(),
+        })),
+    )
+        .into_response())
+}
+
 async fn list_proposals(State(state): State<AdminState>, Query(q): Query<ListQuery>) -> Response {
     let Some(store) = state.evolution_store.as_ref() else {
         return evolution_disabled();
@@ -295,6 +341,12 @@ async fn approve_proposal(
     };
     if !can_decide(current.status) {
         return invalid_state_transition(current.status, EvolutionStatus::Approved);
+    }
+    // Phase 4 W2 B1 iter 5: operator-only gate for meta proposals.
+    // Non-meta kinds short-circuit; meta kinds require `body.decided_by`
+    // to be present in `[admin].meta_approver_users`.
+    if let Err(resp) = assert_meta_approver(&state, current.kind, &body.decided_by) {
+        return resp;
     }
     if let Err(err) = repo
         .set_decision(&pid, EvolutionStatus::Approved, now_ms(), &body.decided_by)
@@ -496,6 +548,28 @@ async fn apply_proposal(State(state): State<AdminState>, Path(id): Path<String>)
         return evolution_disabled();
     };
     let pid = ProposalId::new(id.clone());
+
+    // Phase 4 W2 B1 iter 5: route-layer meta-approver gate. We need the
+    // proposal's kind + `decided_by` to evaluate the allow-list, so the
+    // store must also be wired (same precondition as approve/deny). The
+    // applier's parallel gate is the authoritative one — this layer
+    // returns the same 403 envelope as approve to keep the operator UX
+    // consistent. Missing-store falls through to the applier, which
+    // returns its own typed `MetaApproverRequired` mapped below.
+    if let Some(store) = state.evolution_store.as_ref() {
+        let (repo, _) = resolve_handles(store);
+        match repo.get(&pid).await {
+            Ok(p) => {
+                let decided_by = p.decided_by.as_deref().unwrap_or("<missing>");
+                if let Err(resp) = assert_meta_approver(&state, p.kind, decided_by) {
+                    return resp;
+                }
+            }
+            Err(RepoError::NotFound(_)) => return not_found(&id),
+            Err(err) => return storage_error(err, "apply.get"),
+        }
+    }
+
     match applier.apply(&pid).await {
         Ok(history) => Json(json!({
             "id": id,
@@ -617,6 +691,24 @@ async fn apply_proposal(State(state): State<AdminState>, Path(id): Path<String>)
                     "target": target,
                     "expected": expected,
                     "actual": actual,
+                })),
+            )
+                .into_response()
+        }
+        // Phase 4 W2 B1 iter 5: applier's authoritative meta-approver
+        // gate fired. The route layer guards the same case above, but
+        // a programmatic apply path (AutoRollback monitor, federation
+        // peer) can hit the applier directly and surface this variant
+        // through the standard error funnel — mirror the route-layer
+        // 403 envelope so operator dashboards see one shape.
+        Err(ApplyError::MetaApproverRequired { user, kind }) => {
+            EvolutionApplier::observe_failure(kind);
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "meta_approver_required",
+                    "user": user,
+                    "kind": kind.as_str(),
                 })),
             )
                 .into_response()
@@ -1504,5 +1596,158 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ─── Phase 4 W2 B1 iter 5 — operator-only meta-approver capability gate ──
+
+    /// Build an `AdminState`-backed router with a custom `Config`. The
+    /// existing `app_with` / `app_with_full` helpers freeze
+    /// `Config::default()`, which leaves `meta_approver_users = []`;
+    /// the iter-5 gate tests need to flip the allow-list per case so
+    /// they get a dedicated builder rather than mutating the shared
+    /// default.
+    fn app_with_config(
+        store: Option<Arc<EvolutionStore>>,
+        applier: Option<Arc<EvolutionApplier>>,
+        config: Config,
+    ) -> Router {
+        let state = AdminState {
+            plugins: Arc::new(PluginRegistry::default()),
+            config: Arc::new(ArcSwap::from_pointee(config)),
+            approval_gate: None as Option<Arc<ApprovalGate>>,
+            session_store: None,
+            config_path: None,
+            log_broadcast: None,
+            rag_store: None,
+            scheduler_history: None,
+            py_config_path: None,
+            config_watcher: None,
+            evolution_store: store,
+            evolution_applier: applier,
+            history_repo: None,
+            proposals_repo: None,
+            tenant_pool: None,
+            allowed_tenants: std::collections::BTreeSet::new(),
+            admin_db: None,
+            sessions_disabled: false,
+            data_dir: None,
+            identity_store: None,
+        };
+        router(state)
+    }
+
+    fn config_with_meta_approvers(users: &[&str]) -> Config {
+        let mut cfg = Config::default();
+        cfg.admin.meta_approver_users = users.iter().map(|u| u.to_string()).collect();
+        cfg
+    }
+
+    /// Insert a fresh `pending` proposal of `kind` so the route layer
+    /// can run its load → gate → set_decision pipeline. Sibling of the
+    /// existing `proposal()` helper which is locked to MemoryOp.
+    fn proposal_of_kind(id: &str, kind: EvolutionKind, status: EvolutionStatus) -> EvolutionProposal {
+        let mut p = proposal(id, status);
+        p.kind = kind;
+        // Engine config payload isn't validated by the route — keep
+        // `target` short and route-shaped so the row inserts cleanly.
+        p.target = "clustering.min_signals".into();
+        p
+    }
+
+    #[tokio::test]
+    async fn meta_approve_blocked_when_caller_not_in_allowlist() {
+        let (_tmp, store, repo) = fresh_store().await;
+        // EngineConfig is a meta kind — without an entry in
+        // `[admin].meta_approver_users` the route returns 403.
+        repo.insert(&proposal_of_kind(
+            "p-meta-1",
+            EvolutionKind::EngineConfig,
+            EvolutionStatus::Pending,
+        ))
+        .await
+        .unwrap();
+        // Default config: meta_approver_users empty.
+        let app = app_with_config(Some(store.clone()), None, Config::default());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/evolution/p-meta-1/approve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"decided_by":"alice"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let v = read_json(resp).await;
+        assert_eq!(v["error"], "meta_approver_required");
+        assert_eq!(v["user"], "alice");
+        assert_eq!(v["kind"], "engine_config");
+        // Row stays Pending — no decision was recorded.
+        let row = repo.get(&ProposalId::new("p-meta-1")).await.unwrap();
+        assert_eq!(row.status, EvolutionStatus::Pending);
+        assert!(row.decided_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn meta_approve_succeeds_when_caller_in_allowlist() {
+        let (_tmp, store, repo) = fresh_store().await;
+        repo.insert(&proposal_of_kind(
+            "p-meta-2",
+            EvolutionKind::ObserverFilter,
+            EvolutionStatus::Pending,
+        ))
+        .await
+        .unwrap();
+        let app = app_with_config(
+            Some(store.clone()),
+            None,
+            config_with_meta_approvers(&["alice"]),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/evolution/p-meta-2/approve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"decided_by":"alice"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = read_json(resp).await;
+        assert_eq!(v["status"], "approved");
+        let row = repo.get(&ProposalId::new("p-meta-2")).await.unwrap();
+        assert_eq!(row.status, EvolutionStatus::Approved);
+        assert_eq!(row.decided_by.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn non_meta_approve_unaffected_by_allowlist() {
+        let (_tmp, store, repo) = fresh_store().await;
+        // MemoryOp is non-meta — the gate must short-circuit even
+        // when the allow-list is empty, so a brand-new operator can
+        // approve it without operator config opt-in.
+        repo.insert(&proposal("p-nm-1", EvolutionStatus::Pending))
+            .await
+            .unwrap();
+        let app = app_with_config(Some(store.clone()), None, Config::default());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/evolution/p-nm-1/approve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"decided_by":"bob"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let row = repo.get(&ProposalId::new("p-nm-1")).await.unwrap();
+        assert_eq!(row.status, EvolutionStatus::Approved);
+        assert_eq!(row.decided_by.as_deref(), Some("bob"));
     }
 }

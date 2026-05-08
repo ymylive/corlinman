@@ -216,12 +216,31 @@ fn default_data_dir() -> PathBuf {
 // [admin]
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdminConfig {
     pub username: Option<String>,
     /// argon2id hash string (`$argon2id$...`). Never a raw password.
     pub password_hash: Option<String>,
+    /// Allow-list of `decided_by` values (typically the admin username) that
+    /// are permitted to approve / apply meta-evolution proposals
+    /// (`MetaWeights`, `MetaTemplate`, `MetaPolicy`). Empty (the default)
+    /// means no one can approve meta — operators MUST explicitly opt in.
+    /// Kept as a flat string list rather than a new role so existing
+    /// authn/authz layers (basic-auth admin user, future SSO subjects) can
+    /// drop their identifier in without schema churn.
+    #[serde(default)]
+    pub meta_approver_users: Vec<String>,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            username: None,
+            password_hash: None,
+            meta_approver_users: Vec::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
