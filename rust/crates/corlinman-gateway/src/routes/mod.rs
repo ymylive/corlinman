@@ -8,6 +8,7 @@ pub mod admin;
 pub mod canvas;
 pub mod channels;
 pub mod chat;
+pub mod chat_approve;
 pub mod embeddings;
 pub mod health;
 pub mod metrics;
@@ -46,7 +47,8 @@ pub fn router() -> Router {
 pub fn router_with_chat_state(state: chat::ChatState) -> Router {
     Router::new()
         .merge(health::router())
-        .merge(chat::router_with_state(state))
+        .merge(chat::router_with_state(state.clone()))
+        .merge(chat_approve::router_with_state(state))
         .merge(embeddings::router())
         .merge(models::router())
         .merge(admin::router())
@@ -63,7 +65,8 @@ pub fn router_with_full_state(
 ) -> Router {
     Router::new()
         .merge(health::router())
-        .merge(chat::router_with_state(chat_state))
+        .merge(chat::router_with_state(chat_state.clone()))
+        .merge(chat_approve::router_with_state(chat_state))
         .merge(embeddings::router())
         .merge(models::router())
         .merge(admin::router())
@@ -80,7 +83,8 @@ pub fn router_with_full_state_and_health(
 ) -> Router {
     Router::new()
         .merge(health::router_with_state(health_state))
-        .merge(chat::router_with_state(chat_state))
+        .merge(chat::router_with_state(chat_state.clone()))
+        .merge(chat_approve::router_with_state(chat_state))
         .merge(embeddings::router())
         .merge(models::router())
         .merge(admin::router())
