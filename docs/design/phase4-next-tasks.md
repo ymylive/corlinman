@@ -1,6 +1,6 @@
 # Phase 4 — Next Tasks
 
-**Status**: Active · **Owner**: TBD · **Last revised**: 2026-05-08
+**Status**: Active · **Owner**: TBD · **Last revised**: 2026-05-08 (Wave 2 closed)
 
 > Operational task list following Phase 4 Wave 1's closure
 > (PR [#1](https://github.com/ymylive/corlinman/pull/1), 16 commits).
@@ -12,29 +12,30 @@
 **Section A (Wave 1 cleanup)**: ✅ A1-A7 all complete (commits
 `3a2ab56` / `95dafb6` / `2963aa8` / `26a721e`).
 
-**Section B (Wave 2)**: backend functionally complete; UI in flight.
+**Section B (Wave 2)**: ✅ **fully closed** — backend + UI all shipped.
 
 | Task | Status | Tests | Commits |
 |---|---|---|---|
-| **B1** Meta proposal kinds (4-2A) | ✅ backend | 5+13+5 | `07e8eee` `db5ff99` `a649aff` `674462e` `e9b0784` `81bbbb0` |
+| **B1** Meta proposal kinds (4-2A) | ✅ shipped | 5+13+5+3 | `07e8eee` `db5ff99` `a649aff` `674462e` `e9b0784` `81bbbb0` `193c764` |
 | ↳ iter 1 4 new EvolutionKind variants | ✅ | 3 | `07e8eee` |
 | ↳ iter 2 metadata JSON column | ✅ | 4 | `db5ff99` |
 | ↳ iter 3 dual-clause recursion guard | ✅ | 7 | `a649aff` |
 | ↳ iter 4 4 meta apply handlers | ✅ | 13 | `674462e` |
 | ↳ iter 5 operator capability gate | ✅ | 5 | `e9b0784` `81bbbb0` (boot) |
-| ↳ iter 6+ UI (meta_pending tab + double-confirm) | 🟡 in flight | — | — |
+| ↳ iter 6+7 UI (meta_pending tab + double-confirm) | ✅ | 3 | `193c764` |
 | **B2** Cross-channel identity (4-2B) | ✅ full stack | 36+13+3 | `e05be35` → `e903fa2` + `399adb7` |
 | ↳ iters 1-4 primitive crate | ✅ | 36 | `e05be35` `63756c5` `5d07c84` `8eb2fca` `8bed667` |
 | ↳ iter 5 chat-path resolution | ✅ | 3 | `66d24b1` |
 | ↳ iter 6 admin REST routes | ✅ | 13 | `5815263` |
 | ↳ iter 7 admin UI page | ✅ | — | `e903fa2` |
 | ↳ iter 8 HookEvent.user_id propagation | ✅ | — | `399adb7` |
-| **B3** Per-tenant evolution federation (4-2C) | ✅ backend | 5+9+17 | `f2dd619` `73efbb3` `0da2d76` |
+| **B3** Per-tenant evolution federation (4-2C) | ✅ shipped | 5+9+17+5 | `f2dd619` `73efbb3` `0da2d76` `c4ec474` |
 | ↳ iter 1 tenant_federation_peers table | ✅ | 5 | `f2dd619` |
 | ↳ iter 3+4 share_with + rebroadcaster | ✅ | 9 | `73efbb3` |
 | ↳ iter 5 admin REST | ✅ | 17 | `0da2d76` |
-| ↳ iter 6+ admin UI | 🟡 in flight | — | — |
-| **B4** Trajectory replay (4-2D) | ✅ shipped | — | `90411db` |
+| ↳ iter 6+ admin UI (`/admin/federation`) | ✅ | 5 | `c4ec474` |
+| **B4** Trajectory replay (4-2D) | ✅ shipped + rerun | — | `90411db` `bb28bb8` |
+| ↳ rerun mode end-to-end | ✅ | — | `bb28bb8` |
 
 ## Wave 2 in numbers
 
@@ -80,10 +81,10 @@ Phase 4 promises. Per `phase4-roadmap.md` §4 Wave 2.
 
 | # | Task | Estimate | Concept |
 |---|---|---|---|
-| **B1** | **4-2A Meta proposal kinds** [design pending integration] — new `EvolutionKind` variants `engine_config` / `engine_prompt` / `observer_filter` / `cluster_threshold`. Engine improves the engine that improves it. Strict one-level recursion guard (semantic via `trace_id` descent + per-`(tenant, kind)` cooldown), operator-only via `[admin] meta_approver_users` capability list, double-confirm UI on `engine_prompt`. `meta_grace_window_hours = 24` as a peer field on the rollback config. Routes to a separate `meta_pending` admin tab. Detailed plan: `docs/design/phase4-w2-b1-design.md` (10 iters). | 7-9d | Self-improvement core. Highest risk; requires `auto_rollback` window tightened (24h vs the default 72h). |
-| **B2** 🟡 | **4-2B Cross-channel `UserIdentityResolver`** [iters 1-4 done in `e05be35`/`63756c5`/`5d07c84`/`8bed667`] — `user_identity.sqlite` schema; verification phrase exchange protocol (operator triggers from one channel, user pastes in the other); merged trait state via SQL union with confidence-weighted dedup. Primitive crate at 29 unit tests; iters 5-8 are integration (gateway middleware + admin REST + admin UI + HookEvent attribution). Detailed plan: `docs/design/phase4-w2-b2-design.md`. | 6-8d | Same human across QQ + Telegram + native iOS = same `user_id`. |
-| **B3** | **4-2C Per-tenant evolution federation (opt-in)** [design `299ea32`] — operator-flagged `share-with-tenants` `skill_update` proposals get rebroadcast as proposals to opted-in tenants; receiving tenant must approve as if local. Detailed plan: `docs/design/phase4-w2-b3-design.md` (10 iters, two-clause loop prevention, asymmetric opt-in). | 5-7d | Tenant A's lessons benefit tenant B without auto-propagating. |
-| **B4** ✅ | **4-2D Trajectory replay CLI** [done `90411db`] — `corlinman replay <session_id>` reconstructs a past session deterministically; useful for debugging plus offline replay against new prompts before live deploy. Shipped: `corlinman-replay` crate (`replay()` + `list_sessions()` primitives, 6 tests), `corlinman replay` subcommand (3 tests), `/admin/sessions` + `/admin/sessions/:key/replay` gateway routes (9 tests), and the operator UI page + dialog with mock-server contract (Agent B). Rerun mode ships with a `not_implemented_yet` marker for Wave 2.5 to fill in. | 4-5d | Independent / no upstream deps; good warm-up task. |
+| **B1** ✅ | **4-2A Meta proposal kinds** [done `193c764`] — new `EvolutionKind` variants `engine_config` / `engine_prompt` / `observer_filter` / `cluster_threshold`. Engine improves the engine that improves it. Strict one-level recursion guard (semantic via `trace_id` descent + per-`(tenant, kind)` cooldown), operator-only via `[admin] meta_approver_users` capability list, double-confirm UI on `engine_prompt`. `meta_grace_window_hours = 24` as a peer field on the rollback config. Routes to a separate `meta_pending` admin tab. Detailed plan: `docs/design/phase4-w2-b1-design.md` (10 iters). | 7-9d | Self-improvement core. Highest risk; requires `auto_rollback` window tightened (24h vs the default 72h). |
+| **B2** ✅ | **4-2B Cross-channel `UserIdentityResolver`** [done `e05be35`→`e903fa2`+`399adb7`] — `user_identity.sqlite` schema; verification phrase exchange protocol (operator triggers from one channel, user pastes in the other); merged trait state via SQL union with confidence-weighted dedup. Primitive crate at 29 unit tests; iters 5-8 integration (gateway middleware + admin REST + admin UI + HookEvent attribution). Detailed plan: `docs/design/phase4-w2-b2-design.md`. | 6-8d | Same human across QQ + Telegram + native iOS = same `user_id`. |
+| **B3** ✅ | **4-2C Per-tenant evolution federation (opt-in)** [done `f2dd619`→`c4ec474`] — operator-flagged `share-with-tenants` `skill_update` proposals get rebroadcast as proposals to opted-in tenants; receiving tenant must approve as if local. Detailed plan: `docs/design/phase4-w2-b3-design.md` (10 iters, two-clause loop prevention, asymmetric opt-in). | 5-7d | Tenant A's lessons benefit tenant B without auto-propagating. |
+| **B4** ✅ | **4-2D Trajectory replay** [done `90411db` + rerun `bb28bb8`] — `corlinman replay <session_id>` reconstructs a past session deterministically; useful for debugging plus offline replay against new prompts before live deploy. Shipped: `corlinman-replay` crate, `corlinman replay` CLI, `/admin/sessions` + `/admin/sessions/:key/replay` gateway routes, operator UI page + dialog. **Rerun mode landed `bb28bb8`** (was deferred to W2.5; landed early). | 4-5d | Independent / no upstream deps; good warm-up task. |
 
 **Suggested order**: B4 (independent, low risk) → B2 (high value,
 moderate risk) → B1 (highest value, highest risk — needs B4's
