@@ -40,6 +40,7 @@ use crate::middleware::tenant_scope::{tenant_scope, TenantScopeState};
 use super::not_implemented;
 
 pub mod agents;
+pub mod api_keys;
 pub mod approvals;
 pub mod auth;
 pub mod channels;
@@ -425,6 +426,7 @@ pub fn router_with_state(state: AdminState) -> Router {
     let guarded = Router::new()
         .merge(plugins::router(state.clone()))
         .merge(agents::router(state.clone()))
+        .merge(api_keys::router(state.clone()))
         .merge(approvals::router(state.clone()))
         .merge(config::router(state.clone()))
         .merge(logs::router(state.clone()))
