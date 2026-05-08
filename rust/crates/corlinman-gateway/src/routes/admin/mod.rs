@@ -45,6 +45,7 @@ pub mod channels;
 pub mod config;
 pub mod embedding;
 pub mod evolution;
+pub mod federation;
 pub mod logs;
 pub mod memory;
 pub mod models;
@@ -426,6 +427,7 @@ pub fn router_with_state(state: AdminState) -> Router {
         .merge(sessions::router(state.clone()))
         .merge(identity::router(state.clone()))
         .merge(tenants::router(state.clone()))
+        .merge(federation::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             tenant_state,
             tenant_scope,
