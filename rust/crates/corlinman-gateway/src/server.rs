@@ -315,20 +315,20 @@ pub async fn build_runtime_full_with_evolution(
             tracing::info!(endpoint = %endpoint, "agent client connected");
             let client = AgentClient::new(channel);
             let backend: Arc<dyn ChatBackend> = Arc::new(GrpcBackend::new(client));
-            let router = match session_store {
-                Some(store) => build_router_with_backend_registry_sessions_and_health(
-                    backend.clone(),
-                    registry.clone(),
-                    store,
-                    DEFAULT_SESSION_MAX_MESSAGES,
-                    health_state.clone(),
-                ),
-                None => build_router_with_backend_registry_and_health(
-                    backend.clone(),
-                    registry.clone(),
-                    health_state.clone(),
-                ),
-            };
+            metrics::init();
+            let async_tasks = registry.async_tasks();
+            let mut state = ChatState::with_registry(backend.clone(), registry.clone())
+                .with_live_model_config(config_handle.clone());
+            if let Some(store) = session_store {
+                state = state
+                    .with_session_store(store)
+                    .with_session_max_messages(DEFAULT_SESSION_MAX_MESSAGES);
+            }
+            let router = trace::layer(routes::router_with_full_state_and_health(
+                state,
+                async_tasks,
+                health_state.clone(),
+            ));
             (router, Some(backend))
         }
         Err(err) => {
@@ -417,6 +417,11 @@ pub async fn build_runtime_full_with_evolution(
     if let Some(w) = watcher.as_ref() {
         admin_state = admin_state.with_config_watcher(w.clone());
     }
+    if let Some(backend) = backend_opt.as_ref() {
+        let replay_service: Arc<dyn corlinman_gateway_api::ChatService> =
+            Arc::new(crate::services::ChatService::new(backend.clone()));
+        admin_state = admin_state.with_replay_chat_service(replay_service);
+    }
     if let Some(store) = evolution_store {
         // Wave 2-A: when both the evolution store and the kb store are
         // available, build a real `EvolutionApplier` so
@@ -436,12 +441,21 @@ pub async fn build_runtime_full_with_evolution(
             // targets under `<data_dir>/<[skills].dir>`. Snapshot at
             // boot — same reasoning as `thresholds` above.
             let skills_dir = resolve_data_dir().join(&snapshot.skills.dir);
-            let applier = Arc::new(crate::evolution_applier::EvolutionApplier::new(
-                store.clone(),
-                kb,
-                thresholds,
-                skills_dir,
-            ));
+            // Phase 4 W2 B1 iter 5: thread the operator-only meta-approver
+            // allow-list from `[admin].meta_approver_users` so the applier's
+            // authoritative gate fires on every meta apply path. Empty list
+            // (the safe default) blocks every meta apply with
+            // `MetaApproverRequired` until the operator opts in.
+            let meta_approvers = snapshot.admin.meta_approver_users.clone();
+            let applier = Arc::new(
+                crate::evolution_applier::EvolutionApplier::new(
+                    store.clone(),
+                    kb,
+                    thresholds,
+                    skills_dir,
+                )
+                .with_meta_approver_users(meta_approvers),
+            );
             admin_state = admin_state.with_evolution_applier(applier);
         } else {
             tracing::warn!(
