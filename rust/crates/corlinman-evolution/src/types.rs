@@ -458,4 +458,20 @@ pub struct EvolutionHistory {
     pub applied_at: i64,
     pub rolled_back_at: Option<i64>,
     pub rollback_reason: Option<String>,
+    /// Phase 4 W2 B3 iter 3: peer tenant slugs the operator opted into
+    /// when approving this apply (the "share with" multi-select on the
+    /// approve dialog). `None` for legacy / unfederated applies; `Some`
+    /// with a possibly-empty list for federated applies. The iter-4
+    /// rebroadcaster reads this immediately after the history insert
+    /// commits and fans a fresh `pending` proposal into each peer's
+    /// `evolution.sqlite` (subject to the peer's
+    /// `tenant_federation_peers` opt-in row + the loop-prevention
+    /// clauses A and B).
+    ///
+    /// Stored on disk as a JSON-encoded TEXT array; corrupted JSON
+    /// (operator hand-edit, partial write) decodes as `None` with a
+    /// `tracing::warn!` rather than failing the whole row load — same
+    /// failure mode as `evolution_proposals.metadata`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_with: Option<Vec<String>>,
 }

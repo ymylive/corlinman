@@ -114,6 +114,7 @@ use corlinman_evolution::{
     EvolutionHistory, EvolutionKind, EvolutionStatus, EvolutionStore, HistoryRepo, IntentLogRepo,
     ProposalId, ProposalsRepo, RepoError,
 };
+use corlinman_tenant::{AdminDb, TenantId, TenantPool};
 use corlinman_vector::SqliteStore;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -239,6 +240,295 @@ pub enum ApplyError {
     TenantStateIo(#[source] anyhow::Error),
 }
 
+/// Phase 4 W2 B3 iter 4 — return shape for the federation-aware apply
+/// path. Carries the freshly-inserted history row plus a tally of
+/// per-peer rebroadcast outcomes so the operator surface can report
+/// "N peer proposals minted, M failed" without re-querying.
+///
+/// `peer_failures` is empty when there were no failures *and* when
+/// rebroadcast was a no-op (no peers, kind not federable, hop limit
+/// reached, etc); the legacy `apply()` wrapper drops this field on
+/// the floor so pre-B3 callers don't have to learn the new shape.
+#[derive(Debug)]
+pub struct ApplyResult {
+    /// The freshly-inserted history row (with autoincrement id
+    /// populated). Same shape pre-B3 callers consume via
+    /// [`EvolutionApplier::apply`].
+    pub history: EvolutionHistory,
+    /// Count of peer-tenant proposals successfully written to peer
+    /// `evolution.sqlite` files. Zero when the operator opted into no
+    /// peers, when the kind is not federable, when the source row is
+    /// already federated (hop guard), or when every peer was
+    /// silently skipped by `tenant_federation_peers`.
+    pub peer_proposals_minted: usize,
+    /// Per-peer rebroadcast errors collected from the
+    /// `FederationRebroadcaster`. The applier returns Ok even when
+    /// this is non-empty — rebroadcast is a "best effort fan-out"
+    /// so a single peer's locked DB or missing file can't unwind a
+    /// successful source apply. Operators see the failure list via
+    /// the apply route response.
+    pub peer_failures: Vec<(TenantId, String)>,
+}
+
+/// Phase 4 W2 B3 iter 4 — outcome of a single federation broadcast.
+/// Returned by [`FederationRebroadcaster::broadcast`] and folded into
+/// [`ApplyResult`] by the applier.
+#[derive(Debug, Default)]
+pub struct RebroadcastOutcome {
+    /// Number of peer proposals successfully inserted.
+    pub minted: usize,
+    /// Per-peer errors. Skipped peers (not in
+    /// `tenant_federation_peers`, source-tenant exclusion clause B,
+    /// hop-limit clause A) are *not* failures — they're silently
+    /// elided from this list because asymmetric opt-out is by design.
+    pub failures: Vec<(TenantId, String)>,
+}
+
+/// Phase 4 W2 B3 iter 4 — fan-out helper. Reads the peer roster from
+/// `tenant_federation_peers`, opens each accepting peer's per-tenant
+/// `evolution.sqlite` via `TenantPool`, and inserts a fresh `pending`
+/// proposal carrying the source proposal's `target` + `diff` +
+/// `reasoning` plus a `metadata.federated_from` provenance blob.
+///
+/// Only `skill_update` is federated in v1 — the design doc explicitly
+/// defers the other kinds because they reference per-tenant resources
+/// (prompt segments, tool policy, persona, chunk ids) that need a
+/// peer-side rewrite step.
+pub struct FederationRebroadcaster {
+    /// Admin DB read-only here: we consult `list_federation_peers_of`
+    /// to filter `share_with` down to the slugs that have actually
+    /// opted into receiving from the source tenant. An entry the peer
+    /// hasn't accepted is silently skipped (`evolution_federation_skipped_total{reason="peer_opt_out"}`
+    /// metric, deferred to a follow-up).
+    admin_db: Arc<AdminDb>,
+    /// Multi-tenant SQLite pool. The rebroadcaster opens each peer's
+    /// `evolution.sqlite` lazily — the first apply that fans out to
+    /// a given peer pays the open cost; subsequent applies hit the
+    /// pool cache.
+    tenant_pool: Arc<TenantPool>,
+}
+
+impl FederationRebroadcaster {
+    pub fn new(admin_db: Arc<AdminDb>, tenant_pool: Arc<TenantPool>) -> Self {
+        Self { admin_db, tenant_pool }
+    }
+
+    /// Mint a `pending` proposal in each opted-in peer's
+    /// `evolution.sqlite`. Skips silently when:
+    ///
+    /// - `proposal.kind != EvolutionKind::SkillUpdate` (v1 restriction)
+    /// - `proposal.metadata.federated_from.hop >= 1` (loop prevention
+    ///   clause A — already-federated proposals don't re-federate)
+    /// - the peer slug equals `source_tenant` (clause B — operator
+    ///   override insurance against `share_with` echoing back to origin)
+    /// - the peer is not in `list_federation_peers_of(source_tenant)`
+    ///   (asymmetric opt-in — peers must accept *from* this source)
+    /// - the peer's `evolution.sqlite` doesn't exist yet *and* opening
+    ///   it fails (peer hasn't booted with evolution enabled — non-fatal)
+    ///
+    /// Returns counts + per-peer error strings.
+    pub async fn broadcast(
+        &self,
+        proposal: &corlinman_evolution::EvolutionProposal,
+        source_tenant: &TenantId,
+        share_with: &[TenantId],
+    ) -> Result<RebroadcastOutcome, anyhow::Error> {
+        // Restrict to skill_update only. Other kinds are deferred
+        // (prompt_template / tool_policy reference per-tenant
+        // resources; memory_op / tag_rebalance reference per-tenant
+        // chunk ids). Surfaces as a warn so operators who toggled
+        // share_with on a non-federable kind via the API see why
+        // nothing minted — the route layer rejects the request earlier
+        // in the happy path, so this branch is the in-process safety net.
+        if proposal.kind != EvolutionKind::SkillUpdate {
+            tracing::warn!(
+                proposal_id = %proposal.id,
+                kind = proposal.kind.as_str(),
+                "federation rebroadcast skipped: only skill_update federates in v1"
+            );
+            return Ok(RebroadcastOutcome::default());
+        }
+
+        // Loop prevention clause A — hop guard. A proposal whose
+        // metadata says it was itself federated (hop >= 1) does NOT
+        // re-federate, regardless of the operator's `share_with`
+        // selection. Default `max_hop = 1` per the design doc; this
+        // implementation hard-codes that bound (config knob is a
+        // follow-up).
+        let inbound_hop = proposal
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("federated_from"))
+            .and_then(|f| f.get("hop"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if inbound_hop >= 1 {
+            tracing::warn!(
+                proposal_id = %proposal.id,
+                inbound_hop,
+                "federation rebroadcast skipped: source proposal already federated (hop >= 1)"
+            );
+            return Ok(RebroadcastOutcome::default());
+        }
+
+        // Pull the accepting-peer set once. Slugs only — `accepted_at`
+        // / `accepted_by` are operator-facing breadcrumbs, irrelevant
+        // to fan-out routing. An empty list means no peers have opted
+        // in from this source (the operator may have selected peers
+        // that never accepted) — fall through to the loop and every
+        // entry is silently skipped.
+        let accepting = self
+            .admin_db
+            .list_federation_peers_of(source_tenant)
+            .await?
+            .into_iter()
+            .map(|p| p.peer_tenant_id)
+            .collect::<std::collections::HashSet<_>>();
+
+        let mut outcome = RebroadcastOutcome::default();
+
+        for peer in share_with {
+            // Clause B — source-tenant exclusion. Even when peering
+            // exists in both directions (or hops > 1 future), an
+            // applied proposal must not re-broadcast back to its
+            // origin. This is belt-and-suspenders against operator
+            // override (typing the source slug into share_with).
+            if peer == source_tenant {
+                tracing::warn!(
+                    proposal_id = %proposal.id,
+                    %source_tenant,
+                    "federation rebroadcast skipped: source tenant filtered from share_with (loop prevention clause B)"
+                );
+                continue;
+            }
+
+            // Asymmetric opt-in check. Peers not in the accepting set
+            // are silently skipped — surfacing "this peer doesn't
+            // accept us" would leak the peer's federation roster to
+            // the source operator (asymmetric opt-out is by design).
+            if !accepting.contains(peer) {
+                tracing::debug!(
+                    proposal_id = %proposal.id,
+                    peer = %peer,
+                    %source_tenant,
+                    "federation rebroadcast: peer has not opted in from source; skipping"
+                );
+                continue;
+            }
+
+            match self
+                .mint_peer_proposal(proposal, source_tenant, peer)
+                .await
+            {
+                Ok(()) => outcome.minted += 1,
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    tracing::warn!(
+                        proposal_id = %proposal.id,
+                        peer = %peer,
+                        error = %msg,
+                        "federation rebroadcast: peer mint failed; collecting in peer_failures"
+                    );
+                    outcome.failures.push((peer.clone(), msg));
+                }
+            }
+        }
+
+        Ok(outcome)
+    }
+
+    /// Insert one `pending` row into the peer's `evolution.sqlite`.
+    /// Opens the peer pool lazily; downstream first-open failure
+    /// (peer hasn't booted with evolution enabled, disk full, etc)
+    /// surfaces as a per-peer error rather than poisoning the source
+    /// apply.
+    async fn mint_peer_proposal(
+        &self,
+        source: &corlinman_evolution::EvolutionProposal,
+        source_tenant: &TenantId,
+        peer: &TenantId,
+    ) -> Result<(), anyhow::Error> {
+        // Generate a fresh proposal id — UUID-shaped to avoid colliding
+        // with the source tenant's `evol-YYYY-MM-DD-NNN` numbering.
+        // The metadata blob holds the back-link so an operator on the
+        // peer side can grep the source row.
+        let new_id = format!("evol-fed-{}", uuid::Uuid::new_v4());
+
+        // The peer's `evolution.sqlite` may not exist yet (the peer
+        // hasn't booted with evolution enabled). Resolve the canonical
+        // per-tenant path via `TenantPool::db_path`, ensure the parent
+        // directory exists (sqlx errors with "unable to open database
+        // file" otherwise), and bootstrap via `EvolutionStore::open`.
+        // That path runs `SCHEMA_SQL` + the migrations idempotently, so
+        // a fresh peer DB ends up in the same shape the source's own
+        // applier would produce on startup.
+        //
+        // First-open failure (read-only mount, disk full) surfaces as
+        // a per-peer error in `peer_failures` — design says this must
+        // not unwind a successful source apply.
+        let peer_db_path = self.tenant_pool.db_path(peer, "evolution");
+        if let Some(parent) = peer_db_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!("create peer dir {parent:?}: {e}")
+            })?;
+        }
+        let store = EvolutionStore::open(&peer_db_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("open peer evolution.sqlite at {peer_db_path:?}: {e}"))?;
+        let repo = ProposalsRepo::new(store.pool().clone());
+
+        let metadata = json!({
+            "federated_from": {
+                "tenant": source_tenant.as_str(),
+                "source_proposal_id": source.id.as_str(),
+                "hop": 1u64,
+            }
+        });
+
+        let now = now_ms();
+        let new_proposal = corlinman_evolution::EvolutionProposal {
+            id: ProposalId::new(new_id.clone()),
+            kind: source.kind,
+            // `target` + `diff` + `reasoning` cross tenant lines verbatim
+            // (per design doc §"What crosses tenant lines"). The peer
+            // operator re-approves on the same content the source
+            // operator already vetted.
+            target: source.target.clone(),
+            diff: source.diff.clone(),
+            reasoning: source.reasoning.clone(),
+            risk: source.risk,
+            budget_cost: source.budget_cost,
+            // Recipient operator must re-approve as if local — full
+            // diff visibility, full operator-in-the-loop semantics.
+            status: EvolutionStatus::Pending,
+            // Excluded fields per design doc: shadow_metrics (eval ran
+            // against source data); signal_ids / trace_ids (point at
+            // source-tenant rows the peer can't see); eval_run_id /
+            // baseline_metrics_json (all source-tenant context); decided_*
+            // / applied_at / auto_rollback_* (this is a fresh proposal,
+            // not a copy of the source's lifecycle).
+            shadow_metrics: None,
+            signal_ids: vec![],
+            trace_ids: vec![],
+            created_at: now,
+            decided_at: None,
+            decided_by: None,
+            applied_at: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
+            rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            metadata: Some(metadata),
+        };
+
+        repo.insert(&new_proposal)
+            .await
+            .map_err(|e| anyhow::anyhow!("insert federated proposal in peer DB: {e}"))?;
+        Ok(())
+    }
+}
+
 /// Real applier for `memory_op` evolution proposals. Constructed at
 /// gateway startup once the kb + evolution stores are open; held inside
 /// `AdminState` as `Option<Arc<EvolutionApplier>>` so the apply route
@@ -263,6 +553,22 @@ pub struct EvolutionApplier {
     /// because the applier outlives any single config snapshot — same
     /// reasoning as the kb store handle.
     skills_dir: PathBuf,
+    /// Phase 4 W2 B3 iter 4: the tenant whose `evolution.sqlite` this
+    /// applier manages. Pre-B3 the gateway runs one applier per process
+    /// and Phase 4 W1 defaulted everything to the `"default"` slug;
+    /// federation makes the source tenant explicit so the rebroadcaster
+    /// can stamp `metadata.federated_from.tenant` and exclude the source
+    /// from `share_with` (clause B). Defaults to `TenantId::default()`
+    /// when constructed via [`EvolutionApplier::new`] for legacy callers.
+    source_tenant_id: TenantId,
+    /// Phase 4 W2 B3 iter 4: optional federation rebroadcaster.
+    /// `None` disables federation entirely (the `apply()` /
+    /// `apply_with_share_with()` paths still work — they just stamp
+    /// `share_with` into history without fanning out). Wired at
+    /// gateway startup behind the
+    /// `[evolution.federation] enabled = true` config flag (config
+    /// knob is a follow-up; B3 iter 4 ships the in-memory wiring).
+    rebroadcaster: Option<Arc<FederationRebroadcaster>>,
 }
 
 impl EvolutionApplier {
@@ -280,6 +586,11 @@ impl EvolutionApplier {
     /// the master `enabled` flag — populating baselines while the
     /// monitor is off is cheap and gives operators historical data to
     /// flip on later (see `EvolutionAutoRollbackConfig` doc).
+    ///
+    /// Phase 4 W2 B3 iter 4: `source_tenant_id` defaults to the legacy
+    /// `"default"` slug so the dozens of pre-B3 callers keep working
+    /// without rewrite. The federation rebroadcaster is `None`; opt in
+    /// via [`EvolutionApplier::with_rebroadcaster`].
     pub fn new(
         evolution_store: Arc<EvolutionStore>,
         kb_store: Arc<SqliteStore>,
@@ -297,7 +608,39 @@ impl EvolutionApplier {
             evolution_store,
             auto_rollback_thresholds,
             skills_dir,
+            source_tenant_id: TenantId::default(),
+            rebroadcaster: None,
         }
+    }
+
+    /// Phase 4 W2 B3 iter 4: builder hook to set the source tenant
+    /// before any apply call. The default constructor pins
+    /// `TenantId::default()` so legacy callers (one applier per
+    /// process, single-tenant deployment) don't have to thread a
+    /// tenant through their setup. Production gateways with one
+    /// applier per source tenant call this immediately after
+    /// `new()`.
+    pub fn with_source_tenant(mut self, tenant: TenantId) -> Self {
+        self.source_tenant_id = tenant;
+        self
+    }
+
+    /// Phase 4 W2 B3 iter 4: builder hook to wire the federation
+    /// rebroadcaster. `None` (default) disables federation; opting in
+    /// here is the single switch that turns rebroadcast on for this
+    /// applier.
+    pub fn with_rebroadcaster(mut self, rb: Arc<FederationRebroadcaster>) -> Self {
+        self.rebroadcaster = Some(rb);
+        self
+    }
+
+    /// Test-only accessor for the kb store handle. The federation
+    /// applier tests need to seed kb-side fixtures (chunks, tags) on
+    /// the same pool the applier reads from; production code never
+    /// reaches in here. `cfg(test)` keeps it out of the public surface.
+    #[cfg(test)]
+    fn kb_store_for_tests(&self) -> &SqliteStore {
+        &self.kb_store
     }
 
     /// Phase 3.1 startup hook: scan `apply_intent_log` for half-
@@ -339,7 +682,33 @@ impl EvolutionApplier {
     /// between the two writes leaves a row with both stamps NULL — the
     /// gateway scans those at startup so operators see half-committed
     /// applies in the boot log.
+    ///
+    /// Phase 4 W2 B3 iter 4: legacy entry point. No federation share
+    /// list, no peer rebroadcast — equivalent to
+    /// `apply_with_share_with(id, None)` but pinned to the historic
+    /// return shape (`EvolutionHistory`) so the dozens of pre-B3
+    /// callers and tests don't have to rewrite.
     pub async fn apply(&self, id: &ProposalId) -> Result<EvolutionHistory, ApplyError> {
+        let res = self.apply_with_share_with(id, None).await?;
+        Ok(res.history)
+    }
+
+    /// Phase 4 W2 B3 iter 4 entry point. `share_with` carries the peer
+    /// tenant slugs the operator opted into when approving — `None`
+    /// means a legacy single-tenant apply with no rebroadcast,
+    /// `Some(empty)` is "operator approved but selected no peers"
+    /// (audit-visible but still no rebroadcast). Returns
+    /// [`ApplyResult`] with the new history row plus a (possibly
+    /// empty) tally of per-peer rebroadcast outcomes.
+    ///
+    /// Per-peer rebroadcast errors are **non-fatal**: they're collected
+    /// into `peer_failures` so the operator sees what slipped through
+    /// without unwinding a successful source apply.
+    pub async fn apply_with_share_with(
+        &self,
+        id: &ProposalId,
+        share_with: Option<Vec<corlinman_tenant::TenantId>>,
+    ) -> Result<ApplyResult, ApplyError> {
         // 1. Load + gate. We do these *before* opening the intent log
         //    so a NotFound / NotApproved doesn't litter the table with
         //    rows that were never going to mutate the kb.
@@ -371,12 +740,25 @@ impl EvolutionApplier {
             .await
             .map_err(ApplyError::Repo)?;
 
+        // Convert `Option<Vec<TenantId>>` → `Option<Vec<String>>` for
+        // the inner pipeline + storage. The TenantId newtype is
+        // route-side validation; the SQLite column + history row store
+        // raw slugs. Empty `Some(vec![])` is preserved end-to-end so
+        // "operator approved with no peers" is distinguishable from
+        // "legacy unfederated apply".
+        let share_with_strings: Option<Vec<String>> = share_with
+            .as_ref()
+            .map(|v| v.iter().map(|t| t.as_str().to_string()).collect());
+
         // 3. Run the actual apply pipeline. On any error we stamp
         //    `failed_at` and return — the partial-index-backed scan
         //    will not surface this row, so operators only see the
         //    truly-stuck applies. On success we stamp `committed_at`
         //    via the same path.
-        match self.apply_inner(id, &proposal).await {
+        let history = match self
+            .apply_inner(id, &proposal, share_with_strings.clone())
+            .await
+        {
             Ok(out) => {
                 if let Err(e) = self.intent_log.mark_committed(intent_id, now_ms()).await {
                     // Log-only: the apply itself succeeded; failing to
@@ -390,7 +772,7 @@ impl EvolutionApplier {
                         "apply_intent_log.mark_committed failed; row will appear in next startup scan"
                     );
                 }
-                Ok(out)
+                out
             }
             Err(err) => {
                 // Cheap reason string — keep it short, the column is
@@ -407,18 +789,61 @@ impl EvolutionApplier {
                         "apply_intent_log.mark_failed failed; row will appear in next startup scan"
                     );
                 }
-                Err(err)
+                return Err(err);
+            }
+        };
+
+        // 4. Phase 4 W2 B3 iter 4 — rebroadcast hook. Runs only when:
+        //    - a rebroadcaster is wired into the applier, AND
+        //    - `share_with` is Some(non-empty), AND
+        //    - the proposal kind federates (only `skill_update` in v1).
+        //    All three filters live inside [`FederationRebroadcaster::broadcast`]
+        //    so this call site stays kind-agnostic. Errors don't unwind
+        //    the source apply — they're surfaced via `peer_failures`.
+        let mut peer_failures: Vec<(corlinman_tenant::TenantId, String)> = Vec::new();
+        let mut peer_proposals_minted: usize = 0;
+        if let (Some(rb), Some(peers)) = (self.rebroadcaster.as_ref(), share_with.as_ref()) {
+            if !peers.is_empty() {
+                match rb
+                    .broadcast(&proposal, &self.source_tenant_id, peers)
+                    .await
+                {
+                    Ok(outcome) => {
+                        peer_proposals_minted = outcome.minted;
+                        peer_failures = outcome.failures;
+                    }
+                    Err(e) => {
+                        // Top-level rebroadcaster error (admin DB
+                        // unreachable, etc) — don't surface as
+                        // ApplyError because the source apply is durable.
+                        tracing::warn!(
+                            proposal_id = %id,
+                            error = %e,
+                            "federation rebroadcast top-level error; source apply unaffected"
+                        );
+                    }
+                }
             }
         }
+
+        Ok(ApplyResult {
+            history,
+            peer_proposals_minted,
+            peer_failures,
+        })
     }
 
     /// The original Phase 2 apply pipeline, factored out so the
     /// Phase 3.1 intent-log wrapper above can pin success/failure on
-    /// a single Result<...>.
+    /// a single Result<...>. Phase 4 W2 B3 iter 3: `share_with` flows
+    /// through to the `evolution_history` row so the rebroadcaster
+    /// (iter 4) and the operator-facing audit surface both see the
+    /// peer list the source operator opted into.
     async fn apply_inner(
         &self,
         id: &ProposalId,
         proposal: &corlinman_evolution::EvolutionProposal,
+        share_with: Option<Vec<String>>,
     ) -> Result<EvolutionHistory, ApplyError> {
         // Dispatch per-kind. Each handler returns a `MutationOutcome`
         // so the audit/baseline path below stays kind-agnostic.
@@ -528,6 +953,11 @@ impl EvolutionApplier {
             applied_at: now,
             rolled_back_at: None,
             rollback_reason: None,
+            // Phase 4 W2 B3 iter 3: persisted as a JSON-encoded array of
+            // peer slugs the operator opted into. `None` for legacy
+            // single-tenant applies (no rebroadcast); plumbed through
+            // by the iter-4 federation-aware apply path.
+            share_with: share_with.clone(),
         };
         let history_id = self
             .commit_evolution_tx(&history_row, id, now)
@@ -1931,14 +2361,25 @@ impl EvolutionApplier {
         applied_at_ms: i64,
     ) -> Result<i64, sqlx::Error> {
         let metrics = serde_json::to_string(&h.metrics_baseline).unwrap_or_else(|_| "{}".into());
+        // Phase 4 W2 B3 iter 3: persist the operator's "share with" peer
+        // selection inside the same transaction as the history row +
+        // proposal flip so a partial commit can't leave a federated apply
+        // without its peer list. None → NULL on disk; encoding failure
+        // would be a serde-impossible String<→>String transform on a
+        // typed `Vec<String>`, but we still default to NULL on error
+        // rather than panic so a future struct refactor can't crash apply.
+        let share_with = h
+            .share_with
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok());
         let mut tx = self.evolution_store.pool().begin().await?;
 
         let row = sqlx::query(
             r#"INSERT INTO evolution_history
                  (proposal_id, kind, target, before_sha, after_sha,
                   inverse_diff, metrics_baseline, applied_at,
-                  rolled_back_at, rollback_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  rolled_back_at, rollback_reason, share_with)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                RETURNING id"#,
         )
         .bind(h.proposal_id.as_str())
@@ -1951,6 +2392,7 @@ impl EvolutionApplier {
         .bind(h.applied_at)
         .bind(h.rolled_back_at)
         .bind(&h.rollback_reason)
+        .bind(share_with)
         .fetch_one(&mut *tx)
         .await?;
         let history_id: i64 = row.get("id");
@@ -3818,6 +4260,7 @@ mod tests {
                 applied_at: 3_000,
                 rolled_back_at: None,
                 rollback_reason: None,
+                share_with: None,
             })
             .await
             .unwrap();
@@ -4418,6 +4861,7 @@ mod tests {
                 applied_at: 3_000,
                 rolled_back_at: None,
                 rollback_reason: None,
+                share_with: None,
             })
             .await
             .unwrap();
@@ -5669,5 +6113,356 @@ mod tests {
             ],
             "history rows must distinguish meta from non-meta via the kind column",
         );
+    }
+
+    // =================================================================
+    // Phase 4 W2 B3 iter 4 — federation rebroadcaster
+    // =================================================================
+    //
+    // Each test spins up:
+    //   * a fresh `tmp` workspace,
+    //   * a per-tenant `evolution.sqlite` for the source (managed via
+    //     the existing applier test rig),
+    //   * an `AdminDb` keyed at `<tmp>/tenants.sqlite`,
+    //   * a `TenantPool` rooted at `<tmp>` so peer DBs land at
+    //     `<tmp>/tenants/<peer>/evolution.sqlite`,
+    //   * a `FederationRebroadcaster` wired into the applier via
+    //     `with_rebroadcaster` + `with_source_tenant`.
+    //
+    // The source tenant is always `acme`; peers `bravo` / `charlie` /
+    // `delta` per scenario.
+
+    /// Build a fully-wired applier for federation tests. Returns the
+    /// applier, the admin DB (so tests can register federation peers),
+    /// and the tenant pool (so tests can probe peer DB paths).
+    ///
+    /// Source applier is bound to `acme`. The peer roster starts empty —
+    /// tests register opt-ins via `admin_db.add_federation_peer(peer,
+    /// source, "operator")` before calling `apply_with_share_with`.
+    async fn fed_applier() -> (
+        TempDir,
+        EvolutionApplier,
+        Arc<AdminDb>,
+        Arc<TenantPool>,
+        Arc<EvolutionStore>,
+    ) {
+        let tmp = TempDir::new().unwrap();
+        // Source's evolution.sqlite at the canonical per-tenant path
+        // so the applier and the rebroadcaster see the same tenant
+        // root layout.
+        let source = TenantId::new("acme").unwrap();
+        let pool = Arc::new(TenantPool::new(tmp.path()));
+        let evol_path = pool.db_path(&source, "evolution");
+        std::fs::create_dir_all(evol_path.parent().unwrap()).unwrap();
+        let kb_path = tmp.path().join("kb.sqlite");
+        let skills_dir = tmp.path().join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+
+        let evol = Arc::new(EvolutionStore::open(&evol_path).await.unwrap());
+        let kb = Arc::new(SqliteStore::open(&kb_path).await.unwrap());
+
+        let admin_db = Arc::new(
+            AdminDb::open(&tmp.path().join("tenants.sqlite"))
+                .await
+                .unwrap(),
+        );
+        let rb = Arc::new(FederationRebroadcaster::new(
+            admin_db.clone(),
+            pool.clone(),
+        ));
+        let applier = EvolutionApplier::new(
+            evol.clone(),
+            kb,
+            AutoRollbackThresholds::default(),
+            skills_dir,
+        )
+        .with_source_tenant(source)
+        .with_rebroadcaster(rb);
+
+        (tmp, applier, admin_db, pool, evol)
+    }
+
+    /// Insert an Approved `skill_update` proposal at the given path.
+    /// Mirrors `seed_approved_kind` but writes the on-disk skill file
+    /// the applier will read so the apply succeeds without the test
+    /// having to touch every internal helper.
+    async fn seed_approved_skill_update(
+        tmp: &TempDir,
+        evol: &EvolutionStore,
+        id: &str,
+        skill_path: &str,
+    ) -> ProposalId {
+        let path = tmp.path().join(skill_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "# Skill\n\nBody.\n").unwrap();
+        let diff = "--- a/skills/web_search.md\n\
+                    +++ b/skills/web_search.md\n\
+                    @@ __APPEND__,0 +__APPEND__,1 @@\n\
+                    +Federated lesson\n";
+        seed_approved_kind(evol, id, EvolutionKind::SkillUpdate, skill_path, diff).await
+    }
+
+    /// Count pending federated proposals in `peer`'s `evolution.sqlite`.
+    /// Returns 0 when the file doesn't exist yet (peer not booted).
+    async fn count_peer_pending(pool: &TenantPool, peer: &TenantId) -> i64 {
+        let path = pool.db_path(peer, "evolution");
+        if !path.exists() {
+            return 0;
+        }
+        let store = EvolutionStore::open(&path).await.unwrap();
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM evolution_proposals")
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    }
+
+    /// `share_with = None` ⇒ legacy single-tenant apply. No peer
+    /// proposals minted; `peer_failures` empty; history's
+    /// `share_with` column round-trips as `None`.
+    #[tokio::test]
+    async fn apply_with_no_share_with_skips_rebroadcast() {
+        let (tmp, applier, admin_db, pool, evol) = fed_applier().await;
+        // Even if a peer has opted in, share_with=None must short-circuit.
+        let bravo = TenantId::new("bravo").unwrap();
+        admin_db
+            .add_federation_peer(&bravo, &TenantId::new("acme").unwrap(), "operator")
+            .await
+            .unwrap();
+        let pid = seed_approved_skill_update(
+            &tmp,
+            &evol,
+            "evol-fed-no-share",
+            "skills/web_search.md",
+        )
+        .await;
+
+        let res = applier.apply_with_share_with(&pid, None).await.unwrap();
+        assert_eq!(res.peer_proposals_minted, 0);
+        assert!(res.peer_failures.is_empty());
+        assert_eq!(res.history.share_with, None);
+        assert_eq!(count_peer_pending(&pool, &bravo).await, 0);
+    }
+
+    /// `share_with = Some([bravo, charlie])` with both opted in ⇒ two
+    /// fresh `pending` rows with `metadata.federated_from` provenance.
+    /// The source row's history persists `share_with`.
+    #[tokio::test]
+    async fn apply_with_share_with_creates_pending_in_each_peer() {
+        let (tmp, applier, admin_db, pool, evol) = fed_applier().await;
+        let acme = TenantId::new("acme").unwrap();
+        let bravo = TenantId::new("bravo").unwrap();
+        let charlie = TenantId::new("charlie").unwrap();
+        admin_db
+            .add_federation_peer(&bravo, &acme, "alice")
+            .await
+            .unwrap();
+        admin_db
+            .add_federation_peer(&charlie, &acme, "alice")
+            .await
+            .unwrap();
+
+        let pid =
+            seed_approved_skill_update(&tmp, &evol, "evol-fed-001", "skills/web_search.md").await;
+
+        let res = applier
+            .apply_with_share_with(&pid, Some(vec![bravo.clone(), charlie.clone()]))
+            .await
+            .unwrap();
+        assert_eq!(res.peer_proposals_minted, 2);
+        assert!(res.peer_failures.is_empty());
+        assert_eq!(
+            res.history.share_with.as_deref(),
+            Some(&["bravo".to_string(), "charlie".to_string()][..])
+        );
+
+        // Each peer DB now holds exactly one fresh pending row with
+        // `metadata.federated_from` pointing at the source.
+        for peer in [&bravo, &charlie] {
+            let path = pool.db_path(peer, "evolution");
+            let store = EvolutionStore::open(&path).await.unwrap();
+            let repo = ProposalsRepo::new(store.pool().clone());
+            let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+                "SELECT id, kind, status, metadata FROM evolution_proposals",
+            )
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), 1, "peer {peer} must have one federated row");
+            let (peer_pid, kind, status, metadata) = &rows[0];
+            assert_eq!(kind, "skill_update");
+            assert_eq!(status, "pending");
+            assert!(peer_pid.starts_with("evol-fed-"));
+            let md: serde_json::Value =
+                serde_json::from_str(metadata.as_ref().unwrap()).unwrap();
+            assert_eq!(md["federated_from"]["tenant"], "acme");
+            assert_eq!(md["federated_from"]["source_proposal_id"], "evol-fed-001");
+            assert_eq!(md["federated_from"]["hop"], 1);
+
+            // Cross-check: target / diff / reasoning copied verbatim.
+            let loaded = repo.get(&ProposalId::new(peer_pid.clone())).await.unwrap();
+            assert_eq!(loaded.target, "skills/web_search.md");
+            assert!(loaded.diff.contains("Federated lesson"));
+            assert!(loaded.signal_ids.is_empty(), "signal_ids excluded");
+            assert!(loaded.trace_ids.is_empty(), "trace_ids excluded");
+        }
+    }
+
+    /// `share_with = Some([bravo])` but bravo never opted in ⇒
+    /// silent skip. Zero peer proposals; no failure entry (asymmetric
+    /// opt-out is by design — operator just sees "0 minted, 0 failed").
+    #[tokio::test]
+    async fn apply_skips_unaccepting_peers() {
+        let (tmp, applier, _admin_db, pool, evol) = fed_applier().await;
+        let bravo = TenantId::new("bravo").unwrap();
+        // Note: we do NOT register bravo in `tenant_federation_peers`.
+
+        let pid =
+            seed_approved_skill_update(&tmp, &evol, "evol-fed-noopt", "skills/web_search.md")
+                .await;
+        let res = applier
+            .apply_with_share_with(&pid, Some(vec![bravo.clone()]))
+            .await
+            .unwrap();
+        assert_eq!(res.peer_proposals_minted, 0);
+        assert!(
+            res.peer_failures.is_empty(),
+            "non-accepting peers are silently skipped, not failures"
+        );
+        // Peer DB never opened.
+        assert_eq!(count_peer_pending(&pool, &bravo).await, 0);
+    }
+
+    /// `share_with = Some([acme])` (the source tenant itself) ⇒ no-op
+    /// even if there's a self-peering row in the admin DB. Loop
+    /// prevention clause B — operator override insurance.
+    #[tokio::test]
+    async fn apply_skips_self_in_share_with() {
+        let (tmp, applier, _admin_db, pool, evol) = fed_applier().await;
+        let acme = TenantId::new("acme").unwrap();
+
+        let pid =
+            seed_approved_skill_update(&tmp, &evol, "evol-fed-self", "skills/web_search.md")
+                .await;
+        let res = applier
+            .apply_with_share_with(&pid, Some(vec![acme.clone()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.peer_proposals_minted, 0,
+            "source tenant must be filtered from share_with (clause B)"
+        );
+        assert!(res.peer_failures.is_empty());
+        // No proposal landed in the source's own DB beyond the original.
+        assert_eq!(count_peer_pending(&pool, &acme).await, 1);
+    }
+
+    /// Source proposal whose metadata already says `federated_from.hop
+    /// = 1` ⇒ no rebroadcast, regardless of share_with. Loop
+    /// prevention clause A — federated proposals do not re-federate.
+    #[tokio::test]
+    async fn apply_skips_when_source_metadata_hop_ge_1() {
+        let (tmp, applier, admin_db, pool, evol) = fed_applier().await;
+        let acme = TenantId::new("acme").unwrap();
+        let bravo = TenantId::new("bravo").unwrap();
+        admin_db
+            .add_federation_peer(&bravo, &acme, "alice")
+            .await
+            .unwrap();
+
+        // Seed a SkillUpdate whose metadata says it was already
+        // federated. We bypass the helper to inject metadata.
+        let path = tmp.path().join("skills/web_search.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "# Skill\n\nBody.\n").unwrap();
+        let pid = ProposalId::new("evol-fed-already-hop1");
+        let repo = ProposalsRepo::new(evol.pool().clone());
+        repo.insert(&corlinman_evolution::EvolutionProposal {
+            id: pid.clone(),
+            kind: EvolutionKind::SkillUpdate,
+            target: "skills/web_search.md".into(),
+            diff: "--- a/skills/web_search.md\n\
+                   +++ b/skills/web_search.md\n\
+                   @@ __APPEND__,0 +__APPEND__,1 @@\n\
+                   +Hop1 lesson\n"
+                .into(),
+            reasoning: "fixture".into(),
+            risk: corlinman_evolution::EvolutionRisk::Low,
+            budget_cost: 0,
+            status: EvolutionStatus::Approved,
+            shadow_metrics: None,
+            signal_ids: vec![],
+            trace_ids: vec![],
+            created_at: 1_000,
+            decided_at: Some(2_000),
+            decided_by: Some("operator".into()),
+            applied_at: None,
+            rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
+            metadata: Some(serde_json::json!({
+                "federated_from": {
+                    "tenant": "zulu",
+                    "source_proposal_id": "evol-zulu-001",
+                    "hop": 1,
+                }
+            })),
+        })
+        .await
+        .unwrap();
+
+        let res = applier
+            .apply_with_share_with(&pid, Some(vec![bravo.clone()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.peer_proposals_minted, 0,
+            "hop >= 1 must short-circuit the rebroadcaster (clause A)"
+        );
+        assert!(res.peer_failures.is_empty());
+        assert_eq!(count_peer_pending(&pool, &bravo).await, 0);
+    }
+
+    /// `share_with` populated on a non-`skill_update` kind (e.g.
+    /// `memory_op` or `prompt_template`) ⇒ rebroadcaster short-circuits
+    /// with a warn, no peer proposals minted. The route layer rejects
+    /// at the API edge; this is the in-process safety net.
+    #[tokio::test]
+    async fn apply_only_federates_skill_update() {
+        let (_tmp, applier, admin_db, pool, evol) = fed_applier().await;
+        let acme = TenantId::new("acme").unwrap();
+        let bravo = TenantId::new("bravo").unwrap();
+        admin_db
+            .add_federation_peer(&bravo, &acme, "alice")
+            .await
+            .unwrap();
+
+        // memory_op (delete_chunk) — kind not federable. Even with
+        // share_with=Some([bravo]) and bravo opted in, no peer
+        // proposal is minted. Use `apply_kb_store` to seed a chunk so
+        // apply succeeds without leaking the private field; the test
+        // helper `seed_chunk` borrows the kb_store from the applier
+        // via the `kb_store_for_tests` accessor below.
+        let id = seed_chunk(applier.kb_store_for_tests(), "/c1", "doomed").await;
+        let target = format!("delete_chunk:{id}");
+        let pid = seed_approved(&evol, "evol-fed-memop", &target).await;
+
+        let res = applier
+            .apply_with_share_with(&pid, Some(vec![bravo.clone()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.peer_proposals_minted, 0,
+            "memory_op must not federate (only skill_update in v1)"
+        );
+        assert!(res.peer_failures.is_empty());
+        // share_with persists in history regardless — operator intent
+        // is preserved even though the rebroadcaster declined.
+        assert_eq!(
+            res.history.share_with.as_deref(),
+            Some(&["bravo".to_string()][..])
+        );
+        assert_eq!(count_peer_pending(&pool, &bravo).await, 0);
     }
 }

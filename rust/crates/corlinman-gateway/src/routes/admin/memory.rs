@@ -164,6 +164,7 @@ async fn reset_decay(State(state): State<AdminState>, Json(req): Json<ResetReque
         applied_at: now_ms,
         rolled_back_at: None,
         rollback_reason: None,
+        share_with: None,
     };
     let history_id = match history_repo.insert(&history).await {
         Ok(id) => id,

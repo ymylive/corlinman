@@ -887,12 +887,25 @@ impl HistoryRepo {
                 source,
             }
         })?;
+        // Phase 4 W2 B3 iter 3 — JSON-encoded peer slug array. None →
+        // NULL on disk; `Some(empty)` round-trips as `[]` so a downstream
+        // reader can tell "operator approved with no peers" apart from
+        // "legacy / unfederated apply" without ambiguity.
+        let share_with = match &h.share_with {
+            Some(v) => Some(serde_json::to_string(v).map_err(|source| {
+                RepoError::MalformedJson {
+                    column: "share_with",
+                    source,
+                }
+            })?),
+            None => None,
+        };
         let row = sqlx::query(
             r#"INSERT INTO evolution_history
                  (proposal_id, kind, target, before_sha, after_sha,
                   inverse_diff, metrics_baseline, applied_at,
-                  rolled_back_at, rollback_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  rolled_back_at, rollback_reason, share_with)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                RETURNING id"#,
         )
         .bind(h.proposal_id.as_str())
@@ -905,6 +918,7 @@ impl HistoryRepo {
         .bind(h.applied_at)
         .bind(h.rolled_back_at)
         .bind(&h.rollback_reason)
+        .bind(share_with)
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get::<i64, _>("id"))
@@ -921,7 +935,7 @@ impl HistoryRepo {
         let row = sqlx::query(
             r#"SELECT id, proposal_id, kind, target, before_sha, after_sha,
                       inverse_diff, metrics_baseline, applied_at,
-                      rolled_back_at, rollback_reason
+                      rolled_back_at, rollback_reason, share_with
                FROM evolution_history
                WHERE proposal_id = ?
                ORDER BY applied_at DESC, id DESC
@@ -945,6 +959,27 @@ impl HistoryRepo {
                 column: "metrics_baseline",
                 source,
             })?;
+        // Phase 4 W2 B3 iter 3: tolerant decode mirroring
+        // `evolution_proposals.metadata`. Corrupted TEXT (operator
+        // hand-edit, partial write, stale tooling) downgrades to
+        // `share_with = None` with a `tracing::warn!` rather than
+        // failing the whole `latest_for_proposal` call — losing the
+        // federation hint is strictly better than losing the audit row.
+        let proposal_id_for_warn: String = row.get("proposal_id");
+        let share_with: Option<Vec<String>> = match row.get::<Option<String>, _>("share_with") {
+            Some(s) => match serde_json::from_str::<Vec<String>>(&s) {
+                Ok(v) => Some(v),
+                Err(source) => {
+                    tracing::warn!(
+                        proposal_id = %proposal_id_for_warn,
+                        error = %source,
+                        "evolution_history.share_with held non-JSON TEXT; decoding as None"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
 
         Ok(EvolutionHistory {
             id: Some(row.get::<i64, _>("id")),
@@ -958,6 +993,7 @@ impl HistoryRepo {
             applied_at: row.get("applied_at"),
             rolled_back_at: row.get("rolled_back_at"),
             rollback_reason: row.get("rollback_reason"),
+            share_with,
         })
     }
 
@@ -1391,6 +1427,7 @@ mod tests {
                 applied_at: 3_000,
                 rolled_back_at: None,
                 rollback_reason: None,
+                share_with: None,
             })
             .await
             .unwrap();
@@ -1604,6 +1641,7 @@ mod tests {
                 applied_at: 3_000,
                 rolled_back_at: None,
                 rollback_reason: None,
+                share_with: None,
             })
             .await
             .unwrap();
@@ -1620,6 +1658,116 @@ mod tests {
         let missing = ProposalId::new("evol-hist-nope");
         let err = history.latest_for_proposal(&missing).await.unwrap_err();
         assert!(matches!(err, RepoError::NotFound(_)), "got {err:?}");
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 4 W2 B3 iter 3: share_with column on evolution_history.
+    //
+    // `share_with: Option<Vec<String>>` round-trips through HistoryRepo
+    // as a JSON-encoded TEXT array. Corrupt TEXT decodes as None with a
+    // tracing::warn — same tolerant pattern as `evolution_proposals.metadata`.
+    // -------------------------------------------------------------------
+
+    /// `Some(non-empty)`, `Some(empty)`, and `None` must each round-trip
+    /// through `insert` + `latest_for_proposal` byte-for-byte. The
+    /// distinction between `Some(empty)` ("operator approved with no
+    /// peers") and `None` ("legacy unfederated apply") is the entire
+    /// point of the column being nullable — the iter-4 rebroadcaster
+    /// short-circuits on both, but the audit log retains the operator's
+    /// intent.
+    #[tokio::test]
+    async fn share_with_round_trips_through_history() {
+        let (_tmp, store) = fresh_store().await;
+        let proposals = ProposalsRepo::new(store.pool().clone());
+        let history = HistoryRepo::new(store.pool().clone());
+
+        // Three sibling fixtures, one per Option<Vec<_>> shape.
+        for (suffix, share_with) in [
+            ("legacy", None),
+            ("empty-peers", Some(Vec::<String>::new())),
+            (
+                "two-peers",
+                Some(vec!["bravo".to_string(), "charlie".to_string()]),
+            ),
+        ] {
+            let pid = insert_applied(&proposals, &format!("evol-hist-share-{suffix}")).await;
+            history
+                .insert(&EvolutionHistory {
+                    id: None,
+                    proposal_id: pid.clone(),
+                    kind: EvolutionKind::SkillUpdate,
+                    target: "skills/web_search.md".into(),
+                    before_sha: "aaa".into(),
+                    after_sha: "bbb".into(),
+                    inverse_diff: r#"{"op":"skill_update"}"#.into(),
+                    metrics_baseline: serde_json::json!({}),
+                    applied_at: 3_000,
+                    rolled_back_at: None,
+                    rollback_reason: None,
+                    share_with: share_with.clone(),
+                })
+                .await
+                .unwrap();
+
+            let got = history.latest_for_proposal(&pid).await.unwrap();
+            assert_eq!(
+                got.share_with, share_with,
+                "share_with must round-trip byte-for-byte for fixture '{suffix}'"
+            );
+        }
+    }
+
+    /// Corrupted TEXT in the `share_with` column (operator hand-edit,
+    /// stale tooling, partial write) must decode as `None` and emit a
+    /// `tracing::warn` — losing the federation hint is strictly better
+    /// than failing the whole `latest_for_proposal` call (the audit row
+    /// is the operator's last line of defence on apply provenance).
+    /// Same tolerant pattern as `evolution_proposals.metadata`.
+    #[tokio::test]
+    async fn share_with_corrupt_json_decodes_as_none_with_warn() {
+        let (_tmp, store) = fresh_store().await;
+        let proposals = ProposalsRepo::new(store.pool().clone());
+        let history = HistoryRepo::new(store.pool().clone());
+
+        let pid = insert_applied(&proposals, "evol-hist-share-corrupt").await;
+        history
+            .insert(&EvolutionHistory {
+                id: None,
+                proposal_id: pid.clone(),
+                kind: EvolutionKind::SkillUpdate,
+                target: "skills/web_search.md".into(),
+                before_sha: "aaa".into(),
+                after_sha: "bbb".into(),
+                inverse_diff: "{}".into(),
+                metrics_baseline: serde_json::json!({}),
+                applied_at: 3_000,
+                rolled_back_at: None,
+                rollback_reason: None,
+                // Round-trip path is fine — we plant the corrupt blob below.
+                share_with: Some(vec!["bravo".into()]),
+            })
+            .await
+            .unwrap();
+
+        // Bypass the repo to plant non-JSON in the column. The real
+        // bind path serializes via `serde_json::to_string` and so can
+        // never produce non-JSON; we're testing the read tolerance.
+        sqlx::query("UPDATE evolution_history SET share_with = ? WHERE proposal_id = ?")
+            .bind("not json at all")
+            .bind(pid.as_str())
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        // Load must succeed — corrupt blob downgrades to None, the
+        // rest of the row stays intact. The tracing::warn fires from
+        // inside `latest_for_proposal`; this layer doesn't capture it
+        // (operator-facing surfaces hook on the warn separately).
+        let got = history.latest_for_proposal(&pid).await.unwrap();
+        assert!(got.share_with.is_none(), "corrupt share_with decodes as None");
+        assert_eq!(got.proposal_id, pid, "rest of the row still loads cleanly");
+        assert_eq!(got.kind, EvolutionKind::SkillUpdate);
+        assert_eq!(got.target, "skills/web_search.md");
     }
 
     // -------------------------------------------------------------------

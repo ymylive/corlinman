@@ -378,6 +378,7 @@ mod tests {
                 applied_at: 3_000,
                 rolled_back_at: None,
                 rollback_reason: None,
+                share_with: None,
             })
             .await
             .unwrap();
@@ -459,6 +460,7 @@ mod tests {
                 applied_at: 3_000,
                 rolled_back_at: None,
                 rollback_reason: None,
+                share_with: None,
             })
             .await
             .unwrap();

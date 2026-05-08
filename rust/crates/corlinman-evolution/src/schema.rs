@@ -70,7 +70,14 @@ CREATE TABLE IF NOT EXISTS evolution_history (
     applied_at       INTEGER NOT NULL,
     rolled_back_at   INTEGER,
     rollback_reason  TEXT,
-    tenant_id        TEXT NOT NULL DEFAULT 'default'
+    tenant_id        TEXT NOT NULL DEFAULT 'default',
+    -- Phase 4 W2 B3 iter 3: JSON-encoded array of peer tenant slugs the
+    -- operator opted into at apply time (the source side's "share with"
+    -- selection). `NULL` when the apply did not federate; absent / `NULL`
+    -- decodes as `share_with = None` on the row. Read by the iter-4
+    -- rebroadcaster after a successful apply to fan the proposal out
+    -- to peer evolution DBs.
+    share_with       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_evol_history_proposal
@@ -213,5 +220,17 @@ pub const MIGRATIONS: &[(&str, &str, &str)] = &[
         "evolution_proposals",
         "metadata",
         "ALTER TABLE evolution_proposals ADD COLUMN metadata TEXT",
+    ),
+    // Phase 4 W2 B3 iter 3 — `share_with` column on `evolution_history`.
+    // JSON-encoded TEXT array of peer tenant slugs the operator opted
+    // into when approving the apply. Mirrors the pattern of the iter-2
+    // `metadata` ALTER above (single-column free-form JSON, default NULL,
+    // tolerant decode on read). Iter-4 reads this on the source-tenant
+    // history row after apply commits and fans a fresh `pending`
+    // proposal out to each accepted peer's `evolution.sqlite`.
+    (
+        "evolution_history",
+        "share_with",
+        "ALTER TABLE evolution_history ADD COLUMN share_with TEXT",
     ),
 ];

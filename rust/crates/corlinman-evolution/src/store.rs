@@ -366,6 +366,86 @@ mod tests {
         let _store2 = EvolutionStore::open(&path).await.unwrap();
     }
 
+    /// Phase 4 W2 B3 iter 3: simulate a pre-B3 schema (no `share_with`
+    /// column on `evolution_history`), reopen through
+    /// `EvolutionStore::open`, and confirm the migration block adds
+    /// the column. Mirrors `migration_adds_metadata_column_to_legacy_db`
+    /// so an operator upgrading a long-running installation doesn't
+    /// have to rebuild the audit DB. The migration is idempotent —
+    /// reopening twice must not re-trigger the ALTER.
+    #[tokio::test]
+    async fn migration_adds_share_with_column_to_legacy_history_db() {
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("evolution.sqlite");
+        let url = format!("sqlite://{}", path.display());
+
+        // Bootstrap a pre-B3 evolution_history shape — every column
+        // landed before the B3 ALTER. We intentionally skip the parent
+        // tables here; the test only cares about the migration path
+        // for the `share_with` column. Foreign-key cascades aren't
+        // exercised because this is a schema-shape probe.
+        {
+            let opts = SqliteConnectOptions::from_str(&url)
+                .unwrap()
+                .create_if_missing(true);
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                r#"CREATE TABLE evolution_history (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    proposal_id      TEXT NOT NULL,
+                    kind             TEXT NOT NULL,
+                    target           TEXT NOT NULL,
+                    before_sha       TEXT NOT NULL,
+                    after_sha        TEXT NOT NULL,
+                    inverse_diff     TEXT NOT NULL,
+                    metrics_baseline TEXT NOT NULL,
+                    applied_at       INTEGER NOT NULL,
+                    rolled_back_at   INTEGER,
+                    rollback_reason  TEXT,
+                    tenant_id        TEXT NOT NULL DEFAULT 'default'
+                );"#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        // Pre-condition: column missing.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        assert!(
+            !column_exists(&pool, "evolution_history", "share_with")
+                .await
+                .unwrap()
+        );
+        pool.close().await;
+
+        // Open through the production path → migration applies.
+        let store = EvolutionStore::open(&path).await.unwrap();
+        assert!(
+            column_exists(store.pool(), "evolution_history", "share_with")
+                .await
+                .unwrap(),
+            "migration must add evolution_history.share_with"
+        );
+
+        // Idempotent reopen: a second open against the now-migrated
+        // DB must be a no-op (pragma probe sees the column, ALTER
+        // skipped) — not crash with `duplicate column name`.
+        let _store2 = EvolutionStore::open(&path).await.unwrap();
+    }
+
     /// `column_exists` requires `&'static str`. The test names are
     /// known at compile time; this leak is bounded to the test binary.
     fn leak(s: &str) -> &'static str {
