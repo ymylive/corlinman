@@ -1,0 +1,16 @@
+# SwiftPM build artefacts.
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode metadata generated when an operator opens the package as a project.
+*.xcuserstate
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Generated swift-protobuf bindings — iter 2 wires the codegen plugin and
+# leaves outputs under the SwiftPM build directory.
+Sources/CorlinmanProto/*.pb.swift
+
+# macOS Finder noise.
+.DS_Store
