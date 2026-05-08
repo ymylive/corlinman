@@ -15,7 +15,7 @@ use ulid::Ulid;
 /// base32 + lexicographically sortable. Internally an `Arc<str>` so
 /// passing by value is cheap.
 ///
-/// Construct via [`UserId::generate`] (random) or [`UserId::from_str`]
+/// Construct via [`UserId::generate`] (random) or [`From`] for stored ids
 /// (from a stored row). The wire shape is the bare string; serde
 /// transparency keeps JSON payloads readable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -33,13 +33,21 @@ impl UserId {
     /// Caller is responsible for ensuring the string is the same shape
     /// `generate()` produces — there's no schema check here because
     /// callers writing through the store impl never hand-craft these.
-    pub fn from_str(s: impl Into<String>) -> Self {
-        Self(s.into().into())
-    }
-
     /// Borrow the raw string for binding/serializing.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl From<String> for UserId {
+    fn from(value: String) -> Self {
+        Self(value.into())
+    }
+}
+
+impl From<&str> for UserId {
+    fn from(value: &str) -> Self {
+        Self(value.into())
     }
 }
 
@@ -82,7 +90,7 @@ impl BindingKind {
     /// Inverse of [`Self::as_str`]. Unknown strings collapse to `Auto`
     /// so a forward-compatible read of an unknown future variant
     /// degrades gracefully rather than 500ing.
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_db_str(s: &str) -> Self {
         match s {
             "verified" => Self::Verified,
             "operator" => Self::Operator,
@@ -140,7 +148,7 @@ mod tests {
     fn user_id_round_trip_through_string() {
         let original = UserId::generate();
         let s = original.as_str().to_string();
-        let restored = UserId::from_str(s);
+        let restored = UserId::from(s);
         assert_eq!(original, restored);
     }
 
@@ -151,7 +159,7 @@ mod tests {
             BindingKind::Verified,
             BindingKind::Operator,
         ] {
-            assert_eq!(BindingKind::from_str(kind.as_str()), kind);
+            assert_eq!(BindingKind::from_db_str(kind.as_str()), kind);
         }
     }
 
@@ -159,13 +167,13 @@ mod tests {
     fn binding_kind_unknown_collapses_to_auto() {
         // Forward-compat: a hypothetical future "federated" variant
         // read off an upgraded DB shouldn't panic.
-        assert_eq!(BindingKind::from_str("federated"), BindingKind::Auto);
-        assert_eq!(BindingKind::from_str(""), BindingKind::Auto);
+        assert_eq!(BindingKind::from_db_str("federated"), BindingKind::Auto);
+        assert_eq!(BindingKind::from_db_str(""), BindingKind::Auto);
     }
 
     #[test]
     fn user_id_serializes_as_bare_string() {
-        let uid = UserId::from_str("01HV3K9PQRSTUVWXYZABCDEFGH");
+        let uid = UserId::from("01HV3K9PQRSTUVWXYZABCDEFGH");
         let json = serde_json::to_string(&uid).unwrap();
         assert_eq!(json, "\"01HV3K9PQRSTUVWXYZABCDEFGH\"");
         let back: UserId = serde_json::from_str(&json).unwrap();

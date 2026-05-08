@@ -85,9 +85,7 @@ impl SqliteIdentityStore {
         let phrase = generate_phrase();
         let now = OffsetDateTime::now_utc();
         let expires_at = now + time::Duration::minutes(DEFAULT_TTL_MIN);
-        let expires_str = expires_at
-            .format(&Rfc3339)
-            .map_err(format_err)?;
+        let expires_str = expires_at.format(&Rfc3339).map_err(format_err)?;
 
         sqlx::query(
             "INSERT INTO verification_phrases \
@@ -173,8 +171,7 @@ impl SqliteIdentityStore {
         if consumed_at.is_some() {
             return Err(IdentityError::PhraseAlreadyConsumed);
         }
-        let expires_at =
-            OffsetDateTime::parse(&expires_at_str, &Rfc3339).map_err(parse_err)?;
+        let expires_at = OffsetDateTime::parse(&expires_at_str, &Rfc3339).map_err(parse_err)?;
         if OffsetDateTime::now_utc() >= expires_at {
             return Err(IdentityError::PhraseExpired);
         }
@@ -293,7 +290,7 @@ impl SqliteIdentityStore {
             source: e,
         })?;
 
-        Ok(UserId::from_str(issued_to_user_id))
+        Ok(UserId::from(issued_to_user_id))
     }
 
     /// Garbage-collect expired, unconsumed phrases. Returns the number
@@ -397,13 +394,12 @@ mod tests {
         assert!(p.expires_at > OffsetDateTime::now_utc());
 
         // Round-trip via SQL: phrase is in the DB.
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM verification_phrases WHERE phrase = ?1",
-        )
-        .bind(&p.phrase)
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM verification_phrases WHERE phrase = ?1")
+                .bind(&p.phrase)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
         assert_eq!(n, 1);
     }
 
@@ -435,13 +431,11 @@ mod tests {
         assert_eq!(tg_now, qq_uid);
 
         // The orphaned tg_uid is gone.
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM user_identities WHERE user_id = ?1",
-        )
-        .bind(tg_uid.as_str())
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_identities WHERE user_id = ?1")
+            .bind(tg_uid.as_str())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
         assert_eq!(n, 0);
 
         // The reattributed alias has binding_kind=verified.
@@ -546,12 +540,14 @@ mod tests {
             .execute(store.pool())
             .await
             .unwrap();
-        sqlx::query("UPDATE verification_phrases SET expires_at = ?1, consumed_at = ?1 WHERE phrase = ?2")
-            .bind(&past)
-            .bind(&expired_consumed.phrase)
-            .execute(store.pool())
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE verification_phrases SET expires_at = ?1, consumed_at = ?1 WHERE phrase = ?2",
+        )
+        .bind(&past)
+        .bind(&expired_consumed.phrase)
+        .execute(store.pool())
+        .await
+        .unwrap();
 
         let removed = store.sweep_expired_phrases().await.unwrap();
         assert_eq!(removed, 1, "only expired-unconsumed should be removed");

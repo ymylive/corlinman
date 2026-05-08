@@ -47,9 +47,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use corlinman_identity::{
-    ChannelAlias, IdentityError, IdentityStore, UserId, UserSummary,
-};
+use corlinman_identity::{ChannelAlias, IdentityError, IdentityStore, UserId, UserSummary};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::format_description::well_known::Rfc3339;
@@ -215,14 +213,11 @@ fn storage_error(err: impl std::fmt::Display, ctx: &'static str) -> Response {
         .into_response()
 }
 
-/// Borrow the identity store off `AdminState` or 503 if absent.
+/// Borrow the identity store off `AdminState`.
 /// All four handlers funnel through this so the disabled gate is
 /// enforced exactly once per route.
-fn require_store(state: &AdminState) -> Result<Arc<dyn IdentityStore>, Response> {
-    state
-        .identity_store
-        .clone()
-        .ok_or_else(identity_disabled_503)
+fn require_store(state: &AdminState) -> Option<Arc<dyn IdentityStore>> {
+    state.identity_store.clone()
 }
 
 /* ------------------------------------------------------------------ */
@@ -230,9 +225,8 @@ fn require_store(state: &AdminState) -> Result<Arc<dyn IdentityStore>, Response>
 /* ------------------------------------------------------------------ */
 
 async fn list_handler(State(state): State<AdminState>, Query(q): Query<ListQuery>) -> Response {
-    let store = match require_store(&state) {
-        Ok(s) => s,
-        Err(resp) => return resp,
+    let Some(store) = require_store(&state) else {
+        return identity_disabled_503();
     };
     // Defaults: 50 rows per page, offset 0. The store clamps `limit`
     // to `[1, 200]` itself, so we don't pre-clamp here — the route
@@ -245,15 +239,11 @@ async fn list_handler(State(state): State<AdminState>, Query(q): Query<ListQuery
     }
 }
 
-async fn detail_handler(
-    State(state): State<AdminState>,
-    Path(user_id): Path<String>,
-) -> Response {
-    let store = match require_store(&state) {
-        Ok(s) => s,
-        Err(resp) => return resp,
+async fn detail_handler(State(state): State<AdminState>, Path(user_id): Path<String>) -> Response {
+    let Some(store) = require_store(&state) else {
+        return identity_disabled_503();
     };
-    let uid = UserId::from_str(user_id.clone());
+    let uid = UserId::from(user_id.clone());
     let aliases = match store.aliases_for(&uid).await {
         Ok(a) => a,
         Err(err) => return storage_error(err, "detail_aliases"),
@@ -280,9 +270,8 @@ async fn issue_phrase_handler(
     Path(user_id): Path<String>,
     body: Option<Json<IssuePhraseBody>>,
 ) -> Response {
-    let store = match require_store(&state) {
-        Ok(s) => s,
-        Err(resp) => return resp,
+    let Some(store) = require_store(&state) else {
+        return identity_disabled_503();
     };
     // Body is required; an empty body is a programming error in the
     // admin UI, not a degraded path — surface it as 400 explicitly.
@@ -299,7 +288,7 @@ async fn issue_phrase_handler(
         return invalid_input_400("user_id path segment must be non-empty");
     }
 
-    let uid = UserId::from_str(user_id.clone());
+    let uid = UserId::from(user_id.clone());
     match store
         .issue_phrase(&uid, &body.channel, &body.channel_user_id)
         .await
@@ -324,18 +313,12 @@ async fn issue_phrase_handler(
     }
 }
 
-async fn merge_handler(
-    State(state): State<AdminState>,
-    body: Option<Json<MergeBody>>,
-) -> Response {
-    let store = match require_store(&state) {
-        Ok(s) => s,
-        Err(resp) => return resp,
+async fn merge_handler(State(state): State<AdminState>, body: Option<Json<MergeBody>>) -> Response {
+    let Some(store) = require_store(&state) else {
+        return identity_disabled_503();
     };
     let Some(Json(body)) = body else {
-        return invalid_input_400(
-            "body must include into_user_id, from_user_id, decided_by",
-        );
+        return invalid_input_400("body must include into_user_id, from_user_id, decided_by");
     };
     if body.into_user_id.trim().is_empty() {
         return invalid_input_400("into_user_id must be non-empty");
@@ -346,8 +329,8 @@ async fn merge_handler(
     if body.decided_by.trim().is_empty() {
         return invalid_input_400("decided_by must be non-empty");
     }
-    let into = UserId::from_str(body.into_user_id);
-    let from = UserId::from_str(body.from_user_id);
+    let into = UserId::from(body.into_user_id);
+    let from = UserId::from(body.from_user_id);
 
     match store.merge_users(&into, &from, &body.decided_by).await {
         Ok(surviving) => (
@@ -564,9 +547,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/admin/identity/{}/issue-phrase", uid.as_str()))
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"channel":"qq","channel_user_id":"1234"}"#,
-                    ))
+                    .body(Body::from(r#"{"channel":"qq","channel_user_id":"1234"}"#))
                     .unwrap(),
             )
             .await
@@ -577,8 +558,7 @@ mod tests {
         assert_eq!(v.user_id, uid.as_str());
         assert_eq!(v.phrase.len(), 11, "9 chars + 2 hyphens");
         // The expires_at parses as an RFC-3339 timestamp in the future.
-        let expires =
-            OffsetDateTime::parse(&v.expires_at, &Rfc3339).expect("rfc3339 timestamp");
+        let expires = OffsetDateTime::parse(&v.expires_at, &Rfc3339).expect("rfc3339 timestamp");
         assert!(expires > OffsetDateTime::now_utc());
     }
 
@@ -614,9 +594,7 @@ mod tests {
                     .method("POST")
                     .uri("/admin/identity/whatever/issue-phrase")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"channel":"qq","channel_user_id":"1234"}"#,
-                    ))
+                    .body(Body::from(r#"{"channel":"qq","channel_user_id":"1234"}"#))
                     .unwrap(),
             )
             .await

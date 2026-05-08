@@ -54,10 +54,7 @@ pub trait IdentityStore: Send + Sync {
     /// and by the trait-merge job (B2 follow-up) to enumerate channels
     /// for a unified user. Empty vec when the user has no aliases —
     /// rare but possible if all aliases were operator-merged out.
-    async fn aliases_for(
-        &self,
-        user_id: &UserId,
-    ) -> Result<Vec<ChannelAlias>, IdentityError>;
+    async fn aliases_for(&self, user_id: &UserId) -> Result<Vec<ChannelAlias>, IdentityError>;
 
     /// Page through `user_identities`, ordered by `created_at DESC`
     /// so the most-recently-minted user lands on top of the admin
@@ -69,11 +66,7 @@ pub trait IdentityStore: Send + Sync {
     /// `alias_count` is computed via a `LEFT JOIN ... GROUP BY` in
     /// the impl so the admin UI can paint "QQ + Telegram" next to
     /// each row without N+1 follow-up queries.
-    async fn list_users(
-        &self,
-        limit: u32,
-        offset: u32,
-    ) -> Result<Vec<UserSummary>, IdentityError>;
+    async fn list_users(&self, limit: u32, offset: u32) -> Result<Vec<UserSummary>, IdentityError>;
 
     /// Issue a fresh verification phrase for `user_id` on the
     /// `(channel, channel_user_id)` pair the operator confirmed maps
@@ -161,19 +154,17 @@ impl IdentityStore for SqliteIdentityStore {
             Err(IdentityError::Storage { source, .. }) if is_unique_violation(&source) => {
                 // Concurrent winner committed first; their row is now
                 // visible. Re-read.
-                self.lookup(channel, channel_user_id)
-                    .await?
-                    .ok_or_else(|| {
-                        IdentityError::Storage {
-                            op: "resolve_or_create_retry",
-                            // Synthesize a not-quite-right sqlx error
-                            // for the variant; a true racey retry that
-                            // sees no row is an integrity violation, so
-                            // surfacing it as Storage is more accurate
-                            // than InvalidInput.
-                            source: sqlx::Error::RowNotFound,
-                        }
-                    })
+                self.lookup(channel, channel_user_id).await?.ok_or_else(|| {
+                    IdentityError::Storage {
+                        op: "resolve_or_create_retry",
+                        // Synthesize a not-quite-right sqlx error
+                        // for the variant; a true racey retry that
+                        // sees no row is an integrity violation, so
+                        // surfacing it as Storage is more accurate
+                        // than InvalidInput.
+                        source: sqlx::Error::RowNotFound,
+                    }
+                })
             }
             Err(other) => Err(other),
         }
@@ -196,14 +187,10 @@ impl IdentityStore for SqliteIdentityStore {
             op: "lookup",
             source: e,
         })?;
-        Ok(row.map(UserId::from_str))
+        Ok(row.map(UserId::from))
     }
 
-    async fn list_users(
-        &self,
-        limit: u32,
-        offset: u32,
-    ) -> Result<Vec<UserSummary>, IdentityError> {
+    async fn list_users(&self, limit: u32, offset: u32) -> Result<Vec<UserSummary>, IdentityError> {
         let limit = limit.clamp(1, 200) as i64;
         let offset = offset as i64;
         let rows = sqlx::query(
@@ -229,7 +216,7 @@ impl IdentityStore for SqliteIdentityStore {
             let display_name: Option<String> = row.get("display_name");
             let alias_count: i64 = row.get("alias_count");
             out.push(UserSummary {
-                user_id: UserId::from_str(user_id_str),
+                user_id: UserId::from(user_id_str),
                 display_name,
                 alias_count,
             });
@@ -262,9 +249,7 @@ impl IdentityStore for SqliteIdentityStore {
             ));
         }
         if decided_by.is_empty() {
-            return Err(IdentityError::InvalidInput(
-                "decided_by must be non-empty",
-            ));
+            return Err(IdentityError::InvalidInput("decided_by must be non-empty"));
         }
 
         let mut tx = self
@@ -279,32 +264,34 @@ impl IdentityStore for SqliteIdentityStore {
         // Both rows must exist before any reattribution. Otherwise an
         // operator typo silently mutates the surviving row's aliases
         // and leaves them dangling.
-        let into_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM user_identities WHERE user_id = ?1",
-        )
-        .bind(into_user_id.as_str())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| IdentityError::Storage {
-            op: "merge_users_check_into",
-            source: e,
-        })?;
+        let into_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_identities WHERE user_id = ?1")
+                .bind(into_user_id.as_str())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| IdentityError::Storage {
+                    op: "merge_users_check_into",
+                    source: e,
+                })?;
         if into_exists == 0 {
-            return Err(IdentityError::UserNotFound(into_user_id.as_str().to_string()));
+            return Err(IdentityError::UserNotFound(
+                into_user_id.as_str().to_string(),
+            ));
         }
 
-        let from_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM user_identities WHERE user_id = ?1",
-        )
-        .bind(from_user_id.as_str())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| IdentityError::Storage {
-            op: "merge_users_check_from",
-            source: e,
-        })?;
+        let from_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_identities WHERE user_id = ?1")
+                .bind(from_user_id.as_str())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| IdentityError::Storage {
+                    op: "merge_users_check_from",
+                    source: e,
+                })?;
         if from_exists == 0 {
-            return Err(IdentityError::UserNotFound(from_user_id.as_str().to_string()));
+            return Err(IdentityError::UserNotFound(
+                from_user_id.as_str().to_string(),
+            ));
         }
 
         // Reattribute every alias on the source to the target. Mark
@@ -340,15 +327,16 @@ impl IdentityStore for SqliteIdentityStore {
 
         // Touch the surviving row's updated_at so a downstream
         // "last-modified" sort surfaces the freshly-merged user.
-        let now = OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .map_err(|e| IdentityError::Storage {
-                op: "merge_users_format_ts",
-                source: sqlx::Error::ColumnDecode {
-                    index: "now".into(),
-                    source: Box::new(e),
-                },
-            })?;
+        let now =
+            OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .map_err(|e| IdentityError::Storage {
+                    op: "merge_users_format_ts",
+                    source: sqlx::Error::ColumnDecode {
+                        index: "now".into(),
+                        source: Box::new(e),
+                    },
+                })?;
         sqlx::query("UPDATE user_identities SET updated_at = ?1 WHERE user_id = ?2")
             .bind(&now)
             .bind(into_user_id.as_str())
@@ -378,10 +366,7 @@ impl IdentityStore for SqliteIdentityStore {
         Ok(into_user_id.clone())
     }
 
-    async fn aliases_for(
-        &self,
-        user_id: &UserId,
-    ) -> Result<Vec<ChannelAlias>, IdentityError> {
+    async fn aliases_for(&self, user_id: &UserId) -> Result<Vec<ChannelAlias>, IdentityError> {
         let rows = sqlx::query(
             "SELECT channel, channel_user_id, user_id, created_at, binding_kind \
              FROM user_aliases \
@@ -421,8 +406,8 @@ impl IdentityStore for SqliteIdentityStore {
             out.push(ChannelAlias {
                 channel,
                 channel_user_id,
-                user_id: UserId::from_str(user_id_str),
-                binding_kind: BindingKind::from_str(&binding_kind_str),
+                user_id: UserId::from(user_id_str),
+                binding_kind: BindingKind::from_db_str(&binding_kind_str),
                 created_at,
             });
         }
@@ -442,15 +427,16 @@ impl SqliteIdentityStore {
         display_name_hint: Option<&str>,
     ) -> Result<UserId, IdentityError> {
         let user_id = UserId::generate();
-        let now = OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .map_err(|e| IdentityError::Storage {
-                op: "format_ts",
-                source: sqlx::Error::ColumnDecode {
-                    index: "now".into(),
-                    source: Box::new(e),
-                },
-            })?;
+        let now =
+            OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .map_err(|e| IdentityError::Storage {
+                    op: "format_ts",
+                    source: sqlx::Error::ColumnDecode {
+                        index: "now".into(),
+                        source: Box::new(e),
+                    },
+                })?;
 
         let mut tx = self
             .pool()
@@ -635,11 +621,7 @@ mod tests {
         .bind("telegram")
         .bind("9876")
         .bind(uid.as_str())
-        .bind(
-            OffsetDateTime::now_utc()
-                .format(&Rfc3339)
-                .unwrap(),
-        )
+        .bind(OffsetDateTime::now_utc().format(&Rfc3339).unwrap())
         .execute(store.pool())
         .await
         .unwrap();
@@ -685,11 +667,7 @@ mod tests {
              VALUES ('telegram', '999', ?1, ?2, 'verified')",
         )
         .bind(u1.as_str())
-        .bind(
-            OffsetDateTime::now_utc()
-                .format(&Rfc3339)
-                .unwrap(),
-        )
+        .bind(OffsetDateTime::now_utc().format(&Rfc3339).unwrap())
         .execute(store.pool())
         .await
         .unwrap();
@@ -793,13 +771,11 @@ mod tests {
         assert_eq!(tg_now, into);
 
         // The orphan is gone.
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM user_identities WHERE user_id = ?1",
-        )
-        .bind(from.as_str())
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_identities WHERE user_id = ?1")
+            .bind(from.as_str())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
         assert_eq!(n, 0);
 
         // The reattributed alias is marked `operator`.
