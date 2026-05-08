@@ -120,6 +120,23 @@ def test_resolve_legacy_prefix_fallback() -> None:
     assert merged == {}
 
 
+def test_resolve_raw_model_prefers_configured_provider() -> None:
+    """Configured providers must handle matching raw model ids before legacy fallback."""
+    spec = _spec(
+        "openai-main",
+        ProviderKind.OPENAI,
+        base_url="https://gateway.example/v1",
+        params={"timeout_ms": 60_000},
+    )
+    reg = ProviderRegistry([spec])
+
+    provider, model, merged = reg.resolve(alias_or_model="gpt-5.5", aliases={})
+
+    assert provider is reg.get("openai-main")
+    assert model == "gpt-5.5"
+    assert merged["timeout_ms"] == 60_000
+
+
 def test_resolve_raises_on_unknown_raw_id() -> None:
     reg = ProviderRegistry([])
     with pytest.raises(KeyError):

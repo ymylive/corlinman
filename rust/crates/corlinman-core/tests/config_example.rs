@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use corlinman_core::config::Config;
+use corlinman_core::config::{Config, IssueLevel};
 
 fn example_path() -> PathBuf {
     // tests/ is two directories below the repo root:
@@ -20,11 +20,12 @@ fn docs_example_parses_cleanly() {
     let p = example_path();
     let cfg = Config::load_from_path(&p)
         .unwrap_or_else(|e| panic!("failed to parse {}: {e}", p.display()));
-    // Example has anthropic enabled with an env-ref key → passes the
-    // "no_provider_enabled" cross-field rule.
+    // The annotated example intentionally keeps live providers disabled by
+    // default, so a `no_provider_enabled` warning is acceptable here. Hard
+    // errors would make the shipped sample unusable for `config validate`.
     let issues = cfg.validate_report();
     assert!(
-        issues.iter().all(|i| i.code != "no_provider_enabled"),
-        "example should keep at least one provider enabled; issues: {issues:?}"
+        issues.iter().all(|i| matches!(i.level, IssueLevel::Warn)),
+        "example should not contain hard validation errors; issues: {issues:?}"
     );
 }

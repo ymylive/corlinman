@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -209,6 +210,55 @@ async def test_servicer_threads_merged_params_into_provider(
     assert fake.last_kwargs["temperature"] == pytest.approx(0.9)
     extra = fake.last_kwargs.get("extra") or {}
     assert extra.get("top_p") == pytest.approx(0.95)
+
+
+@pytest.mark.asyncio
+async def test_servicer_forwards_openai_tools_json_to_provider() -> None:
+    """Client-supplied OpenAI tools must reach the provider call."""
+    fake = _FakeProvider(_token_stream(["ok"]))
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search docs",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            },
+        }
+    ]
+
+    def _resolver(_model: str) -> Any:
+        return fake
+
+    servicer = CorlinmanAgentServicer(provider_resolver=_resolver)
+    server = grpc.aio.server()
+    agent_pb2_grpc.add_AgentServicer_to_server(servicer, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = agent_pb2_grpc.AgentStub(channel)
+
+            async def frames():
+                yield agent_pb2.ClientFrame(
+                    start=agent_pb2.ChatStart(
+                        model="gpt-4o-mini",
+                        tools_json=json.dumps(tools).encode("utf-8"),
+                    )
+                )
+
+            call = stub.Chat(frames())
+            async for _ in call:
+                pass
+    finally:
+        await server.stop(grace=None)
+
+    assert fake.last_kwargs["tools"] == tools
 
 
 @pytest.mark.asyncio

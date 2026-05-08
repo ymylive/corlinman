@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
@@ -257,12 +258,27 @@ def _to_agent_start(pb_start: agent_pb2.ChatStart) -> AgentChatStart:
     return AgentChatStart(
         model=pb_start.model,
         messages=messages,
-        tools=[],  # tools_json parsing lands with the full OpenAI tool schema in M3
+        tools=_decode_tools_json(pb_start.tools_json),
         session_key=pb_start.session_key,
         temperature=pb_start.temperature or None,
         max_tokens=pb_start.max_tokens or None,
         attachments=attachments,
     )
+
+
+def _decode_tools_json(raw: bytes) -> list[dict[str, Any]]:
+    """Decode OpenAI ``tools`` JSON carried by the protobuf frame."""
+    if not raw:
+        return []
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        logger.warning("agent.chat.tools_json_invalid", error=str(exc))
+        return []
+    if not isinstance(decoded, list):
+        logger.warning("agent.chat.tools_json_not_array")
+        return []
+    return [item for item in decoded if isinstance(item, dict)]
 
 
 def _to_agent_attachment(pb: agent_pb2.Attachment) -> AgentAttachment:

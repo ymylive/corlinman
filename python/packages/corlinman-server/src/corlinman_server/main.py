@@ -220,19 +220,24 @@ async def _serve() -> int:
     # The resolver is a file-mtime-aware wrapper so admin writes on the
     # Rust side (which rewrite py-config.json atomically) propagate here
     # without a process restart.
-    py_config_path = os.environ.get("CORLINMAN_PY_CONFIG")
-    resolver = _ReloadingProviderResolver(py_config_path)
-    if py_config_path is None:
-        # No config handshake → legacy prefix fallback for every resolve.
-        # Log zeros so the boot-time grep target stays consistent.
+    if os.environ.get("CORLINMAN_TEST_MOCK_PROVIDER") is not None:
+        # Test smoke path: leave provider_resolver unset so the Agent
+        # servicer activates its offline mock provider instead of falling
+        # through to legacy real-provider prefix matching.
         logger.info("providers.registered", count=0, enabled=0, aliases=0)
-    agent_pb2_grpc.add_AgentServicer_to_server(
-        CorlinmanAgentServicer(
+        agent_servicer = CorlinmanAgentServicer()
+    else:
+        py_config_path = os.environ.get("CORLINMAN_PY_CONFIG")
+        resolver = _ReloadingProviderResolver(py_config_path)
+        if py_config_path is None:
+            # No config handshake → legacy prefix fallback for every resolve.
+            # Log zeros so the boot-time grep target stays consistent.
+            logger.info("providers.registered", count=0, enabled=0, aliases=0)
+        agent_servicer = CorlinmanAgentServicer(
             provider_resolver=resolver,
             aliases=resolver.aliases,
-        ),
-        server,
-    )
+        )
+    agent_pb2_grpc.add_AgentServicer_to_server(agent_servicer, server)
 
     # Feature C last-mile: localhost HTTP sidecar backs
     # ``POST /admin/embedding/benchmark`` on the Rust gateway. Failure

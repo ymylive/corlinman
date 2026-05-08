@@ -118,7 +118,7 @@ class BedrockProvider:
     kind: ClassVar[ProviderKind] = ProviderKind.BEDROCK
 
     @classmethod
-    def build(cls, spec: ProviderSpec) -> "BedrockProvider":
+    def build(cls, spec: ProviderSpec) -> BedrockProvider:
         raise NotImplementedError(
             f"Bedrock adapter is not yet implemented (provider {spec.name!r}). "
             "Use kind = 'openai_compatible' with a SigV4 proxy as a workaround."
@@ -138,7 +138,7 @@ class AzureProvider:
     kind: ClassVar[ProviderKind] = ProviderKind.AZURE
 
     @classmethod
-    def build(cls, spec: ProviderSpec) -> "AzureProvider":
+    def build(cls, spec: ProviderSpec) -> AzureProvider:
         raise NotImplementedError(
             f"Azure OpenAI adapter is not yet implemented (provider {spec.name!r}). "
             "Use kind = 'openai_compatible' with the full Azure deployment URL "

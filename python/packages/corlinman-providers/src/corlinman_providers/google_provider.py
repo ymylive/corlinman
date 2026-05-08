@@ -3,25 +3,19 @@
 Wraps ``google.genai`` behind
 :class:`corlinman_providers.base.CorlinmanProvider`.
 
-M2 scope: **text-only streaming**. Google's Gemini SDK exposes function
-calls as structured ``Part`` entries inside each streamed chunk; mapping
-them to the unified ``tool_call_{start,delta,end}`` shape is strictly more
-work than Anthropic/OpenAI because Gemini does not stream argument JSON —
-it delivers the whole parsed call in one ``Part`` once. The clean
-translation is:
+Google's Gemini SDK exposes function calls as structured ``Part`` entries
+inside each streamed chunk. Gemini usually delivers the whole parsed call
+in one ``Part`` once, so the unified streaming translation is:
 
     * when a chunk carries a ``function_call`` part: emit
       ``tool_call_start`` + ``tool_call_delta`` (with ``json.dumps(args)``)
       + ``tool_call_end`` back-to-back (no partial aggregation needed);
     * text parts → ``token`` chunks.
-
-TODO(M3): implement the function-call translation above once a real Gemini
-test fixture lands. The current scaffold streams text only and raises a
-``NotImplementedError`` if the caller passes ``tools``.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, ClassVar
@@ -36,7 +30,7 @@ logger = structlog.get_logger(__name__)
 
 
 class GoogleProvider:
-    """Google Gemini adapter (text-only for M2; see module docstring TODO)."""
+    """Google Gemini adapter."""
 
     name: ClassVar[str] = "google"
     kind: ClassVar[ProviderKind] = ProviderKind.GOOGLE
@@ -71,11 +65,6 @@ class GoogleProvider:
     ) -> AsyncIterator[ProviderChunk]:
         if not self._api_key:
             raise RuntimeError("API key missing: set GOOGLE_API_KEY")
-        if tools:
-            # TODO(M3): translate Gemini `function_call` parts.
-            raise NotImplementedError(
-                "Google provider tool_call translation is a TODO — pass tools=None"
-            )
 
         from google import genai  # type: ignore[import-not-found]
 
@@ -97,6 +86,8 @@ class GoogleProvider:
                 config["temperature"] = temperature
             if max_tokens:
                 config["max_output_tokens"] = max_tokens
+            if tools:
+                config["tools"] = _normalise_tools(tools)
             if extra:
                 config.update(extra)
 
@@ -109,10 +100,30 @@ class GoogleProvider:
                 config=config or None,  # type: ignore[arg-type]
             )
             finish = "stop"
+            synthetic_call_index = 0
             async for chunk in gen:
                 text = getattr(chunk, "text", None) or ""
                 if text:
                     yield ProviderChunk(kind="token", text=text)
+                for function_call in _iter_function_calls(chunk):
+                    finish = "tool_calls"
+                    call_id = _get(function_call, "id")
+                    if not call_id:
+                        call_id = f"call_{synthetic_call_index}"
+                        synthetic_call_index += 1
+                    name = _get(function_call, "name") or ""
+                    args = _get(function_call, "args") or {}
+                    yield ProviderChunk(
+                        kind="tool_call_start",
+                        tool_call_id=call_id,
+                        tool_name=name,
+                    )
+                    yield ProviderChunk(
+                        kind="tool_call_delta",
+                        tool_call_id=call_id,
+                        arguments_delta=json.dumps(_jsonable(args)),
+                    )
+                    yield ProviderChunk(kind="tool_call_end", tool_call_id=call_id)
             yield ProviderChunk(kind="done", finish_reason=finish)
         except CorlinmanError:
             raise
@@ -137,6 +148,63 @@ def _get(obj: Any, key: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(key)
     return getattr(obj, key, None)
+
+
+def _get_any(obj: Any, *keys: str) -> Any:
+    for key in keys:
+        value = _get(obj, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _iter_function_calls(chunk: Any) -> list[Any]:
+    direct_calls = getattr(chunk, "function_calls", None)
+    if direct_calls:
+        return list(direct_calls)
+
+    calls: list[Any] = []
+    parts = getattr(chunk, "parts", None)
+    if parts is None:
+        parts = []
+        for candidate in getattr(chunk, "candidates", None) or []:
+            content = _get(candidate, "content")
+            parts.extend(_get(content, "parts") or [])
+
+    for part in parts:
+        function_call = _get_any(part, "function_call", "functionCall")
+        if function_call is not None:
+            calls.append(function_call)
+    return calls
+
+
+def _jsonable(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    return value
+
+
+def _normalise_tools(tools: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    declarations: list[dict[str, Any]] = []
+    passthrough: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function") if tool.get("type") == "function" else None
+        if not isinstance(function, dict):
+            passthrough.append(tool)
+            continue
+
+        declaration: dict[str, Any] = {"name": function.get("name", "")}
+        if function.get("description"):
+            declaration["description"] = function["description"]
+        parameters = function.get("parameters")
+        if parameters:
+            declaration["parameters"] = parameters
+        declarations.append(declaration)
+
+    normalised = list(passthrough)
+    if declarations:
+        normalised.append({"function_declarations": declarations})
+    return normalised
 
 
 # Hand-authored JSON Schema (draft 2020-12). ``safety_settings`` is

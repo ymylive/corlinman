@@ -224,6 +224,17 @@ class ProviderRegistry:
             merged = _merge_params(provider_params, alias.params)
             return provider, alias.model, merged
 
+        # Configured-provider fallback — raw model id. This keeps config-driven
+        # deployments on their declared base_url/api_key even when callers use
+        # the provider's model id directly instead of a named alias.
+        for spec in self._specs.values():
+            provider = self._providers.get(spec.name)
+            cls = _KIND_TO_CLASS.get(spec.kind)
+            if provider is None or cls is None:
+                continue
+            if cls.supports(alias_or_model):
+                return provider, alias_or_model, dict(spec.params)
+
         # Legacy fallback — raw model id.
         for prefix, cls in MODEL_PREFIX_DEFAULTS:
             if alias_or_model.startswith(prefix):
