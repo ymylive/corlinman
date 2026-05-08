@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 
@@ -624,7 +625,7 @@ def _coerce_kind(raw: str) -> EpisodeKind:
         return EpisodeKind.CONVERSATION
 
 
-def _row_to_episode(row: aiosqlite.Row | tuple[object, ...]) -> Episode:
+def _row_to_episode(row: aiosqlite.Row | tuple[Any, ...]) -> Episode:
     return Episode(
         id=str(row[0]),
         tenant_id=str(row[1]),
@@ -645,7 +646,7 @@ def _row_to_episode(row: aiosqlite.Row | tuple[object, ...]) -> Episode:
     )
 
 
-def _row_to_run(row: aiosqlite.Row | tuple[object, ...]) -> DistillationRun:
+def _row_to_run(row: aiosqlite.Row | tuple[Any, ...]) -> DistillationRun:
     return DistillationRun(
         run_id=str(row[0]),
         tenant_id=str(row[1]),
