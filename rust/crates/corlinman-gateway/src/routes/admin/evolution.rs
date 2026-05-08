@@ -1633,6 +1633,7 @@ mod tests {
             sessions_disabled: false,
             data_dir: None,
             identity_store: None,
+            replay_chat_service: None,
         };
         router(state)
     }
