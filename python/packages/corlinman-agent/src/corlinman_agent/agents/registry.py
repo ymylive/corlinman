@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 from corlinman_agent.agents.card import AgentCard
 

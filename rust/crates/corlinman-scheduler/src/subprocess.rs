@@ -36,7 +36,10 @@ pub enum SubprocessOutcome {
     /// before-spawn until exit.
     Success { duration: Duration },
     /// Child exited non-zero within the timeout.
-    NonZeroExit { code: Option<i32>, duration: Duration },
+    NonZeroExit {
+        code: Option<i32>,
+        duration: Duration,
+    },
     /// Timeout elapsed. The child has been signalled with SIGKILL by the
     /// time we return; `duration` carries the timeout we hit.
     Timeout { duration: Duration },
@@ -164,31 +167,14 @@ mod tests {
 
     #[tokio::test]
     async fn success_on_zero_exit() {
-        let outcome = run_subprocess(
-            "test",
-            "run-1",
-            "true",
-            &[],
-            5,
-            None,
-            &BTreeMap::new(),
-        )
-        .await;
+        let outcome = run_subprocess("test", "run-1", "true", &[], 5, None, &BTreeMap::new()).await;
         assert!(matches!(outcome, SubprocessOutcome::Success { .. }));
     }
 
     #[tokio::test]
     async fn non_zero_on_false() {
-        let outcome = run_subprocess(
-            "test",
-            "run-2",
-            "false",
-            &[],
-            5,
-            None,
-            &BTreeMap::new(),
-        )
-        .await;
+        let outcome =
+            run_subprocess("test", "run-2", "false", &[], 5, None, &BTreeMap::new()).await;
         match outcome {
             SubprocessOutcome::NonZeroExit { code, .. } => {
                 // POSIX `false` exits 1; on macOS/Linux this is stable.

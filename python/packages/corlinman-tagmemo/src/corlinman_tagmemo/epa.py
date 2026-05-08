@@ -46,7 +46,7 @@ def _stable_softmax(scores: np.ndarray) -> np.ndarray:
     if denom <= 0.0 or not np.isfinite(denom):
         # Degenerate fallback: uniform distribution.
         return np.full_like(scores, 1.0 / scores.size)
-    return exp / denom
+    return np.asarray(exp / denom, dtype=np.float64)
 
 
 def fit_basis(

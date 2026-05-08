@@ -241,8 +241,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
         engine = EvolutionEngine(_config_from_args(args))
-        summary = asyncio.run(engine.run_once())
-        _print_summary(summary, as_json=args.json)
+        run_summary = asyncio.run(engine.run_once())
+        _print_summary(run_summary, as_json=args.json)
         return 0
 
     if args.command == "consolidate-once":
@@ -251,14 +251,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
         cfg = _load_consolidation_config(args.config)
-        summary = asyncio.run(
+        consolidation_summary = asyncio.run(
             consolidation_run_once(
                 config=cfg,
                 kb_db_path=args.kb_db,
                 evolution_db_path=args.evolution_db,
             )
         )
-        _print_consolidation_summary(summary, as_json=args.json)
+        _print_consolidation_summary(consolidation_summary, as_json=args.json)
         return 0
 
     parser.error(f"unknown command: {args.command}")

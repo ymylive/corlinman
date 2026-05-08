@@ -105,7 +105,10 @@ async fn run_create(args: CreateArgs) -> Result<()> {
     match db.create_tenant(&tenant_id, &display_name, now_ms).await {
         Ok(()) => {}
         Err(AdminDbError::TenantExists(slug)) => {
-            bail!("tenant '{slug}' already exists in {}", admin_db_path.display());
+            bail!(
+                "tenant '{slug}' already exists in {}",
+                admin_db_path.display()
+            );
         }
         Err(e) => return Err(anyhow!(e).context("create tenant row")),
     }
@@ -295,7 +298,9 @@ mod tests {
         assert!(data_dir.join("tenants").join("acme").is_dir());
 
         // The admin DB has the tenant + the admin row.
-        let db = AdminDb::open(&data_dir.join("tenants.sqlite")).await.unwrap();
+        let db = AdminDb::open(&data_dir.join("tenants.sqlite"))
+            .await
+            .unwrap();
         let listed = db.list_active().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].tenant_id.as_str(), "acme");
@@ -339,7 +344,10 @@ mod tests {
             admin_password: Some("y".into()),
         };
         let err = run_create(args).await.expect_err("bad slug must fail");
-        assert!(err.to_string().contains("invalid tenant slug"), "got: {err}");
+        assert!(
+            err.to_string().contains("invalid tenant slug"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

@@ -57,10 +57,7 @@ impl EvolutionStore {
     /// between the write and the read (operator decision latency,
     /// network RTTs); the symptom is unique to back-to-back
     /// fetch_one + fetch_optional on the same pool.
-    pub async fn open_with_pool_size(
-        path: &Path,
-        pool_size: u32,
-    ) -> Result<Self, OpenError> {
+    pub async fn open_with_pool_size(path: &Path, pool_size: u32) -> Result<Self, OpenError> {
         let url = format!("sqlite://{}", path.display());
 
         let options = SqliteConnectOptions::from_str(&url)

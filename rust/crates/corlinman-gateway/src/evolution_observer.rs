@@ -367,7 +367,7 @@ mod tests {
             ok: false,
             error_code: code.map(str::to_string),
             tenant_id: None,
-        user_id: None,
+            user_id: None,
         }
     }
 
@@ -486,7 +486,7 @@ mod tests {
                 session_key: "s".into(),
                 content: "hi".into(),
                 metadata: serde_json::Value::Null,
-            user_id: None,
+                user_id: None,
             },
             HookEvent::Telemetry {
                 node_id: "n".into(),

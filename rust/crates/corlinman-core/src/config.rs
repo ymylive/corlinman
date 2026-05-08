@@ -2088,12 +2088,11 @@ slot. Set `kind = \"...\"` explicitly. Valid kinds: {}",
                 issues.push(ValidationIssue {
                     path: "channels.qq.self_ids".into(),
                     code: "empty_self_ids".into(),
-                    message:
-                        "channels.qq.enabled = true but self_ids is empty — \
+                    message: "channels.qq.enabled = true but self_ids is empty — \
                          @mention detection disabled until populated. Run \
                          `corlinman config set channels.qq.self_ids` or \
                          complete the napcat scan-login flow."
-                            .into(),
+                        .into(),
                     level: IssueLevel::Warn,
                 });
             }

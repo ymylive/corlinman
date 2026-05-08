@@ -32,7 +32,10 @@ mod tests {
     fn parses_seven_field_cron() {
         let s = parse("0 0 3 * * * *").expect("daily 3am parses");
         let now = Utc::now();
-        assert!(next_after(&s, now).is_some(), "daily cron should have a next");
+        assert!(
+            next_after(&s, now).is_some(),
+            "daily cron should have a next"
+        );
     }
 
     #[test]

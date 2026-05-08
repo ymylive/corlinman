@@ -307,7 +307,11 @@ mod tests {
         (tmp, store, proposals, history)
     }
 
-    fn sample_config(grace_hours: u32, min_baseline: u32, err_pct: f64) -> EvolutionAutoRollbackConfig {
+    fn sample_config(
+        grace_hours: u32,
+        min_baseline: u32,
+        err_pct: f64,
+    ) -> EvolutionAutoRollbackConfig {
         EvolutionAutoRollbackConfig {
             enabled: true,
             grace_window_hours: grace_hours,
@@ -474,7 +478,10 @@ mod tests {
             sample_config(72, 5, 50.0),
         );
         let summary = monitor.run_once().await;
-        assert_eq!(summary.proposals_inspected, 0, "kind without whitelist must skip");
+        assert_eq!(
+            summary.proposals_inspected, 0,
+            "kind without whitelist must skip"
+        );
         assert_eq!(summary.errors, 0);
         assert!(mock.calls().is_empty());
     }

@@ -106,7 +106,6 @@ async fn seed_approved(
         auto_rollback_at: None,
         auto_rollback_reason: None,
         metadata: None,
-        
     })
     .await
     .unwrap();
@@ -613,7 +612,6 @@ async fn rollback_route_rejects_pending_proposal() {
         auto_rollback_at: None,
         auto_rollback_reason: None,
         metadata: None,
-        
     })
     .await
     .unwrap();

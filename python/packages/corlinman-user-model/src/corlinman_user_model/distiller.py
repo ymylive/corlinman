@@ -125,7 +125,7 @@ def _luhn_ok(number: str) -> bool:
 #    dotted decimal. Running v6 first prevents partial IPv4-in-v6-tail.
 # 8. QQ last — narrow keyword anchor.
 _REDACTION_PATTERNS: tuple[
-    tuple[re.Pattern[str], "Callable[[str], bool] | None", str], ...
+    tuple[re.Pattern[str], Callable[[str], bool] | None, str], ...
 ] = (
     (re.compile(r"https?://\S+"), None, _REDACTION_TOKEN),
     (re.compile(r"\S+@\S+"), None, _REDACTION_TOKEN),
@@ -187,6 +187,16 @@ _REDACTION_PATTERNS: tuple[
 )
 
 
+def _validated_replacement(
+    validator: Callable[[str], bool], replacement: str
+) -> Callable[[re.Match[str]], str]:
+    def replace_if_valid(match: re.Match[str]) -> str:
+        value = match.group(0)
+        return replacement if validator(value) else value
+
+    return replace_if_valid
+
+
 def redact_text(content: str) -> str:
     """Strip the obvious PII shapes before anything leaves the box.
 
@@ -200,10 +210,7 @@ def redact_text(content: str) -> str:
         if validator is None:
             redacted = pattern.sub(replacement, redacted)
         else:
-            redacted = pattern.sub(
-                lambda m: replacement if validator(m.group(0)) else m.group(0),
-                redacted,
-            )
+            redacted = pattern.sub(_validated_replacement(validator, replacement), redacted)
     return redacted
 
 

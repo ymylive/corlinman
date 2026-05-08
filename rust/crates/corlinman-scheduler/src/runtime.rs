@@ -44,7 +44,11 @@ impl SchedulerHandle {
 /// Jobs whose cron expression fails to parse are dropped with a warning;
 /// the rest of the scheduler continues. A config with zero parseable jobs
 /// returns a handle with an empty `handles` vec (no-op scheduler).
-pub fn spawn(cfg: &SchedulerConfig, bus: Arc<HookBus>, cancel: CancellationToken) -> SchedulerHandle {
+pub fn spawn(
+    cfg: &SchedulerConfig,
+    bus: Arc<HookBus>,
+    cancel: CancellationToken,
+) -> SchedulerHandle {
     let mut handles = Vec::new();
     for job in &cfg.jobs {
         let Some(spec) = JobSpec::from_config(job) else {
@@ -250,9 +254,7 @@ mod tests {
 
     /// Receive the next event off a `HookSubscription`, with a small
     /// timeout so a hung dispatch doesn't deadlock the test binary.
-    async fn next_event(
-        sub: &mut corlinman_hooks::HookSubscription,
-    ) -> HookEvent {
+    async fn next_event(sub: &mut corlinman_hooks::HookSubscription) -> HookEvent {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match sub.recv().await {
@@ -357,9 +359,7 @@ mod tests {
     async fn unsupported_action_emits_failed() {
         let bus = Arc::new(HookBus::new(16));
         let mut sub = bus.subscribe(HookPriority::Normal);
-        let spec = spec_for(JobAction::RunAgent {
-            prompt: "x".into(),
-        });
+        let spec = spec_for(JobAction::RunAgent { prompt: "x".into() });
         dispatch(&spec, bus.as_ref()).await;
         let evt = next_event(&mut sub).await;
         match evt {

@@ -264,10 +264,31 @@ mod tests {
         let (_tmp, pool) = fresh_pool().await;
         let now = 10_000_000_i64;
         // In-window, matching target — should count.
-        seed_signal(&pool, "tool.call.failed", "delete_chunk:1", "error", now - 60_000).await;
-        seed_signal(&pool, "tool.call.failed", "delete_chunk:1", "warn", now - 1_000).await;
+        seed_signal(
+            &pool,
+            "tool.call.failed",
+            "delete_chunk:1",
+            "error",
+            now - 60_000,
+        )
+        .await;
+        seed_signal(
+            &pool,
+            "tool.call.failed",
+            "delete_chunk:1",
+            "warn",
+            now - 1_000,
+        )
+        .await;
         // In-window, *different* target — must be excluded.
-        seed_signal(&pool, "tool.call.failed", "delete_chunk:99", "error", now - 1_000).await;
+        seed_signal(
+            &pool,
+            "tool.call.failed",
+            "delete_chunk:99",
+            "error",
+            now - 1_000,
+        )
+        .await;
         // Matching target, but observed_at older than the window.
         seed_signal(
             &pool,
@@ -278,15 +299,9 @@ mod tests {
         )
         .await;
 
-        let snap = capture_snapshot(
-            &pool,
-            "delete_chunk:1",
-            &["tool.call.failed"],
-            1_800,
-            now,
-        )
-        .await
-        .unwrap();
+        let snap = capture_snapshot(&pool, "delete_chunk:1", &["tool.call.failed"], 1_800, now)
+            .await
+            .unwrap();
         assert_eq!(snap.counts.get("tool.call.failed"), Some(&2));
     }
 
@@ -326,10 +341,7 @@ mod tests {
             target: target.into(),
             captured_at_ms: 0,
             window_secs: 1_800,
-            counts: counts
-                .iter()
-                .map(|(k, v)| (k.to_string(), *v))
-                .collect(),
+            counts: counts.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
         }
     }
 

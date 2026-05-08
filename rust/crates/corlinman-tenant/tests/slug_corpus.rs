@@ -28,17 +28,17 @@ const ACCEPT: &[&str] = &[
 
 /// Slugs that MUST be rejected. Mirrors the "Reject" list.
 const REJECT: &[&str] = &[
-    "",                       // empty
-    "ACME",                   // uppercase
-    "Acme",                   // mixed case
-    "0acme",                  // leading digit
-    "-acme",                  // leading hyphen
-    "acme_corp",              // underscore
-    "acme.corp",              // dot
-    "acme/corp",              // slash
-    "acme corp",              // internal space
-    " acme",                  // leading whitespace
-    "acme!",                  // punctuation
+    "",          // empty
+    "ACME",      // uppercase
+    "Acme",      // mixed case
+    "0acme",     // leading digit
+    "-acme",     // leading hyphen
+    "acme_corp", // underscore
+    "acme.corp", // dot
+    "acme/corp", // slash
+    "acme corp", // internal space
+    " acme",     // leading whitespace
+    "acme!",     // punctuation
     // 64 characters — over the bound by one.
     "abcdefghijklmnopqrstuvwxyz0123456789-abcdefghijklmnopqrstuvwxyzz",
 ];

@@ -18,9 +18,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use corlinman_auto_rollback::{Applier, AutoRollbackMonitor};
-use corlinman_core::config::{
-    AutoRollbackThresholds, EvolutionAutoRollbackConfig,
-};
+use corlinman_core::config::{AutoRollbackThresholds, EvolutionAutoRollbackConfig};
 use corlinman_evolution::{
     EvolutionKind, EvolutionProposal, EvolutionRisk, EvolutionStatus, EvolutionStore, HistoryRepo,
     ProposalId, ProposalsRepo,
@@ -172,9 +170,14 @@ async fn auto_rollback_breach_triggers_revert() {
     let thresholds = AutoRollbackThresholds::default();
     let proposals = ProposalsRepo::new(evol.pool().clone());
     let history = HistoryRepo::new(evol.pool().clone());
-    let id =
-        approved_then_applied(evol.clone(), kb.clone(), &proposals, (id_a, id_b), thresholds.clone())
-            .await;
+    let id = approved_then_applied(
+        evol.clone(),
+        kb.clone(),
+        &proposals,
+        (id_a, id_b),
+        thresholds.clone(),
+    )
+    .await;
 
     // Spike signals AFTER apply — these only show up in the monitor's
     // current snapshot, not in the apply-time baseline. 50 over a
@@ -251,9 +254,14 @@ async fn auto_rollback_no_breach_keeps_state() {
     let thresholds = AutoRollbackThresholds::default();
     let proposals = ProposalsRepo::new(evol.pool().clone());
     let history = HistoryRepo::new(evol.pool().clone());
-    let id =
-        approved_then_applied(evol.clone(), kb.clone(), &proposals, (id_a, id_b), thresholds.clone())
-            .await;
+    let id = approved_then_applied(
+        evol.clone(),
+        kb.clone(),
+        &proposals,
+        (id_a, id_b),
+        thresholds.clone(),
+    )
+    .await;
 
     // Tiny spike — 2 over a baseline of 10 = +20%, below the default
     // 50% threshold. Quiet-target guard already satisfied (baseline
@@ -283,7 +291,10 @@ async fn auto_rollback_no_breach_keeps_state() {
     let summary = monitor.run_once().await;
 
     assert_eq!(summary.proposals_inspected, 1);
-    assert_eq!(summary.thresholds_breached, 0, "20% delta must not breach 50% threshold");
+    assert_eq!(
+        summary.thresholds_breached, 0,
+        "20% delta must not breach 50% threshold"
+    );
     assert_eq!(summary.rollbacks_triggered, 0);
     assert_eq!(summary.rollbacks_succeeded, 0);
     assert_eq!(summary.errors, 0);

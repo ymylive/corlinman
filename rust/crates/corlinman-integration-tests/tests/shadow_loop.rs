@@ -191,15 +191,18 @@ async fn shadow_loop_high_risk_memory_op_passes_to_shadow_done() {
     let baseline: Value =
         serde_json::from_str(&row.1.expect("baseline_metrics_json populated")).unwrap();
     let shadow: Value = serde_json::from_str(&row.2.expect("shadow_metrics populated")).unwrap();
-    for key in ["eval_run_id", "kind", "total_cases", "pass_rate", "p95_latency_ms"] {
+    for key in [
+        "eval_run_id",
+        "kind",
+        "total_cases",
+        "pass_rate",
+        "p95_latency_ms",
+    ] {
         assert!(
             baseline.get(key).is_some(),
             "baseline missing {key}: {baseline}"
         );
-        assert!(
-            shadow.get(key).is_some(),
-            "shadow missing {key}: {shadow}"
-        );
+        assert!(shadow.get(key).is_some(), "shadow missing {key}: {shadow}");
     }
     assert_eq!(shadow["kind"].as_str().unwrap(), "memory_op");
     // Don't pin to total_cases == 1 hard — the rationale per spec is to
@@ -340,13 +343,12 @@ async fn shadow_loop_handles_no_eval_set_dir() {
         "missing eval set must terminate the proposal, not leave it in ShadowRunning",
     );
 
-    let row: (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT eval_run_id, shadow_metrics FROM evolution_proposals WHERE id = ?",
-    )
-    .bind(target_id.as_str())
-    .fetch_one(store.pool())
-    .await
-    .unwrap();
+    let row: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT eval_run_id, shadow_metrics FROM evolution_proposals WHERE id = ?")
+            .bind(target_id.as_str())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     assert_eq!(
         row.0.as_deref(),
         Some("no-eval-set"),

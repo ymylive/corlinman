@@ -28,9 +28,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sqlx::sqlite::{
-    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
-};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 
 use crate::TenantId;
@@ -202,7 +200,9 @@ impl AdminDb {
 
         match res {
             Ok(_) => Ok(()),
-            Err(sqlx::Error::Database(e)) if e.kind() == sqlx::error::ErrorKind::UniqueViolation => {
+            Err(sqlx::Error::Database(e))
+                if e.kind() == sqlx::error::ErrorKind::UniqueViolation =>
+            {
                 Err(AdminDbError::TenantExists(tenant_id.as_str().to_string()))
             }
             Err(e) => Err(AdminDbError::Sqlx(e)),
@@ -230,7 +230,9 @@ impl AdminDb {
 
         match res {
             Ok(_) => Ok(()),
-            Err(sqlx::Error::Database(e)) if e.kind() == sqlx::error::ErrorKind::UniqueViolation => {
+            Err(sqlx::Error::Database(e))
+                if e.kind() == sqlx::error::ErrorKind::UniqueViolation =>
+            {
                 Err(AdminDbError::AdminExists {
                     tenant: tenant_id.as_str().to_string(),
                     username: username.to_string(),
@@ -254,7 +256,9 @@ impl AdminDb {
         for r in rows {
             let slug: String = r.get("tenant_id");
             let tenant_id = TenantId::new(slug.clone()).map_err(|e| {
-                AdminDbError::Sqlx(sqlx::Error::Decode(format!("invalid tenant_id '{slug}': {e}").into()))
+                AdminDbError::Sqlx(sqlx::Error::Decode(
+                    format!("invalid tenant_id '{slug}': {e}").into(),
+                ))
             })?;
             out.push(TenantRow {
                 tenant_id,
@@ -453,7 +457,9 @@ mod tests {
     async fn create_tenant_round_trips() {
         let (db, _tmp) = fresh().await;
         let acme = TenantId::new("acme").unwrap();
-        db.create_tenant(&acme, "Acme Corp", 1_700_000_000).await.unwrap();
+        db.create_tenant(&acme, "Acme Corp", 1_700_000_000)
+            .await
+            .unwrap();
 
         let row = db.get(&acme).await.unwrap().expect("just created");
         assert_eq!(row.tenant_id, acme);
@@ -502,7 +508,9 @@ mod tests {
         let (db, _tmp) = fresh().await;
         let acme = TenantId::new("acme").unwrap();
         db.create_tenant(&acme, "Acme Corp", 1).await.unwrap();
-        db.add_admin(&acme, "alice", "$argon2id$h1", 1).await.unwrap();
+        db.add_admin(&acme, "alice", "$argon2id$h1", 1)
+            .await
+            .unwrap();
         let err = db
             .add_admin(&acme, "alice", "$argon2id$h2", 2)
             .await
@@ -537,7 +545,9 @@ mod tests {
         let acme = TenantId::new("acme").unwrap();
         let bravo = TenantId::new("bravo").unwrap();
 
-        db.add_federation_peer(&acme, &bravo, "alice").await.unwrap();
+        db.add_federation_peer(&acme, &bravo, "alice")
+            .await
+            .unwrap();
 
         let sources = db.list_federation_sources_for(&acme).await.unwrap();
         assert_eq!(sources.len(), 1);
@@ -560,7 +570,9 @@ mod tests {
         let acme = TenantId::new("acme").unwrap();
         let bravo = TenantId::new("bravo").unwrap();
 
-        db.add_federation_peer(&acme, &bravo, "alice").await.unwrap();
+        db.add_federation_peer(&acme, &bravo, "alice")
+            .await
+            .unwrap();
         // Second add must not error and must not duplicate the row.
         db.add_federation_peer(&acme, &bravo, "bob").await.unwrap();
 
@@ -579,7 +591,9 @@ mod tests {
         let bravo = TenantId::new("bravo").unwrap();
         let charlie = TenantId::new("charlie").unwrap();
 
-        db.add_federation_peer(&acme, &bravo, "alice").await.unwrap();
+        db.add_federation_peer(&acme, &bravo, "alice")
+            .await
+            .unwrap();
 
         // Hit: row exists, gets deleted.
         let hit = db.remove_federation_peer(&acme, &bravo).await.unwrap();
@@ -594,7 +608,11 @@ mod tests {
         assert!(!miss_unknown, "remove on never-added pair must be false");
 
         // Post-condition: no rows remain.
-        assert!(db.list_federation_sources_for(&acme).await.unwrap().is_empty());
+        assert!(db
+            .list_federation_sources_for(&acme)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -634,14 +652,21 @@ mod tests {
         let bravo = TenantId::new("bravo").unwrap();
         let charlie = TenantId::new("charlie").unwrap();
 
-        db.add_federation_peer(&acme, &bravo, "alice-the-operator").await.unwrap();
-        db.add_federation_peer(&acme, &charlie, "bob-the-operator").await.unwrap();
+        db.add_federation_peer(&acme, &bravo, "alice-the-operator")
+            .await
+            .unwrap();
+        db.add_federation_peer(&acme, &charlie, "bob-the-operator")
+            .await
+            .unwrap();
 
         let sources = db.list_federation_sources_for(&acme).await.unwrap();
         // Ordered by source_tenant_id ASC: bravo before charlie.
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0].source_tenant_id, bravo);
-        assert_eq!(sources[0].accepted_by.as_deref(), Some("alice-the-operator"));
+        assert_eq!(
+            sources[0].accepted_by.as_deref(),
+            Some("alice-the-operator")
+        );
         assert_eq!(sources[1].source_tenant_id, charlie);
         assert_eq!(sources[1].accepted_by.as_deref(), Some("bob-the-operator"));
     }
