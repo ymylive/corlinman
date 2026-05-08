@@ -108,7 +108,8 @@ impl SqliteSessionStore {
             .map_err(|e| storage("parse_url", e))?
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
-            .synchronous(SqliteSynchronous::Normal);
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(std::time::Duration::from_secs(5));
 
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
@@ -235,50 +236,72 @@ impl SessionStore for SqliteSessionStore {
         session_key: &str,
         message: SessionMessage,
     ) -> Result<(), CorlinmanError> {
-        // Compute next seq under a transaction so two concurrent appends to the
-        // same key can't both observe the same `MAX(seq)`.
-        let mut tx = self
+        // Compute next seq under an immediate write transaction so two
+        // concurrent appends to the same key can't both observe the same
+        // `MAX(seq)`, and so we wait for background trim writers instead of
+        // failing on SQLite's read-transaction write upgrade path.
+        let mut conn = self
             .pool
-            .begin()
+            .acquire()
             .await
-            .map_err(|e| storage("begin_tx", e))?;
+            .map_err(|e| storage("acquire_conn", e))?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| storage("begin_immediate", e))?;
 
-        let next_seq: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(seq), -1) + 1 FROM sessions WHERE session_key = ?1",
-        )
-        .bind(session_key)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| storage("next_seq", e))?;
+        let result: Result<(), CorlinmanError> = async {
+            let next_seq: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(seq), -1) + 1 FROM sessions WHERE session_key = ?1",
+            )
+            .bind(session_key)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(|e| storage("next_seq", e))?;
 
-        let ts_str = message
-            .ts
-            .format(&Rfc3339)
-            .map_err(|e| storage("format_ts", e))?;
-        let tool_calls_text = message
-            .tool_calls
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| storage("serialize_tool_calls", e))?;
+            let ts_str = message
+                .ts
+                .format(&Rfc3339)
+                .map_err(|e| storage("format_ts", e))?;
+            let tool_calls_text = message
+                .tool_calls
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| storage("serialize_tool_calls", e))?;
 
-        sqlx::query(
-            "INSERT INTO sessions(session_key, seq, role, content, tool_call_id, tool_calls_json, ts) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )
-        .bind(session_key)
-        .bind(next_seq)
-        .bind(message.role.as_str())
-        .bind(&message.content)
-        .bind(&message.tool_call_id)
-        .bind(&tool_calls_text)
-        .bind(&ts_str)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| storage("insert", e))?;
+            sqlx::query(
+                "INSERT INTO sessions(session_key, seq, role, content, tool_call_id, tool_calls_json, ts) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .bind(session_key)
+            .bind(next_seq)
+            .bind(message.role.as_str())
+            .bind(&message.content)
+            .bind(&message.tool_call_id)
+            .bind(&tool_calls_text)
+            .bind(&ts_str)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| storage("insert", e))?;
 
-        tx.commit().await.map_err(|e| storage("commit", e))?;
-        Ok(())
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                sqlx::query("COMMIT")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| storage("commit", e))?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(err)
+            }
+        }
     }
 
     async fn delete(&self, session_key: &str) -> Result<(), CorlinmanError> {
@@ -471,6 +494,34 @@ mod tests {
         assert_eq!(msgs[1].content, "hi there");
         assert_eq!(msgs[2].role, SessionRole::User);
         assert_eq!(msgs[2].content, "how are you");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn append_waits_for_existing_write_lock() {
+        let (store, _tmp) = fresh_store().await;
+        let mut locked_conn = store.pool().acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *locked_conn)
+            .await
+            .unwrap();
+
+        let writer = store.clone();
+        let append = tokio::spawn(async move {
+            writer
+                .append("s1", SessionMessage::user("waited for lock"))
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        sqlx::query("COMMIT")
+            .execute(&mut *locked_conn)
+            .await
+            .unwrap();
+
+        append.await.unwrap().unwrap();
+        let msgs = store.load("s1").await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "waited for lock");
     }
 
     #[tokio::test]
