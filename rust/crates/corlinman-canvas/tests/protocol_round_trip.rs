@@ -116,25 +116,57 @@ fn unknown_kind_round_trips_as_error() {
     );
 }
 
-/// Renderer stub returns `Unimplemented` for every kind in iter 1.
+/// Renderer returns `Unimplemented` for kinds whose adapters
+/// haven't shipped yet. Iter 2 wired `Code`; the remaining four
+/// kinds remain stubbed until iter 3-6.
 #[test]
-fn renderer_stub_returns_unimplemented() {
+fn renderer_stub_returns_unimplemented_for_unwired_kinds() {
     let renderer = Renderer::new();
-    let payload = CanvasPresentPayload {
-        artifact_kind: ArtifactKind::Code,
-        body: ArtifactBody::Code {
-            language: "rust".into(),
-            source: "fn main(){}".into(),
-        },
-        idempotency_key: "art_stub_1".into(),
-        theme_hint: None,
-    };
-    let err = renderer.render(&payload).expect_err("stub must error");
-    match err {
-        CanvasError::Unimplemented { kind } => {
-            assert_eq!(kind, ArtifactKind::Code);
+
+    let unwired: Vec<(ArtifactKind, ArtifactBody)> = vec![
+        (
+            ArtifactKind::Mermaid,
+            ArtifactBody::Mermaid {
+                diagram: "graph LR; A-->B".into(),
+            },
+        ),
+        (
+            ArtifactKind::Table,
+            ArtifactBody::Table {
+                markdown: Some("| a |\n|---|\n| 1 |".into()),
+                csv: None,
+            },
+        ),
+        (
+            ArtifactKind::Latex,
+            ArtifactBody::Latex {
+                tex: "x".into(),
+                display: false,
+            },
+        ),
+        (
+            ArtifactKind::Sparkline,
+            ArtifactBody::Sparkline {
+                values: vec![1.0, 2.0],
+                unit: None,
+            },
+        ),
+    ];
+
+    for (kind, body) in unwired {
+        let payload = CanvasPresentPayload {
+            artifact_kind: kind,
+            body,
+            idempotency_key: format!("art_stub_{}", kind.as_str()),
+            theme_hint: None,
+        };
+        let err = renderer
+            .render(&payload)
+            .expect_err("stub must error for unwired kind");
+        match err {
+            CanvasError::Unimplemented { kind: got } => assert_eq!(got, kind),
+            other => panic!("expected Unimplemented for {kind:?}, got {other:?}"),
         }
-        other => panic!("expected Unimplemented, got {other:?}"),
     }
 }
 

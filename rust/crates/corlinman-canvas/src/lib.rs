@@ -9,16 +9,17 @@
 //!
 //! Five artifact kinds are pinned for C3:
 //!
-//! - `code`      → syntect-highlighted HTML (iter 2)
-//! - `table`     → markdown / CSV → `<table>` (iter 3)
-//! - `latex`     → katex-rs → MathML (iter 4)
-//! - `sparkline` → hand-rolled SVG (iter 5)
-//! - `mermaid`   → deno_core sandbox → SVG (iter 6)
+//! - `code`      → syntect-highlighted HTML — **iter 2 (live)**
+//! - `table`     → markdown / CSV → `<table>` — iter 3
+//! - `latex`     → katex-rs → MathML — iter 4
+//! - `sparkline` → hand-rolled SVG — iter 5
+//! - `mermaid`   → deno_core sandbox → SVG — iter 6
 //!
-//! Iter 1 (this commit) lands only the protocol surface and a stub
-//! [`Renderer`] that returns [`CanvasError::Unimplemented`]. No
-//! adapters, no caching, no config plumbing. Callers can already
-//! depend on the wire types — the gateway wires this crate in iter 8.
+//! Iter 1 landed only the protocol surface and a stub
+//! [`Renderer`] that returned [`CanvasError::Unimplemented`]. Iter 2
+//! wires the `code` adapter (syntect, class-based emission). Iter 3
+//! wires `table`. Other kinds remain `Unimplemented` until their
+//! respective iters.
 //!
 //! Tidepool aesthetic enforcement: every rendered artifact carries a
 //! `theme_class` (one of `"tp-light"` / `"tp-dark"`) plus class-only
@@ -27,6 +28,7 @@
 
 #![deny(missing_docs)]
 
+pub mod adapters;
 pub mod protocol;
 
 pub use protocol::{
@@ -34,39 +36,54 @@ pub use protocol::{
     RenderedArtifact, ThemeClass,
 };
 
-/// Renderer entry point. Iter 1 is a stub: every kind returns
-/// [`CanvasError::Unimplemented`]. Subsequent iterations attach real
-/// adapters (syntect, pulldown-cmark, katex, deno_core, sparkline).
+/// Renderer entry point. Dispatches on
+/// [`CanvasPresentPayload::artifact_kind`] to the matching
+/// [`adapters`] function. Adapters that aren't wired yet return
+/// [`CanvasError::Unimplemented`].
 ///
-/// `Renderer::new()` is intentionally cheap in this iteration — it
-/// holds no state. Iter 2 introduces a syntect `SyntaxSet`/`ThemeSet`
-/// loaded once at construction; iter 6 lazy-inits the deno_core
-/// engine.
+/// `Renderer::new()` is intentionally cheap — heavy state lives
+/// behind `OnceLock`s in the adapters (e.g. the syntect
+/// `SyntaxSet`). Cloning the `Renderer` is free.
 #[derive(Debug, Default, Clone)]
 pub struct Renderer {
     _private: (),
 }
 
 impl Renderer {
-    /// Construct a fresh renderer. Cheap in iter 1; later iterations
-    /// build syntect / katex / deno_core state here.
+    /// Construct a fresh renderer. Cheap in iter 1-2; iter 6 will
+    /// lazy-init the deno_core engine on first mermaid render.
     pub fn new() -> Self {
         Self { _private: () }
     }
 
     /// Render a `present`-frame payload to a single
-    /// [`RenderedArtifact`]. Pure: same input, same output (modulo
-    /// the deno_core path in iter 6 which adds non-determinism only
-    /// for animation; mermaid output is otherwise stable).
-    ///
-    /// Iter 1 always returns [`CanvasError::Unimplemented`]. The
-    /// signature is the contract callers (gateway, CLI, tests) bind
-    /// to from now on.
+    /// [`RenderedArtifact`]. Pure for code/table/latex/sparkline;
+    /// mermaid (iter 6) introduces non-determinism for animation
+    /// IDs only, output is otherwise stable.
     pub fn render(
         &self,
         payload: &CanvasPresentPayload,
     ) -> Result<RenderedArtifact, CanvasError> {
-        let kind = payload.artifact_kind();
-        Err(CanvasError::Unimplemented { kind })
+        let theme = payload.theme_hint.unwrap_or_default();
+        match &payload.body {
+            ArtifactBody::Code { language, source } => {
+                adapters::code::render(language, source, theme)
+            }
+            other_kind => Err(CanvasError::Unimplemented {
+                kind: artifact_body_kind(other_kind),
+            }),
+        }
+    }
+}
+
+/// Maps an [`ArtifactBody`] back to its [`ArtifactKind`] discriminator.
+/// Cheap, branch-free in optimised builds.
+fn artifact_body_kind(body: &ArtifactBody) -> ArtifactKind {
+    match body {
+        ArtifactBody::Code { .. } => ArtifactKind::Code,
+        ArtifactBody::Mermaid { .. } => ArtifactKind::Mermaid,
+        ArtifactBody::Table { .. } => ArtifactKind::Table,
+        ArtifactBody::Latex { .. } => ArtifactKind::Latex,
+        ArtifactBody::Sparkline { .. } => ArtifactKind::Sparkline,
     }
 }
