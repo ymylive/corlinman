@@ -13,6 +13,7 @@ pub mod health;
 pub mod metrics;
 pub mod models;
 pub mod plugin_callback;
+pub mod voice;
 
 use std::sync::Arc;
 
@@ -38,6 +39,7 @@ pub fn router() -> Router {
         .merge(admin::router())
         .merge(plugin_callback::router())
         .merge(metrics::router())
+        .merge(voice::router())
 }
 
 /// Same as [`router`] but the chat route is backed by the supplied
@@ -52,6 +54,7 @@ pub fn router_with_chat_state(state: chat::ChatState) -> Router {
         .merge(admin::router())
         .merge(plugin_callback::router())
         .merge(metrics::router())
+        .merge(voice::router())
 }
 
 /// Same as [`router_with_chat_state`] but also wires `/plugin-callback/
@@ -69,6 +72,7 @@ pub fn router_with_full_state(
         .merge(admin::router())
         .merge(plugin_callback::router_with_state(async_tasks))
         .merge(metrics::router())
+        .merge(voice::router())
 }
 
 /// Same as [`router_with_full_state`] but `/health` is backed by a real
@@ -86,6 +90,28 @@ pub fn router_with_full_state_and_health(
         .merge(admin::router())
         .merge(plugin_callback::router_with_state(async_tasks))
         .merge(metrics::router())
+        .merge(voice::router())
+}
+
+/// Variant of [`router_with_full_state_and_health`] that also wires the
+/// live `/voice` route off the shared config snapshot. Production boot
+/// uses this when `[voice]` could be hot-flipped on; tests that don't
+/// need the route can keep using the plain variant.
+pub fn router_with_full_state_and_voice(
+    chat_state: chat::ChatState,
+    async_tasks: Arc<AsyncTaskRegistry>,
+    health_state: HealthState,
+    voice_state: voice::VoiceState,
+) -> Router {
+    Router::new()
+        .merge(health::router_with_state(health_state))
+        .merge(chat::router_with_state(chat_state))
+        .merge(embeddings::router())
+        .merge(models::router())
+        .merge(admin::router())
+        .merge(plugin_callback::router_with_state(async_tasks))
+        .merge(metrics::router())
+        .merge(voice::router_with_state(voice_state))
 }
 
 /// Placeholder handler for routes whose behaviour lands in a later milestone.
