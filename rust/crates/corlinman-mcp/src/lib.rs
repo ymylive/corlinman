@@ -9,9 +9,11 @@
 
 pub mod error;
 pub mod schema;
+pub mod server;
 
 pub use error::McpError;
 pub use schema::{
     error_codes, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JSONRPC_VERSION,
     MCP_PROTOCOL_VERSION,
 };
+pub use server::{SessionPhase, SessionState};
