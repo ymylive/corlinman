@@ -20,6 +20,7 @@ dependencies = [
     "corlinman-evolution-engine",
     "corlinman-user-model",
     "corlinman-persona",
+    "corlinman-episodes",
     "corlinman-goals",
 ]
 
@@ -33,6 +34,7 @@ corlinman-tagmemo = { workspace = true }
 corlinman-evolution-engine = { workspace = true }
 corlinman-user-model = { workspace = true }
 corlinman-persona = { workspace = true }
+corlinman-episodes = { workspace = true }
 corlinman-goals = { workspace = true }
 
 [tool.uv.workspace]
@@ -102,4 +104,5 @@ markers = [
     "live_llm: tests that hit real LLM APIs (cost money)",
     "live_transport: tests that need real channel endpoints",
     "integration: tests that spin real in-process gRPC servers",
+    "slow: tests that take noticeable wall-clock (e.g. multi-DB E2E)",
 ]
