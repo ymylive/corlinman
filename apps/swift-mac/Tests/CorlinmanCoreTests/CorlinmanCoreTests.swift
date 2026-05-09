@@ -1,22 +1,24 @@
-// Phase 4 W3 C4 iter 1 — smoke tests for the `CorlinmanCore` skeleton.
+// Phase 4 W3 C4 — smoke tests for the `CorlinmanCore` build metadata.
 //
-// Just enough to prove the module imports, the package resolves, and
-// `swift test` has a non-empty target. Iter 2+ adds the meaningful tests
-// listed in `docs/design/phase4-w3-c4-design.md:347-371`.
+// Asserting on the banner string costs nothing and catches the
+// "forgot to bump the version when shipping a new surface" mistake on
+// every CI run. The actual chat / persistence / push tests live in
+// their own files (`ChatStreamTests.swift`, `SessionStoreTests.swift`,
+// `PushReceiverTests.swift` as they land).
 
 import XCTest
 
 @testable import CorlinmanCore
 
 final class CorlinmanCoreTests: XCTestCase {
-    /// Iter 1 contract: the build banner advertises iter 1 and version `0.1.0`.
-    /// Future iterations bump both — a downgrade or stale string fails here
-    /// before it can ship.
-    func test_buildInfo_reportsIter1() {
+    /// Iter 4 contract: banner advertises the chat-stream surface and
+    /// the version is at `0.2.0`. Bumped each time `CorlinmanCore`
+    /// gains a non-additive public surface.
+    func test_buildInfo_reportsCurrentIter() {
         XCTAssertTrue(
-            CorlinmanCoreInfo.banner.contains("iter 1"),
-            "build banner must advertise iter 1; got \(CorlinmanCoreInfo.banner)"
+            CorlinmanCoreInfo.banner.contains("chat-stream"),
+            "build banner must advertise chat-stream; got \(CorlinmanCoreInfo.banner)"
         )
-        XCTAssertEqual(CorlinmanCoreInfo.version, "0.1.0")
+        XCTAssertEqual(CorlinmanCoreInfo.version, "0.2.0")
     }
 }
