@@ -1,18 +1,24 @@
 # Phase 4 — Next Tasks
 
-**Status**: Active · **Owner**: TBD · **Last revised**: 2026-05-08 (Wave 2 closed)
+**Status**: ✅ **Phase 4 fully closed** · **Owner**: TBD · **Last revised**: 2026-05-09 (Wave 3+4 close-out)
 
 > Operational task list following Phase 4 Wave 1's closure
 > (PR [#1](https://github.com/ymylive/corlinman/pull/1), 16 commits).
 > Companion to `phase4-roadmap.md` — the roadmap is the strategic
 > picture, this doc is the tactical pick-up list.
 
-## Progress snapshot (2026-05-08)
+## Progress snapshot (2026-05-09)
 
 **Section A (Wave 1 cleanup)**: ✅ A1-A7 all complete (commits
 `3a2ab56` / `95dafb6` / `2963aa8` / `26a721e`).
 
 **Section B (Wave 2)**: ✅ **fully closed** — backend + UI all shipped.
+
+**Section C (Wave 3)**: ✅ **fully closed** — all 4 streams (C1 MCP server, C2 plugin adapter, C3 Canvas Host, C4 Swift macOS client) shipped iter 1-10 and acceptance-passed. Branches `phase4-w3-{c1,c2,c3,c4}` on origin.
+
+**Section D (Wave 4)**: ✅ **fully closed** — all 4 streams (D1 episodic memory, D2 goal hierarchies, D3 subagent runtime, D4 voice alpha) shipped iter 1-10 and acceptance-passed. Branches `phase4-w4-{d1,d2,d3,d4}` on origin.
+
+**Phase 4 in numbers (Wave 3+4)**: 8 stream branches × 10 iters = **80 iters delivered**, **89 commits** across the implementation phase, **~12000+ LOC** of Rust + Python + Swift + TypeScript, **~1000+ new tests**, **8 design docs** (~3540 LOC). Roadmap §4 acceptance criteria all green: Claude Desktop replay (C1) · Canvas code-block round-trip (C3) · Swift demo contract (C4) · `{{episodes.last_week}}` recalls "operator approved skill_update for web_search that fixed timeout" (D1) · `{{goals.weekly}}` produces 4-item distilled list (D2) · subagent fan-out 0.330× serial vs <0.7 threshold (D3) · voice E2E happy-path with tool approval pause (D4).
 
 | Task | Status | Tests | Commits |
 |---|---|---|---|
@@ -93,37 +99,178 @@ requires B1 to be stable).
 
 ---
 
-## C. Wave 3 (≈ 3-4 weeks, 4 items)
+## C. Wave 3 — ✅ **fully closed** (MCP interop + native surfaces)
 
-MCP interop + native client surfaces. corlinman becomes reachable
-from Claude Desktop and a reference Swift app. Per
-`phase4-roadmap.md` §4 Wave 3.
+corlinman is reachable from Claude Desktop, native Swift macOS, and the
+admin UI's Canvas Host. All 4 streams shipped iter 1-10. Design docs:
+`phase4-w3-{c1,c2,c3,c4}-design.md`. Branches on origin: `phase4-w3-{c1,c2,c3,c4}`.
 
-| # | Task | Estimate |
+| Task | Status | Final HEAD | Branch |
+|---|---|---|---|
+| **C1** 4-3A MCP server | ✅ iter 1-10 | `6bdaa73` | `phase4-w3-c1` |
+| **C2** 4-3B MCP plugin adapter | ✅ iter 1-10 | `89970e1` | `phase4-w3-c2` |
+| **C3** 4-3C Canvas Host renderer | ✅ iter 1-10 | `e0b0118` | `phase4-w3-c3` |
+| **C4** 4-3D Reference Swift macOS client | ✅ iter 1-10 | `6dd23f8` | `phase4-w3-c4` |
+
+### C1 — MCP server (`corlinman-mcp` crate, `/mcp` WebSocket)
+
+| Iter | Title | Commit |
 |---|---|---|
-| **C1** | **4-3A MCP server** — `/mcp` WebSocket; expose tools/skills/memory as MCP capabilities; tested against Claude Desktop's MCP client. | 5-7d |
-| **C2** | **4-3B MCP plugin adapter** — `corlinman-plugins` accepts `kind = "mcp"` plugins (any MCP-stdio server becomes a corlinman tool); registry, sandbox, manifest v3. | 5-7d |
-| **C3** | **4-3C Canvas Host renderer** — Phase 1 stubbed the protocol; this implements the actual code-block / diagram / table renderer service; Tidepool aesthetic. | 5-7d |
-| **C4** | **4-3D Reference Swift macOS client** — minimal SwiftUI app under `apps/swift-mac/`; gRPC bindings to gateway; receives push notifications via APNs (or stubbed local socket for dev); demonstrates the contract for iOS/Android teams. | 7-10d |
+| 1 | crate skeleton + JSON-RPC schema | `2b3e691` |
+| 2 | `McpError` + JSON-RPC error mapping | `cf8fc12` |
+| 3 | `SessionState` handshake state machine | `e556436` |
+| 4 | WS transport + `/mcp` route + stdio client | `7d89510` |
+| 5 | `CapabilityAdapter` trait + tools adapter | `cbf4ee6` |
+| 6 | prompts adapter (wrapping SkillRegistry) | `dad069b` |
+| 7 | `MemoryHost::get` extension + resources adapter | `92142e6` |
+| 8 | auth ACL + tenant scoping | `28403f0` |
+| 9 | gateway integration — `/mcp` mount + `McpConfig` | `f9e81b2` |
+| 10 | Claude Desktop fixture replay + `mcp-cli-smoke` example | `6bdaa73` |
 
-C1+C2 share the MCP layer and benefit from being landed together.
-C3 and C4 are independent of the MCP work.
+### C2 — MCP plugin adapter (`corlinman-plugins` `plugin_type = "mcp"` v3)
+
+| Iter | Title | Commit |
+|---|---|---|
+| 1 | manifest v3 schema + `[mcp]` table | `a5268d5` |
+| 2 | stdio spawn + reap primitive | `64f370f` |
+| 3 | env passthrough + redaction | `5f24b69` |
+| (merge) | merge `phase4-w3-c1` for stdio client | `0a24428` + `abda287` fixup |
+| 4 | MCP adapter handshake | `367c6e6` |
+| 5 | `tools/list` filter + multiplexed `tools/call` | `db982c2` |
+| 6 | crash-restart supervisor | `dbeffd2` |
+| 7 | `PluginRuntime` trait impl | `e76d743` |
+| 8 | admin disable/enable/restart + sentinel | `3a28e59` |
+| 9 | v2→v3 manifest migration polish | `2a3863b` |
+| 10 | E2E vs Python echo MCP server fixture | `89970e1` |
+
+### C3 — Canvas Host renderer (`corlinman-canvas` crate)
+
+| Iter | Title | Commit |
+|---|---|---|
+| 1 | crate skeleton + protocol types | `5011139` |
+| 2 | code adapter (syntect, class-based) | `342638c` |
+| 3 | table adapter (markdown + csv) | `ac85f3a` |
+| 4 | LaTeX adapter (`katex-rs` 0.2.x) | `e20b619` |
+| 5 | sparkline adapter (hand-rolled SVG) | `0459824` |
+| 6 | mermaid scaffold (deno_core, gated) | `5c01dd8` |
+| 7 | blake3 LRU render cache | `592007e` |
+| 8 | `POST /canvas/render` gateway route | `f07a9d7` |
+| 9 | UI artifact rendering components | `f9fc94a` |
+| 10 | E2E acceptance + close iter-9 gaps + `[canvas]` config | `e0b0118` |
+
+### C4 — Reference Swift macOS client (`apps/swift-mac/`)
+
+| Iter | Title | Commit |
+|---|---|---|
+| 1 | SwiftPM skeleton + 3-target split | `58cbe41` |
+| 2 | `POST /admin/api_keys` mint endpoint | `b86cf18` |
+| 3 | `POST /v1/chat/completions/:turn_id/approve` | `a3809a6` |
+| 4 | SSE chat-stream parser | `9fe75fd` |
+| 5 | local `SessionStore` over system SQLite3 | `807493e` |
+| 6 | `ChatViewModel` + `ChatView`/`MessageList`/`Composer` | `110b223` |
+| 7 | AuthStore (Keychain) + onboarding flow | `608f00d` |
+| 8 | push receiver + APNs scaffolding | `2b8032b` |
+| 9 | snapshot tests + macOS CI workflow | `b58c54e` |
+| 10 | E2E acceptance + ApprovalSheet + demo contract docs | `6dd23f8` |
 
 ---
 
-## D. Wave 4 (≈ 3-4 weeks, partially parallel, 4 items)
+## D. Wave 4 — ✅ **fully closed** (long-horizon cognition)
 
-Long-horizon cognition. Per `phase4-roadmap.md` §4 Wave 4.
+Episodic memory, goal hierarchies, subagent delegation, and voice alpha. All
+4 streams shipped iter 1-10 with Wave 4 acceptance criteria green. Design
+docs: `phase4-w4-{d1,d2,d3,d4}-design.md`. Branches on origin: `phase4-w4-{d1,d2,d3,d4}`.
 
-| # | Task | Estimate |
+| Task | Status | Final HEAD | Branch |
+|---|---|---|---|
+| **D1** 4-4A Episodic memory | ✅ iter 1-10 | `7c7a611` | `phase4-w4-d1` |
+| **D2** 4-4B Goal hierarchies | ✅ iter 1-10 | `70a0518` | `phase4-w4-d2` |
+| **D3** 4-4C Subagent delegation runtime | ✅ iter 1-10 | `cabef63` | `phase4-w4-d3` |
+| **D4** 4-4D Voice surface (alpha) | ✅ iter 1-10 | `a95bc33` | `phase4-w4-d4` |
+
+### D1 — Episodic memory (`corlinman-episodes` Python + Rust resolver)
+
+| Iter | Title | Commit |
 |---|---|---|
-| **D1** | **4-4A Episodic memory** — new `episodes` table (event-level summaries, distilled from session ranges); episode = "what happened" not "what was said"; queryable as `{{episodes.last_week}}`. | 6-8d |
-| **D2** | **4-4B Goal hierarchies** — agent has short-term (today), mid-term (this week), long-term (this quarter) goals stored in `agent_goals.sqlite`; reflection job grades self-progress; goals influence prompt construction via `{{goals.*}}` placeholders. | 5-7d |
-| **D3** | **4-4C Subagent delegation runtime** — agent loop gains `spawn_child(agent_card, task) → Future<TaskResult>`; children inherit memory_host federation, fresh persona, time-bounded; results merge back into parent's context. | 7-10d |
-| **D4** | **4-4D Voice surface (alpha)** — gateway `/voice` endpoint accepts realtime audio (whisper-compatible); replies via TTS; one provider (OpenAI realtime / Gemini live) wired; gated under `[voice.enabled]` flag because cost. | 5-7d |
+| 1 | package skeleton + schema | `3d7ba1f` |
+| 2 | distillation primitives | `e1f9d63` |
+| 3 | importance + LLM distill | `3657f29` |
+| 4 | distillation orchestrator/runner | `19e479f` |
+| 5 | second-pass embedding writer | `200046b` |
+| 6 | `distill-once` CLI + provider hooks | `a739635` |
+| 7 | gateway `{{episodes.*}}` resolver | `3ca598b` |
+| 8 | cold archival sweep | `7d3a55e` |
+| 9 | rehydration + CLI | `17476ae` |
+| 10 | Wave 4 acceptance E2E (operator-approved skill_update recall) | `7c7a611` |
 
-D1 unlocks D2 (goals reference episodes). D3 + D4 are independent
-of D1/D2.
+### D2 — Goal hierarchies (`corlinman-goals` Python)
+
+| Iter | Title | Commit |
+|---|---|---|
+| 1 | package skeleton + `agent_goals.sqlite` schema | `da8b7e3` |
+| 2 | tier window math + `update`/`archive` CRUD | `0a5a3a0` |
+| 3 | `GoalsResolver` + four `{{goals.*}}` keys | `9029d8e` |
+| (merge) | merge `phase4-w4-d1` for episode runtime | `8fea342` |
+| 4 | episode evidence module + D1 bridge | `6b932fe` |
+| 5 | reflection job runner with mock LLM | `a5a07a6` |
+| 6 | cascade aggregation evaluator | `3f32c35` |
+| 7 | CLI surface + provider factory hooks | `0950c39` |
+| 8 | `{{goals.weekly}}` cascade aggregation | `300d64d` |
+| 9 | `goal.weekly_failed` evolution signal emission | `d012ad4` |
+| 10 | Wave 4 acceptance E2E (4-item weekly distill) | `70a0518` |
+
+### D3 — Subagent delegation runtime (`corlinman-subagent` Rust + Python via PyO3)
+
+| Iter | Title | Commit |
+|---|---|---|
+| 1 | crate skeleton + types | `1f0af0e` |
+| 2 | `ReadOnlyMemoryHost` adapter | `787dac6` |
+| 3 | `SubagentSupervisor` cap accountant | `d2f95f9` |
+| 4 (partial) | Python `run_child` happy path (code) | `88733e3` |
+| 4 (tests backfill) | 5 design-mandated runner tests | `c3f3be3` |
+| 5 | PyO3 bridge | `5c199ff` |
+| 6 | tokio timeout enforcement | `e449f08` |
+| 7 | tool-allowlist filter + escalation reject | `0ce38df` |
+| 8 | tool-wrapper + parent-loop dispatch | `223aadc` |
+| 9 | hook events + evolution-signal linking | `e2c1f27` |
+| 10 | research-fan-out E2E benchmark (0.330× serial vs <0.7 threshold) | `cabef63` |
+
+### D4 — Voice surface alpha (`corlinman-gateway/routes/voice/`)
+
+| Iter | Title | Commit |
+|---|---|---|
+| 1 | `[voice]` config + 503 stub route | `2d1ea99` |
+| 2 | WS framing primitives + subprotocol negotiation | `d835cd1` |
+| 3 | cost-gating primitives | `81d3789` |
+| 4 | provider trait + `MockEchoProvider` | `d1e6b7c` |
+| 5 | OpenAI Realtime adapter (env-gated) | `2d76a15` |
+| 6 | `voice_sessions` SQLite persistence + transcript sink | `7d87a9e` |
+| 7 | tool-approval pause bridge | `b427afc` |
+| 8 | budget enforcer + 1-Hz checkpoint ticker | `5d7b60e` |
+| 9 | handler hot-path bridge | `169d0e4` |
+| 10 (close iter-9 gaps) | session_key from `start` frame + audio_path retention | `40087778` |
+| 10 (E2E) | E2E happy-path full bridge surface | `a95bc33` |
+
+---
+
+## F. Phase 5 deferrals (carried forward from Phase 4 streams)
+
+Discovered while implementing Wave 3+4. Each stream's iter 10 close-out
+flagged what intentionally got punted. Pick up these in Phase 5 planning.
+
+### From Wave 3
+
+- **C1** — real Claude Desktop session-capture replaces synthesised fixture; real Rust `MemoryHost` wiring at the gateway layer (today gateway hands resources adapter an empty `BTreeMap`); `resources/subscribe`; sampling capability (Wave 4-4C territory)
+- **C2** — extract `corlinman-mcp-schema` leaf crate to break the `corlinman-plugins → corlinman-mcp` cycle that forced schema vendoring; re-export `corlinman_mcp::client` from lib.rs; `POST /admin/plugins` (add manifest at runtime) + `DELETE /admin/plugins/:name`; gateway `AppState.mcp_adapter` wiring + `chat.rs` `PluginType::Mcp` dispatcher branch
+- **C3** — Mermaid feature-build E2E (V8 link cost too high for default CI); `/canvas/render` retirement (waits for Swift consumers); producer auto-detection
+- **C4** — gateway `[channels.dev_push]` writer; `swift-snapshot-testing` committed to `Package.swift`; `POST /v1/devices` token-registration endpoint
+
+### From Wave 4
+
+- **D1** — Rust-side transparent rehydrate of cold episodes (today only Python `rehydrate-all` CLI escape hatch); `{{episodes.about(<tag>)}}` cosine rerank
+- **D2** — real `corlinman-providers`-backed `Grader` factory wired at gateway boot; admin UI for goal-setting; auto-goal-setting from external systems; cross-agent goal-sharing; `goal_set` evolution kind for agent-authored goals
+- **D3** — gateway dispatcher tool-call → `dispatch_subagent_spawn` route (PyO3) at agent-servicer boot; `Supervisor::with_hook_bus` install at gateway boot to actually emit iter-9 hook events in production; operator UI tree visualisation
+- **D4** — actual PCM byte-stream writer for `retain_audio = true` (path is recorded; file writes parked behind `corlinman-voice` Python package per `phase4-roadmap.md:330`); retention sweeper job; Python `.wav` streaming harness; SQLite-backed `voice_spend` table (currently in-memory); Gemini Live as second provider
 
 ---
 
@@ -142,23 +289,39 @@ touched anyway.
 
 ---
 
-## Execution recommendations
+## Integration plan (Phase 4 → main)
 
-1. **Wait for PR #1 to merge** before continuing — local main is 16
-   commits ahead of `origin/main`; future work should branch off
-   the merged main, not the unmerged feat branch.
-2. **A1 first** — multi-tenant signal correctness should land in
-   the same release window as Wave 1, not after. It's the only
-   Wave 1 deferred item that matters for production correctness.
-3. **A2 + A3 + A4** can be one PR — small UI / Rust pair, all
-   under `routes/admin/evolution.rs` + UI's existing `/admin`
-   pages. Reviewable as a single unit.
-4. **B4 (trajectory replay)** is the recommended Wave 2 starter —
-   independent, useful immediately, and unblocks B1's offline
-   meta-prompt evaluation later.
-5. **C and D can interleave with B** if multiple developers pick
-   up tasks in parallel. The roadmap deliberately split waves to
-   keep them mostly independent.
+All 8 stream branches live on origin parallel to `main`. Decide an
+integration strategy before opening Phase 5:
+
+1. **Open 8 draft PRs** (one per `phase4-w{3,4}-{c,d}{1-4}` branch)
+   for code review, then merge in dependency order:
+   - First: C1, D1 (no dependencies)
+   - Second: C2 (depends on C1's `McpClient::connect_stdio`), D2 (depends on D1's episode runtime). Both already merged the dependency in their branch.
+   - Third: C3, C4, D3, D4 (independent)
+2. Each PR carries its own iter-by-iter commit history; squash-merge
+   into main is OK if reviewers prefer flat history, otherwise
+   merge-with-merge-commit preserves the iter trail.
+3. After all 8 land on main, open a "Phase 4 close-out" PR that:
+   - Updates `docs/design/phase4-roadmap.md` to mark §4 fully shipped
+   - Cherry-picks the per-iter design-flaw notes from agent reports
+     into respective design docs as "Implementation deltas"
+   - Adds Phase 5 deferrals (above) to a new `phase5-next-tasks.md`
+
+## Execution recommendations (Phase 5 ramp-up)
+
+1. **Phase 5 design-doc round first** — same pattern that worked
+   for Wave 3+4: dispatch parallel Software Architect agents to
+   produce 10-iter design specs grounded in current code, then
+   review before implementation dispatches.
+2. **Parallel-dispatch cadence learned in Phase 4**: ≤3 streams
+   per round, each in a pre-created `.claude/worktrees/<name>/`,
+   with explicit "no `cd` out, no editing other worktrees" prompts.
+   See `~/.claude/projects/-Users-cornna-project-corlinman/memory/agent_worktree_caveats.md`
+   for the full lessons-learned pattern.
+3. **Engineering debt (E1-E4 below)** is unblocked now that Phase 4
+   is closed; pick up opportunistically as Phase 5 streams touch
+   adjacent code.
 
 ---
 
@@ -166,8 +329,8 @@ touched anyway.
 
 - This doc is operational — keep entries current as tasks land.
   Mark items with `[done #PR]` when their PR merges.
-- New items discovered during execution: append to the end of the
-  relevant section with a brief "discovered while X" note so the
-  context isn't lost.
-- The strategic picture stays in `phase4-roadmap.md`; only
-  per-task tactical work goes here.
+- Phase 4 implementation history is preserved in the per-iter
+  commit lists above; the strategic picture stays in
+  `phase4-roadmap.md`.
+- Phase 5 tactical work belongs in a new `phase5-next-tasks.md`
+  once Phase 5 scoping starts.
