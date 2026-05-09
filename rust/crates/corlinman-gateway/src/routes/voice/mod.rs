@@ -19,6 +19,7 @@
 
 pub mod cost;
 pub mod framing;
+pub mod persistence;
 pub mod provider;
 pub mod provider_openai;
 
@@ -45,6 +46,7 @@ use cost::{
     InMemoryVoiceSpend, VoiceSpend,
 };
 use framing::{accept_subprotocol, encode_server_control, ServerControl, SubprotocolDecision};
+use persistence::{SharedTranscriptSink, SharedVoiceSessionStore};
 use provider::SharedVoiceProvider;
 
 /// State carried by the `/voice` route.
@@ -69,6 +71,18 @@ pub struct VoiceState {
     /// flips to `Some(OpenAIRealtimeProvider)` when `OPENAI_API_KEY`
     /// is set.
     pub provider: Option<SharedVoiceProvider>,
+    /// Iter 6+ voice session row store. `None` skips persistence —
+    /// useful for tests that only assert the wire shape. Production
+    /// constructs an `Arc<SqliteVoiceSessionStore>` against the same
+    /// `sessions.sqlite` file path the chat session store uses.
+    pub session_store: Option<SharedVoiceSessionStore>,
+    /// Iter 6+ transcript bridge. `None` falls back to a no-op
+    /// (transcript text is still written to `voice_sessions
+    /// .transcript_text` on close). When `Some`, each
+    /// `transcript_final` event also appends a `user` / `assistant`
+    /// row to the chat session table so the agent loop sees voice
+    /// turns indistinguishably from typed turns.
+    pub transcript_sink: Option<SharedTranscriptSink>,
 }
 
 impl VoiceState {
@@ -77,6 +91,8 @@ impl VoiceState {
             config,
             spend: Arc::new(InMemoryVoiceSpend::new()),
             provider: None,
+            session_store: None,
+            transcript_sink: None,
         }
     }
 
@@ -88,6 +104,8 @@ impl VoiceState {
             config,
             spend,
             provider: None,
+            session_store: None,
+            transcript_sink: None,
         }
     }
 
@@ -96,6 +114,24 @@ impl VoiceState {
     /// seam to drive transcript persistence + audio retention.
     pub fn with_provider(mut self, provider: SharedVoiceProvider) -> Self {
         self.provider = Some(provider);
+        self
+    }
+
+    /// Iter 6: wire the voice-session row store. Production passes a
+    /// `SqliteVoiceSessionStore` opened against the same per-tenant
+    /// `sessions.sqlite` file the chat session store uses; tests pass
+    /// the in-memory variant.
+    pub fn with_session_store(mut self, store: SharedVoiceSessionStore) -> Self {
+        self.session_store = Some(store);
+        self
+    }
+
+    /// Iter 6: wire the transcript bridge so `transcript_final` events
+    /// also flush into the chat sessions table. iter 7+ provides the
+    /// concrete adapter that wraps `corlinman-core`'s `SessionStore`
+    /// without the route handler ever taking a direct dependency.
+    pub fn with_transcript_sink(mut self, sink: SharedTranscriptSink) -> Self {
+        self.transcript_sink = Some(sink);
         self
     }
 }
@@ -661,6 +697,74 @@ mod tests {
             .oneshot(ws_upgrade_request(Some("corlinman.voice.v0")))
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ----- iter 6: persistence state seams -----
+
+    #[tokio::test]
+    async fn state_seam_carries_session_store_and_transcript_sink() {
+        // Iter 6 contract: VoiceState exposes builder methods that
+        // wire a session store + transcript sink without breaking
+        // existing call sites. The route handler doesn't read these
+        // yet (iter 7+ wires the upgrade-path), but the seam shape
+        // is pinned here so a refactor doesn't silently regress.
+        use persistence::{
+            MemoryTranscriptSink, SqliteVoiceSessionStore, VoiceSessionStart, VoiceSessionStore,
+            VoiceTranscriptSink,
+        };
+
+        let cfg = Config::default();
+        let store = Arc::new(
+            SqliteVoiceSessionStore::open_in_memory()
+                .await
+                .expect("in-memory store opens"),
+        );
+        let sink = Arc::new(MemoryTranscriptSink::new());
+
+        let state = VoiceState::new(Arc::new(ArcSwap::from_pointee(cfg)))
+            .with_session_store(store.clone() as Arc<dyn VoiceSessionStore>)
+            .with_transcript_sink(sink.clone() as Arc<dyn VoiceTranscriptSink>);
+        assert!(state.session_store.is_some());
+        assert!(state.transcript_sink.is_some());
+
+        // The store seam is genuinely usable through the trait — write
+        // and read a row to prove it.
+        store
+            .record_start(&VoiceSessionStart {
+                id: "voice-state-seam".into(),
+                tenant_id: "default".into(),
+                session_key: "k".into(),
+                agent_id: None,
+                provider_alias: "openai-realtime".into(),
+                started_at: 42,
+            })
+            .await
+            .expect("record_start through trait");
+        let row = store
+            .fetch("voice-state-seam")
+            .await
+            .expect("fetch")
+            .expect("row present");
+        assert_eq!(row.id, "voice-state-seam");
+
+        // Transcript sink seam likewise functional.
+        sink.append_turn("default", "k", "user", "hi").await.unwrap();
+        assert_eq!(sink.snapshot().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn state_seam_omitted_keeps_handler_path_intact() {
+        // Negative companion of the above: a state without store / sink
+        // (the iter-3 default) still routes 503 / 400 / 426 the same
+        // way — proves the seam additions don't change behaviour for
+        // operators who haven't enabled persistence.
+        let mut cfg = Config::default();
+        cfg.voice = Some(VoiceConfig {
+            enabled: true,
+            ..VoiceConfig::default()
+        });
+        let resp = router_for(cfg).oneshot(get_voice()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
