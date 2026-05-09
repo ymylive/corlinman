@@ -108,10 +108,24 @@ pub fn spawn_child(
     task: &TaskSpec,
 ) -> Result<TaskResult, BridgeError> {
     // Cap check first — cheap, prompt-injection-safe, and avoids
-    // burning interpreter time on a spawn we're about to refuse.
+    // burning interpreter time on a spawn we're about to refuse. The
+    // supervisor's `emit_reject` (iter 9) fires the `SubagentDepthCapped`
+    // hook on the rejection path automatically; we only need to emit
+    // `SubagentSpawned` here on the success path.
     let _slot = supervisor
         .try_acquire(parent_ctx)
         .map_err(BridgeError::Reject)?;
+
+    // Iter 9: derive the child's runtime context for the spawn event.
+    // The Python runner derives the same context internally; we
+    // anticipate it here so the bus carries the correct ids on the
+    // pre-runner emit. `child_seq=0` matches the runner's default —
+    // the production caller (gateway dispatch, iter 8) bumps this
+    // for sibling fan-out and the hook event reflects whatever the
+    // runner ends up using.
+    let child_card = task_agent_card_or_default(task);
+    let child_ctx = parent_ctx.child_context(&child_card, 0);
+    supervisor.emit_spawned(parent_ctx, &child_ctx, &child_card);
 
     // Pre-marshal both sides of the wire envelope. Doing this *outside*
     // `Python::with_gil` keeps the GIL window as small as possible —
@@ -134,7 +148,30 @@ pub fn spawn_child(
     // makes a Python exception non-leaky for the cap accountant.
     let result_json = py_result?;
     let result: TaskResult = serde_json::from_str(&result_json)?;
+    // Iter 9: emit Completed / TimedOut once the result envelope is
+    // decoded. Pre-spawn rejections were already emitted by
+    // `emit_reject` so the supervisor short-circuits this branch
+    // internally.
+    supervisor.emit_finished(parent_ctx, &result);
     Ok(result)
+}
+
+/// Best-effort extraction of the agent-card name from a `TaskSpec`'s
+/// goal text — used only for the iter-9 `SubagentSpawned` hook event
+/// payload. The Python runner gets the *real* card name via the
+/// gateway's tool-wrapper (iter 8) so the hook payload is for
+/// observability only and can fall back to a placeholder when the
+/// task carries no embedded hint. Production wiring will replace this
+/// with the agent name carried alongside the `TaskSpec`.
+fn task_agent_card_or_default(_task: &TaskSpec) -> String {
+    // The Rust-side `TaskSpec` doesn't carry the agent name (the
+    // tool-wrapper resolves it from `args.agent` and only passes the
+    // goal/budget down). The Python runner *does* know the card, but
+    // the Rust supervisor's `emit_spawned` runs before Python is
+    // entered. For iter 9 we use a placeholder string so the hook
+    // event is well-formed; iter 10 / W5 will plumb the agent name
+    // through the bridge so this can be the real card name.
+    "<spawned>".to_string()
 }
 
 /// Convenience wrapper for the gateway dispatcher (iter 8): folds

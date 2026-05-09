@@ -270,6 +270,147 @@ pub(crate) fn adapt(event: &HookEvent) -> Option<EvolutionSignal> {
                 tenant_id: "default".into(),
             })
         }
+        // Phase 4 W4 D3 iter 9: subagent lifecycle events fold into the
+        // evolution-signals stream so the engine sees timeouts /
+        // depth-cap rejections / completion patterns. Each variant
+        // carries `parent_trace_id` verbatim into the signal's
+        // `trace_id` column — the join query the design's open
+        // question 4 references walks `parent_trace_id == parent.trace_id`
+        // to fold child clusters into the parent's tree (an explicit
+        // "include subagents" flag flips this on at engine input time).
+        HookEvent::SubagentSpawned {
+            parent_session_key,
+            child_session_key,
+            child_agent_id,
+            agent_card,
+            depth,
+            parent_trace_id,
+            tenant_id,
+        } => {
+            let payload = json!({
+                "parent_session_key": parent_session_key,
+                "child_session_key": child_session_key,
+                "child_agent_id": child_agent_id,
+                "agent_card": agent_card,
+                "depth": depth,
+                "parent_trace_id": parent_trace_id,
+            });
+            Some(EvolutionSignal {
+                id: None,
+                event_kind: "subagent.spawned".into(),
+                target: Some(child_agent_id.clone()),
+                // Spawning is an Info-severity observation, not a
+                // problem signal — engine clusters rarely act on it
+                // alone, but it provides the parent-link for joins.
+                severity: SignalSeverity::Info,
+                payload_json: payload,
+                trace_id: Some(parent_trace_id.clone()),
+                session_id: Some(child_session_key.clone()),
+                observed_at: now_ms(),
+                tenant_id: tenant_id.clone(),
+            })
+        }
+        HookEvent::SubagentCompleted {
+            parent_session_key,
+            child_session_key,
+            child_agent_id,
+            finish_reason,
+            elapsed_ms,
+            tool_calls_made,
+            parent_trace_id,
+            tenant_id,
+        } => {
+            // Stop / Length are happy-path; Error is the interesting
+            // failure mode. The severity split lets the engine cluster
+            // failure-loops without drowning in successful runs.
+            let severity = match finish_reason.as_str() {
+                "error" => SignalSeverity::Error,
+                "length" => SignalSeverity::Warn,
+                _ => SignalSeverity::Info,
+            };
+            let payload = json!({
+                "parent_session_key": parent_session_key,
+                "child_session_key": child_session_key,
+                "child_agent_id": child_agent_id,
+                "finish_reason": finish_reason,
+                "elapsed_ms": elapsed_ms,
+                "tool_calls_made": tool_calls_made,
+                "parent_trace_id": parent_trace_id,
+            });
+            Some(EvolutionSignal {
+                id: None,
+                event_kind: "subagent.completed".into(),
+                target: Some(child_agent_id.clone()),
+                severity,
+                payload_json: payload,
+                trace_id: Some(parent_trace_id.clone()),
+                session_id: Some(child_session_key.clone()),
+                observed_at: now_ms(),
+                tenant_id: tenant_id.clone(),
+            })
+        }
+        HookEvent::SubagentTimedOut {
+            parent_session_key,
+            child_session_key,
+            child_agent_id,
+            elapsed_ms,
+            parent_trace_id,
+            tenant_id,
+        } => {
+            let payload = json!({
+                "parent_session_key": parent_session_key,
+                "child_session_key": child_session_key,
+                "child_agent_id": child_agent_id,
+                "elapsed_ms": elapsed_ms,
+                "parent_trace_id": parent_trace_id,
+            });
+            Some(EvolutionSignal {
+                id: None,
+                event_kind: "subagent.timed_out".into(),
+                target: Some(child_agent_id.clone()),
+                // Timeouts are warnings: the spawn worked but the
+                // budget didn't. Repeated timeouts on the same target
+                // are the cluster pattern the engine learns from.
+                severity: SignalSeverity::Warn,
+                payload_json: payload,
+                trace_id: Some(parent_trace_id.clone()),
+                session_id: Some(child_session_key.clone()),
+                observed_at: now_ms(),
+                tenant_id: tenant_id.clone(),
+            })
+        }
+        HookEvent::SubagentDepthCapped {
+            parent_session_key,
+            attempted_depth,
+            reason,
+            parent_trace_id,
+            tenant_id,
+        } => {
+            let payload = json!({
+                "parent_session_key": parent_session_key,
+                "attempted_depth": attempted_depth,
+                "reason": reason,
+                "parent_trace_id": parent_trace_id,
+            });
+            Some(EvolutionSignal {
+                id: None,
+                event_kind: "subagent.depth_capped".into(),
+                target: Some(parent_session_key.clone()),
+                // Depth-cap / concurrency-cap rejections are warnings:
+                // a noisy parent that keeps hitting them is a cluster
+                // signal (operator may want to raise the cap or rein
+                // in the parent's prompt).
+                severity: SignalSeverity::Warn,
+                payload_json: payload,
+                trace_id: Some(parent_trace_id.clone()),
+                // No child session was allocated — `session_id` falls
+                // back to the parent's session_key so the engine's
+                // session-clustering still finds the row.
+                session_id: Some(parent_session_key.clone()),
+                observed_at: now_ms(),
+                tenant_id: tenant_id.clone(),
+            })
+        }
         // Other variants are not part of the curated set today. New
         // mappings (e.g. `session.ended` once the lifecycle gains a
         // terminal event, or `user.correction` once that hook lands) drop
@@ -569,6 +710,154 @@ mod tests {
             "expected dropped counter to advance under burst (before={before_dropped}, \
              after={})",
             EVOLUTION_SIGNALS_DROPPED.get()
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 4 W4 D3 iter 9: Subagent* hook variants → evolution_signals
+    //
+    // Pinned mappings (the join query the design's open question 4
+    // references walks `parent_trace_id == parent.trace_id`):
+    //
+    //   SubagentSpawned     → kind="subagent.spawned",     severity=Info
+    //   SubagentCompleted   → kind="subagent.completed",   severity by reason
+    //   SubagentTimedOut    → kind="subagent.timed_out",   severity=Warn
+    //   SubagentDepthCapped → kind="subagent.depth_capped",severity=Warn
+    //
+    // Every variant must populate `signal.trace_id` from the event's
+    // `parent_trace_id` and surface the same id in `payload_json` so
+    // the engine can join on either column.
+    // ---------------------------------------------------------------------
+
+    /// Maps to design test row `evolution_signals_link_child_to_parent_trace`.
+    /// `SubagentCompleted` carries the parent's trace id verbatim into
+    /// `signal.trace_id`; `payload_json.parent_trace_id` mirrors it so
+    /// downstream consumers can read either.
+    #[test]
+    fn adapt_subagent_completed_links_parent_trace() {
+        let event = HookEvent::SubagentCompleted {
+            parent_session_key: "sess-root".into(),
+            child_session_key: "sess-root::child::0".into(),
+            child_agent_id: "main::researcher::0".into(),
+            finish_reason: "stop".into(),
+            elapsed_ms: 4180,
+            tool_calls_made: 2,
+            parent_trace_id: "trace-parent-xyz".into(),
+            tenant_id: "acme".into(),
+        };
+        let signal = adapt(&event).expect("should adapt");
+        assert_eq!(signal.event_kind, "subagent.completed");
+        assert_eq!(signal.severity, SignalSeverity::Info);
+        assert_eq!(signal.target.as_deref(), Some("main::researcher::0"));
+        assert_eq!(signal.trace_id.as_deref(), Some("trace-parent-xyz"));
+        assert_eq!(signal.session_id.as_deref(), Some("sess-root::child::0"));
+        assert_eq!(signal.tenant_id, "acme");
+        // Payload mirrors the link so JSON-only consumers can find it.
+        assert_eq!(
+            signal.payload_json["parent_trace_id"],
+            serde_json::Value::String("trace-parent-xyz".into())
+        );
+        assert_eq!(
+            signal.payload_json["finish_reason"],
+            serde_json::Value::String("stop".into())
+        );
+    }
+
+    /// `SubagentCompleted{finish_reason="error"}` lifts severity to
+    /// Error so the engine clusters child-error patterns separately
+    /// from happy completions.
+    #[test]
+    fn adapt_subagent_completed_error_severity() {
+        let event = HookEvent::SubagentCompleted {
+            parent_session_key: "s".into(),
+            child_session_key: "s::child::0".into(),
+            child_agent_id: "main::r::0".into(),
+            finish_reason: "error".into(),
+            elapsed_ms: 100,
+            tool_calls_made: 0,
+            parent_trace_id: "t".into(),
+            tenant_id: "default".into(),
+        };
+        let s = adapt(&event).unwrap();
+        assert_eq!(s.severity, SignalSeverity::Error);
+    }
+
+    /// `SubagentTimedOut` → its own `kind="subagent.timed_out"` (NOT
+    /// folded into `subagent.completed`). The split lets the engine
+    /// red-flag timeout clusters distinctly from error clusters.
+    #[test]
+    fn adapt_subagent_timed_out_distinct_kind() {
+        let event = HookEvent::SubagentTimedOut {
+            parent_session_key: "s".into(),
+            child_session_key: "s::child::0".into(),
+            child_agent_id: "main::r::0".into(),
+            elapsed_ms: 60_000,
+            parent_trace_id: "t".into(),
+            tenant_id: "default".into(),
+        };
+        let s = adapt(&event).unwrap();
+        assert_eq!(s.event_kind, "subagent.timed_out");
+        assert_eq!(s.severity, SignalSeverity::Warn);
+        assert_eq!(s.trace_id.as_deref(), Some("t"));
+        assert_eq!(s.payload_json["elapsed_ms"], serde_json::json!(60_000));
+    }
+
+    /// `SubagentDepthCapped` covers the depth + concurrency caps; the
+    /// `reason` discriminates. Locks the design's "all four caps emit"
+    /// statement.
+    #[test]
+    fn adapt_subagent_depth_capped_carries_reason() {
+        for reason in [
+            "depth_capped",
+            "parent_concurrency_exceeded",
+            "tenant_quota_exceeded",
+        ] {
+            let event = HookEvent::SubagentDepthCapped {
+                parent_session_key: "sess-x".into(),
+                attempted_depth: 2,
+                reason: reason.into(),
+                parent_trace_id: "trace-z".into(),
+                tenant_id: "acme".into(),
+            };
+            let s = adapt(&event).unwrap_or_else(|| panic!("adapt {reason}"));
+            assert_eq!(s.event_kind, "subagent.depth_capped");
+            assert_eq!(s.severity, SignalSeverity::Warn);
+            assert_eq!(s.target.as_deref(), Some("sess-x"));
+            // Without a child_session_key, session_id falls back to
+            // the parent's session — engine session-clustering still
+            // groups it under the parent's tree.
+            assert_eq!(s.session_id.as_deref(), Some("sess-x"));
+            assert_eq!(s.trace_id.as_deref(), Some("trace-z"));
+            assert_eq!(
+                s.payload_json["reason"],
+                serde_json::Value::String(reason.into())
+            );
+        }
+    }
+
+    /// `SubagentSpawned` is Info-severity — the spawn itself isn't a
+    /// problem, but the link to parent is what gives the engine the
+    /// join key. Without this row the join query has no edge from
+    /// child signals back to parent clusters.
+    #[test]
+    fn adapt_subagent_spawned_provides_parent_link() {
+        let event = HookEvent::SubagentSpawned {
+            parent_session_key: "sess-root".into(),
+            child_session_key: "sess-root::child::0".into(),
+            child_agent_id: "main::r::0".into(),
+            agent_card: "researcher".into(),
+            depth: 1,
+            parent_trace_id: "trace-p".into(),
+            tenant_id: "default".into(),
+        };
+        let s = adapt(&event).unwrap();
+        assert_eq!(s.event_kind, "subagent.spawned");
+        assert_eq!(s.severity, SignalSeverity::Info);
+        assert_eq!(s.trace_id.as_deref(), Some("trace-p"));
+        assert_eq!(s.payload_json["depth"], serde_json::json!(1));
+        assert_eq!(
+            s.payload_json["agent_card"],
+            serde_json::Value::String("researcher".into())
         );
     }
 }

@@ -126,6 +126,22 @@ impl FinishReason {
     pub fn is_pre_spawn_rejection(self) -> bool {
         matches!(self, FinishReason::DepthCapped | FinishReason::Rejected)
     }
+
+    /// Lowercase snake_case string representation. Matches the
+    /// `#[serde(rename_all = "snake_case")]` JSON wire shape; lifted
+    /// into a `&'static str` so the iter-9 `SubagentCompleted` hook
+    /// event can carry the reason without a `serde_json::to_string`
+    /// round-trip on every emit.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FinishReason::Stop => "stop",
+            FinishReason::Length => "length",
+            FinishReason::Timeout => "timeout",
+            FinishReason::Error => "error",
+            FinishReason::DepthCapped => "depth_capped",
+            FinishReason::Rejected => "rejected",
+        }
+    }
 }
 
 /// One entry of `TaskResult.tool_calls_made`. Carries enough for

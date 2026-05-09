@@ -29,6 +29,12 @@ time = { workspace = true }
 uuid = { workspace = true }
 dashmap = { workspace = true }
 
+# Iter 9: hook-bus emit. The supervisor optionally holds an
+# `Arc<HookBus>` and fires `Subagent{Spawned,Completed,TimedOut,
+# DepthCapped}` events on the relevant lifecycle transitions, mirroring
+# the `EngineRunCompleted/Failed` pattern in `corlinman-scheduler`.
+corlinman-hooks = { path = "../corlinman-hooks" }
+
 # Optional Python bridge — see [features]. Pinned to a recent stable.
 pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
 
