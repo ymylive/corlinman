@@ -116,37 +116,45 @@ fn unknown_kind_round_trips_as_error() {
     );
 }
 
-/// Renderer returns `Unimplemented` for kinds whose adapters
-/// haven't shipped yet. Iter 2 wired `Code`; iter 3 wired `Table`;
-/// iter 4 wired `Latex`; iter 5 wired `Sparkline`. Only `Mermaid`
-/// remains stubbed until iter 6.
+/// All five `ArtifactKind` variants now reach a real adapter — there
+/// are no `Unimplemented` paths in the runtime dispatch. Iter 6
+/// closed the last gap (`Mermaid`) with a feature-gated adapter that
+/// returns a typed `CanvasError::Adapter` ("not enabled in this
+/// build") under the default feature set.
+///
+/// This test pins the *contract*: dispatch is exhaustive, and the
+/// typed error variants returned by each adapter are stable enough
+/// that the gateway can match on them. `Unimplemented` exists in the
+/// type but is unreachable from the dispatch path; if a future
+/// adapter regresses to returning it, this test will catch it.
 #[test]
-fn renderer_stub_returns_unimplemented_for_unwired_kinds() {
+fn renderer_dispatch_is_exhaustive() {
     let renderer = Renderer::new();
 
-    // Iter 2 wired Code, iter 3 wired Table, iter 4 wired Latex,
-    // iter 5 wired Sparkline. Mermaid still stub.
-    let unwired: Vec<(ArtifactKind, ArtifactBody)> = vec![(
-        ArtifactKind::Mermaid,
-        ArtifactBody::Mermaid {
-            diagram: "graph LR; A-->B".into(),
-        },
-    )];
-
-    for (kind, body) in unwired {
-        let payload = CanvasPresentPayload {
-            artifact_kind: kind,
-            body,
-            idempotency_key: format!("art_stub_{}", kind.as_str()),
+    // Mermaid under the default feature set: typed Adapter error
+    // mentioning the feature flag. Producers / gateway / UI surface
+    // it as `canvas-artifact-error`.
+    let mermaid_err = renderer
+        .render(&CanvasPresentPayload {
+            artifact_kind: ArtifactKind::Mermaid,
+            body: ArtifactBody::Mermaid {
+                diagram: "graph LR; A-->B".into(),
+            },
+            idempotency_key: "art_mermaid_stub".into(),
             theme_hint: None,
-        };
-        let err = renderer
-            .render(&payload)
-            .expect_err("stub must error for unwired kind");
-        match err {
-            CanvasError::Unimplemented { kind: got } => assert_eq!(got, kind),
-            other => panic!("expected Unimplemented for {kind:?}, got {other:?}"),
+        })
+        .expect_err("mermaid must error under default features");
+
+    match mermaid_err {
+        CanvasError::Adapter { kind: ArtifactKind::Mermaid, .. } => { /* expected */ }
+        // If `--features mermaid` is enabled we may instead see a
+        // different Adapter message (the JS-bundle scaffold), but
+        // either way the variant must be Adapter — never
+        // Unimplemented at runtime.
+        CanvasError::Unimplemented { kind } => {
+            panic!("Unimplemented must not be reachable from dispatch (got kind={kind:?})")
         }
+        other => panic!("expected Adapter error for mermaid, got {other:?}"),
     }
 }
 

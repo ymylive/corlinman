@@ -39,6 +39,24 @@ csv = "1"
 # "katex-rs (no JS)". `default = []` already, so we pull only the
 # core renderer; `wasm` / `backtrace` features stay off.
 katex-rs = "0.2.4"
+# Iter 6 — mermaid adapter. `deno_core` (V8 + Tokio reactor) is the
+# in-process JS engine the design committed to in
+# `phase4-w3-c3-design.md` § "Sandboxing". The dep is gated behind
+# the `mermaid` feature so the default workspace build does NOT
+# download / link V8 (~600 MB prebuilt, multi-minute link time).
+# Operators who need diagram rendering build with
+# `--features mermaid`; the corresponding `mermaid.min.js` bundle +
+# DOM shim is loaded at runtime by the adapter. With the feature off
+# (default), the mermaid adapter returns a typed
+# `CanvasError::Adapter` so producers see "mermaid disabled in this
+# build" rather than a panic.
+deno_core = { version = "0.400.0", optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[features]
+default = []
+# Enables the mermaid adapter (deno_core + V8). Cost: ~600 MB build
+# artifact, multi-minute first compile. See the dep comment above.
+mermaid = ["dep:deno_core"]

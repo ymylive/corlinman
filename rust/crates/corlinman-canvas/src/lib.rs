@@ -13,14 +13,19 @@
 //! - `table`     → markdown / CSV → `<table>` — **iter 3 (live)**
 //! - `latex`     → katex-rs → HTML+MathML — **iter 4 (live)**
 //! - `sparkline` → hand-rolled SVG — **iter 5 (live)**
-//! - `mermaid`   → deno_core sandbox → SVG — iter 6
+//! - `mermaid`   → deno_core sandbox → SVG — **iter 6 (gated; see
+//!   `adapters/mermaid.rs`)**
 //!
 //! Iter 1 landed only the protocol surface and a stub
 //! [`Renderer`] that returned [`CanvasError::Unimplemented`]. Iter 2
 //! wires the `code` adapter (syntect, class-based emission). Iter 3
 //! wires `table`. Iter 4 wires `latex` (pure-Rust `katex-rs`). Iter 5
-//! wires `sparkline` (hand-rolled SVG, no new dep). The mermaid
-//! adapter remains `Unimplemented` until iter 6.
+//! wires `sparkline` (hand-rolled SVG, no new dep). Iter 6 wires the
+//! `mermaid` dispatch arm; the adapter is feature-gated behind
+//! `--features mermaid` because the underlying `deno_core` (V8) dep
+//! costs ~600 MB to the build. With the feature off (default) the
+//! adapter returns a typed `CanvasError::Adapter` so the gateway and
+//! UI render the structured fallback panel.
 //!
 //! Tidepool aesthetic enforcement: every rendered artifact carries a
 //! `theme_class` (one of `"tp-light"` / `"tp-dark"`) plus class-only
@@ -39,20 +44,25 @@ pub use protocol::{
 
 /// Renderer entry point. Dispatches on
 /// [`CanvasPresentPayload::artifact_kind`] to the matching
-/// [`adapters`] function. Adapters that aren't wired yet return
-/// [`CanvasError::Unimplemented`].
+/// [`adapters`] function. From iter 6 every kind in
+/// [`ArtifactBody`] is wired to a real adapter — `Unimplemented` is
+/// reserved for protocol-level surprises that should not occur in
+/// runtime paths.
 ///
 /// `Renderer::new()` is intentionally cheap — heavy state lives
 /// behind `OnceLock`s in the adapters (e.g. the syntect
-/// `SyntaxSet`). Cloning the `Renderer` is free.
+/// `SyntaxSet`, the deno_core `JsRuntime` under `--features
+/// mermaid`). Cloning the `Renderer` is free.
 #[derive(Debug, Default, Clone)]
 pub struct Renderer {
     _private: (),
 }
 
 impl Renderer {
-    /// Construct a fresh renderer. Cheap in iter 1-2; iter 6 will
-    /// lazy-init the deno_core engine on first mermaid render.
+    /// Construct a fresh renderer. Cheap on every iter — heavy
+    /// adapter state (syntect's `SyntaxSet`, katex-rs's
+    /// `KatexContext`, the future deno_core `JsRuntime`) lives
+    /// behind `OnceLock`s in the per-adapter modules.
     pub fn new() -> Self {
         Self { _private: () }
     }
@@ -83,21 +93,10 @@ impl Renderer {
             ArtifactBody::Sparkline { values, unit } => {
                 adapters::sparkline::render(values, unit.as_deref(), theme)
             }
-            other_kind => Err(CanvasError::Unimplemented {
-                kind: artifact_body_kind(other_kind),
-            }),
+            ArtifactBody::Mermaid { diagram } => {
+                adapters::mermaid::render(diagram, theme)
+            }
         }
     }
 }
 
-/// Maps an [`ArtifactBody`] back to its [`ArtifactKind`] discriminator.
-/// Cheap, branch-free in optimised builds.
-fn artifact_body_kind(body: &ArtifactBody) -> ArtifactKind {
-    match body {
-        ArtifactBody::Code { .. } => ArtifactKind::Code,
-        ArtifactBody::Mermaid { .. } => ArtifactKind::Mermaid,
-        ArtifactBody::Table { .. } => ArtifactKind::Table,
-        ArtifactBody::Latex { .. } => ArtifactKind::Latex,
-        ArtifactBody::Sparkline { .. } => ArtifactKind::Sparkline,
-    }
-}

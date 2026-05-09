@@ -7,5 +7,6 @@
 
 pub mod code;
 pub mod latex;
+pub mod mermaid;
 pub mod sparkline;
 pub mod table;
