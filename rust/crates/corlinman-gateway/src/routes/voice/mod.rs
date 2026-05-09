@@ -18,6 +18,7 @@
 //! See `docs/design/phase4-w4-d4-design.md`.
 
 pub mod approval;
+pub mod budget;
 pub mod cost;
 pub mod framing;
 pub mod persistence;
