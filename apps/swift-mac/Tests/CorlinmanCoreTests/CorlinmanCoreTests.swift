@@ -16,9 +16,9 @@ final class CorlinmanCoreTests: XCTestCase {
     /// gains a non-additive public surface.
     func test_buildInfo_reportsCurrentIter() {
         XCTAssertTrue(
-            CorlinmanCoreInfo.banner.contains("sessions"),
-            "build banner must advertise sessions; got \(CorlinmanCoreInfo.banner)"
+            CorlinmanCoreInfo.banner.contains("chat-ui"),
+            "build banner must advertise chat-ui; got \(CorlinmanCoreInfo.banner)"
         )
-        XCTAssertEqual(CorlinmanCoreInfo.version, "0.3.0")
+        XCTAssertEqual(CorlinmanCoreInfo.version, "0.4.0")
     }
 }
