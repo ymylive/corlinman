@@ -1,0 +1,23 @@
+[project]
+name = "corlinman-goals"
+version = "0.1.0"
+description = "Goal hierarchies — short/mid/long-tier goals with reflection scoring in agent_goals.sqlite."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "corlinman contributors" }]
+
+dependencies = [
+    "aiosqlite>=0.20",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+corlinman-goals = "corlinman_goals.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/corlinman_goals"]

@@ -1,0 +1,22 @@
+[project]
+name = "corlinman-episodes"
+version = "0.1.0"
+description = "Episodic memory — distil sessions/signals/history into narrative-shaped, importance-ranked, embedded episodes per tenant."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "corlinman contributors" }]
+
+dependencies = [
+    "aiosqlite>=0.20",
+]
+
+[project.scripts]
+corlinman-episodes = "corlinman_episodes.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/corlinman_episodes"]
