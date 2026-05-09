@@ -54,8 +54,11 @@ use cost::{
     InMemoryVoiceSpend, VoiceSpend,
 };
 use crate::middleware::approval::ApprovalGate;
-use framing::{accept_subprotocol, encode_server_control, ServerControl, SubprotocolDecision};
-use persistence::{SharedTranscriptSink, SharedVoiceSessionStore};
+use framing::{
+    accept_subprotocol, encode_server_control, parse_client_control, ClientControl, ServerControl,
+    SubprotocolDecision,
+};
+use persistence::{audio_path_for, SharedTranscriptSink, SharedVoiceSessionStore};
 use provider::SharedVoiceProvider;
 
 /// State carried by the `/voice` route.
@@ -305,6 +308,11 @@ async fn voice_handler(
     let provider_alias = voice_cfg.provider_alias.clone();
     let session_state = state.clone();
     let voice_cfg_for_session = voice_cfg.clone();
+    // Snapshot data_dir up here so the session driver can compute the
+    // retention path without holding the ArcSwap guard across the
+    // upgrade. A hot-flip of `data_dir` mid-session would only affect
+    // the next session.
+    let data_dir = snap.server.data_dir.clone();
     ws.protocols([accepted]).on_upgrade(move |socket| {
         run_voice_session(
             socket,
@@ -313,6 +321,7 @@ async fn voice_handler(
             voice_cfg_for_session,
             tenant,
             day_epoch,
+            data_dir,
         )
     })
 }
@@ -329,6 +338,24 @@ async fn voice_handler(
 ///    and a fully-built [`BridgeContext`]. The bridge owns the pump
 ///    loop, budget ticker, transcript sink writes, and approval
 ///    pause logic; this fn is just the construction site.
+///
+/// **Iter 10 close-outs**:
+///
+/// 1. The handler **pre-reads the inbound `start` control frame**
+///    before constructing the [`BridgeContext`]. The frame's
+///    `session_key` and `agent_id` flow into the context so the
+///    transcript sink writes turns under the chat-session row the
+///    client supplied — fixing the iter-9 fallback that always wrote
+///    under the synthetic `session_id`. A first frame that is **not**
+///    a `start` is tolerated (the design says `start` is mandatory but
+///    a misbehaving client shouldn't crash the route): we fall back to
+///    `session_id` and forward the offending frame into the bridge so
+///    the bridge's existing protocol-error path can surface it.
+/// 2. When `[voice] retain_audio = true`, the handler resolves the
+///    on-disk PCM path via [`audio_path_for`] and threads it into
+///    [`BridgeContext::audio_path`]. The bridge writes that string
+///    into `voice_sessions.audio_path` on session close, fixing the
+///    iter-9 hardcoded `None`.
 async fn run_voice_session(
     mut socket: WebSocket,
     provider_alias: String,
@@ -336,6 +363,7 @@ async fn run_voice_session(
     voice_cfg: corlinman_core::config::VoiceConfig,
     tenant: String,
     day_epoch: u64,
+    data_dir: std::path::PathBuf,
 ) {
     let session_id = format!("voice-{}", uuid::Uuid::new_v4());
 
@@ -359,19 +387,88 @@ async fn run_voice_session(
         return;
     };
 
+    // ---- iter 10 fix #1: pre-read the `start` control frame -------
+    //
+    // The bridge's pump loop tolerates a redundant `start` mid-session
+    // as a no-op, so consuming the first frame here is safe. We give
+    // the client up to 5s to send `start`; clients that take longer
+    // are doing something pathological and the session times out.
+    //
+    // If the first frame is anything other than `start`, the design
+    // says `start` is required first — but rather than add a new
+    // close-code-vs-tolerate decision here we keep the iter-9 fallback
+    // (session_key = session_id) and stash the offending frame so the
+    // bridge can react to it. Either way, downstream construction is
+    // unblocked.
+    let (start_session_key, start_agent_id, start_sample_rate, replay_first) = match tokio::time::timeout(
+        Duration::from_secs(5),
+        socket.recv(),
+    )
+    .await
+    {
+        Ok(Some(Ok(Message::Text(t)))) => match parse_client_control(&t) {
+            Ok(ClientControl::Start {
+                session_key,
+                agent_id,
+                sample_rate_hz,
+                ..
+            }) => (Some(session_key), agent_id, Some(sample_rate_hz), None),
+            Ok(_other) => {
+                // Non-start text frame: keep the iter-9 fallback.
+                // Replay the original text so the bridge sees it.
+                (None, None, None, Some(BridgeInFrame::Text(t)))
+            }
+            Err(err) => {
+                // Parse failure: surface to the client and keep going
+                // with the fallback so the bridge's tolerant
+                // protocol-error path can decide whether to terminate.
+                debug!(
+                    target: "voice", session_id, err = %err,
+                    "first text frame failed to parse; falling back to session_id"
+                );
+                (None, None, None, Some(BridgeInFrame::Text(t)))
+            }
+        },
+        Ok(Some(Ok(Message::Binary(b)))) => {
+            // Audio before start. Same fallback — bridge's binary path
+            // will rate-limit / validate as normal.
+            (None, None, None, Some(BridgeInFrame::Binary(b)))
+        }
+        Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Ok(Message::Ping(_))))
+        | Ok(Some(Ok(Message::Pong(_)))) | Ok(Some(Err(_))) | Ok(None) | Err(_) => {
+            // Client hung up / errored / didn't send anything within
+            // 5s. We still need to drive the bridge so the session row
+            // gets a `start_failed`-style end reason — but with no
+            // start frame the safest action is to close immediately
+            // before opening a provider session.
+            let close = CloseFrame {
+                code: 1002,
+                reason: "missing start frame".into(),
+            };
+            let _ = socket.send(Message::Close(Some(close))).await;
+            return;
+        }
+    };
+
     // Per-session cancel token; signals graceful shutdown to the
     // bridge if the gateway-level lifecycle cancels (e.g. process
     // shutdown). The route handler doesn't currently propagate a
     // shutdown token down — when it does, this is the join point.
     let cancel = CancellationToken::new();
 
+    // session_key: from the start frame when present, otherwise the
+    // synthetic id. Used for both the chat-session FK and the approval
+    // bridge's session-scoped allowlist match.
+    let session_key = start_session_key.unwrap_or_else(|| session_id.clone());
+
     // Approval bridge: if the gateway has a real ApprovalGate,
     // every voice tool-call goes through it; otherwise the bridge
     // auto-approves (matches the chat-side `NoMatch → Approved`
-    // default).
+    // default). Use the resolved session_key so an operator's
+    // `allow_session_keys = ["my-trusted-session"]` rule fires.
     let approval_bridge = match state.approval_gate.clone() {
-        Some(gate) => VoiceApprovalBridge::with_gate(gate, session_id.clone()),
-        None => VoiceApprovalBridge::no_gate(session_id.clone()),
+        Some(gate) => VoiceApprovalBridge::with_gate(gate, session_key.clone()),
+        None => VoiceApprovalBridge::no_gate(session_key.clone()),
     };
 
     let started_at_instant = Instant::now();
@@ -384,6 +481,28 @@ async fn run_voice_session(
         started_at_instant,
     );
 
+    // ---- iter 10 fix #2: opt-in audio retention path ---------------
+    //
+    // `[voice] retain_audio = true` resolves the per-tenant tree;
+    // `false` (default) leaves audio_path = None so the row column
+    // stays NULL. Path resolution is pure (no mkdir / no file open),
+    // so the row is always consistent with operator intent even if a
+    // future iter wires the actual byte-stream writer.
+    let audio_path = if voice_cfg.retain_audio {
+        Some(
+            audio_path_for(&data_dir, &tenant, &session_id)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    } else {
+        None
+    };
+
+    // Sample-rate negotiation: client's `start.sample_rate_hz` wins
+    // over the config default when present. The provider may still
+    // resample upstream if its model expects 24 kHz only.
+    let sample_rate_hz_in = start_sample_rate.unwrap_or(voice_cfg.sample_rate_hz_in);
+
     let ctx = BridgeContext {
         session_id: session_id.clone(),
         provider_alias: provider_alias.clone(),
@@ -391,16 +510,12 @@ async fn run_voice_session(
         day_epoch,
         started_at_unix,
         started_at_instant,
-        // The Mac/web client supplies session_key via the `start`
-        // control frame, but iter 9 falls back to the session_id when
-        // the parent handler hasn't extracted that yet — iter 10's
-        // E2E harness wires the proper extraction. The session_key
-        // path through `transcript_sink.append_turn` still works
-        // because it's just a foreign key into the chat sessions
-        // table.
-        session_key: session_id.clone(),
-        agent_id: None,
-        sample_rate_hz_in: voice_cfg.sample_rate_hz_in,
+        // iter 10: session_key now flows from the inbound `start`
+        // frame when present, falling back to session_id only when the
+        // client didn't send one (or sent something else first).
+        session_key,
+        agent_id: start_agent_id,
+        sample_rate_hz_in,
         sample_rate_hz_out: voice_cfg.sample_rate_hz_out,
         voice_id: None,
         provider,
@@ -408,12 +523,26 @@ async fn run_voice_session(
         transcript_sink: state.transcript_sink.clone(),
         approval_bridge,
         budget,
+        audio_path,
         // Production tick = 1 Hz per design.
         tick_interval: Duration::from_secs(1),
         cancel,
     };
 
-    let outcome = run_bridge(WebSocketBridgeIo::new(socket), ctx).await;
+    // The bridge expects to drive the inbound stream itself; if the
+    // first frame was non-`start` we feed it back through a wrapper
+    // I/O that yields the buffered frame once before falling through
+    // to the live socket.
+    let outcome = match replay_first {
+        Some(first) => {
+            run_bridge(
+                ReplayWebSocketBridgeIo::new(socket, first),
+                ctx,
+            )
+            .await
+        }
+        None => run_bridge(WebSocketBridgeIo::new(socket), ctx).await,
+    };
     debug!(
         target: "voice",
         session_id, end_reason = ?outcome.end_reason,
@@ -452,6 +581,59 @@ impl BridgeIo for WebSocketBridgeIo {
                     // looping for the next real frame.
                     continue;
                 }
+                Some(Err(e)) => {
+                    debug!(target: "voice", err = %e, "websocket recv errored; treating as close");
+                    return None;
+                }
+                None => return None,
+            }
+        }
+    }
+
+    async fn send(&mut self, frame: BridgeOutFrame) -> Result<(), BridgeIoError> {
+        let msg = match frame {
+            BridgeOutFrame::Text(t) => Message::Text(t),
+            BridgeOutFrame::Binary(b) => Message::Binary(b),
+            BridgeOutFrame::Close { code, reason } => Message::Close(Some(CloseFrame {
+                code,
+                reason: reason.into(),
+            })),
+        };
+        self.socket.send(msg).await.map_err(|_| BridgeIoError)
+    }
+}
+
+/// Same as [`WebSocketBridgeIo`] but yields one buffered inbound frame
+/// before falling through to the live socket. Used when the route
+/// handler pre-consumed the first frame for `start` extraction but the
+/// frame turned out to be non-`start` (so the bridge still needs to
+/// see it for protocol-error handling).
+struct ReplayWebSocketBridgeIo {
+    socket: WebSocket,
+    pending: Option<BridgeInFrame>,
+}
+
+impl ReplayWebSocketBridgeIo {
+    fn new(socket: WebSocket, first: BridgeInFrame) -> Self {
+        Self {
+            socket,
+            pending: Some(first),
+        }
+    }
+}
+
+#[async_trait]
+impl BridgeIo for ReplayWebSocketBridgeIo {
+    async fn recv(&mut self) -> Option<BridgeInFrame> {
+        if let Some(f) = self.pending.take() {
+            return Some(f);
+        }
+        loop {
+            match self.socket.recv().await {
+                Some(Ok(Message::Text(t))) => return Some(BridgeInFrame::Text(t)),
+                Some(Ok(Message::Binary(b))) => return Some(BridgeInFrame::Binary(b)),
+                Some(Ok(Message::Close(_))) => return Some(BridgeInFrame::ClosedByClient),
+                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
                 Some(Err(e)) => {
                     debug!(target: "voice", err = %e, "websocket recv errored; treating as close");
                     return None;

@@ -112,6 +112,16 @@ pub struct BridgeContext {
     pub transcript_sink: Option<SharedTranscriptSink>,
     pub approval_bridge: VoiceApprovalBridge,
     pub budget: BudgetEnforcer,
+    /// Resolved on-disk PCM path when `[voice] retain_audio = true`.
+    /// `None` means the operator has retention off (default) and the
+    /// `voice_sessions.audio_path` column stays NULL. iter 10 wires
+    /// the route handler to populate this from
+    /// [`super::persistence::audio_path_for`]; the actual byte-stream
+    /// writes are still parked behind the `corlinman-voice` package
+    /// listed in `phase4-roadmap.md:330`. Recording the path now means
+    /// a follow-on iter that adds the writer doesn't have to plumb a
+    /// new field through the bridge surface.
+    pub audio_path: Option<String>,
     /// Wallclock-time tick interval for budget polling. Production =
     /// `Duration::from_secs(1)`; tests crank this down to a few ms.
     pub tick_interval: Duration,
@@ -578,7 +588,13 @@ async fn finalise(
                     id: ctx.session_id.clone(),
                     ended_at: ctx.started_at_unix + duration_secs as i64,
                     duration_secs: duration_secs as i64,
-                    audio_path: None, // iter 9 doesn't retain audio; iter 10+ wires this
+                    // Iter 10: when `[voice] retain_audio = true`, the
+                    // route handler resolves the path via
+                    // `audio_path_for(...)` and threads it through here
+                    // so the row reflects the operator's retention
+                    // intent. `None` means retention is off (default)
+                    // → column stays NULL.
+                    audio_path: ctx.audio_path.clone(),
                     transcript_text: transcript_for_row.clone(),
                     end_reason,
                 })
@@ -695,6 +711,7 @@ mod tests {
                 transcript_sink: sink,
                 approval_bridge: VoiceApprovalBridge::no_gate("sk-test"),
                 budget,
+                audio_path: None,
                 tick_interval: Duration::from_millis(20),
                 cancel: cancel.clone(),
             },
@@ -1106,6 +1123,126 @@ mod tests {
             .unwrap();
         let outcome = bridge_handle.await.unwrap();
         assert_eq!(outcome.end_reason, VoiceEndReason::Graceful);
+    }
+
+    #[tokio::test]
+    async fn audio_path_threads_into_voice_sessions_row() {
+        // Iter 10 fix #2: when the route handler computes an
+        // audio_path (because [voice] retain_audio = true), the bridge
+        // must persist it verbatim to voice_sessions.audio_path so the
+        // retention sweeper (a follow-on iter) can find the file.
+        let provider: SharedVoiceProvider = Arc::new(MockEchoProvider::new("mock"));
+        let store: SharedVoiceSessionStore =
+            Arc::new(SqliteVoiceSessionStore::open_in_memory().await.unwrap());
+        let spend: Arc<dyn VoiceSpend> = Arc::new(InMemoryVoiceSpend::new());
+        let (mut ctx, _cancel) =
+            ctx_with_provider(provider, cfg(30, 600), Some(store.clone()), None, spend);
+        let want = "/tmp/corlinman-test/tenants/default/voice/voice-test.pcm".to_string();
+        ctx.audio_path = Some(want.clone());
+        let (io, mut handle) = InMemoryIo::new();
+
+        let bridge_handle = tokio::spawn(run_bridge(io, ctx));
+        let _ = tokio::time::timeout(Duration::from_millis(300), handle.outbound_rx.recv()).await;
+        handle
+            .inbound_tx
+            .send(BridgeInFrame::Text(r#"{"type":"end"}"#.into()))
+            .await
+            .unwrap();
+        let _ = bridge_handle.await.unwrap();
+
+        let row = store.fetch("voice-test").await.unwrap().unwrap();
+        assert_eq!(
+            row.audio_path.as_deref(),
+            Some(want.as_str()),
+            "audio_path threaded from BridgeContext into row"
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_path_none_keeps_voice_sessions_audio_path_null() {
+        // Default-config path (retain_audio = false): bridge writes
+        // NULL, no leaked path. Pinned because flipping the field's
+        // default would silently start retaining session paths.
+        let provider: SharedVoiceProvider = Arc::new(MockEchoProvider::new("mock"));
+        let store: SharedVoiceSessionStore =
+            Arc::new(SqliteVoiceSessionStore::open_in_memory().await.unwrap());
+        let spend: Arc<dyn VoiceSpend> = Arc::new(InMemoryVoiceSpend::new());
+        let (ctx, _cancel) = ctx_with_provider(
+            provider,
+            cfg(30, 600),
+            Some(store.clone()),
+            None,
+            spend,
+        );
+        // ctx.audio_path defaults to None via ctx_with_provider.
+        assert!(ctx.audio_path.is_none(), "fixture default = None");
+        let (io, mut handle) = InMemoryIo::new();
+
+        let bridge_handle = tokio::spawn(run_bridge(io, ctx));
+        let _ = tokio::time::timeout(Duration::from_millis(300), handle.outbound_rx.recv()).await;
+        handle
+            .inbound_tx
+            .send(BridgeInFrame::Text(r#"{"type":"end"}"#.into()))
+            .await
+            .unwrap();
+        let _ = bridge_handle.await.unwrap();
+
+        let row = store.fetch("voice-test").await.unwrap().unwrap();
+        assert!(row.audio_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_key_from_context_drives_transcript_sink_writes() {
+        // Iter 10 fix #1: the route handler now extracts session_key
+        // from the inbound `start` frame BEFORE building BridgeContext.
+        // Pin the chain end-to-end: a context built with a custom
+        // session_key writes transcript turns under that exact key
+        // (not the synthetic session_id) so the chat session FK lines
+        // up with whatever the client supplied.
+        let provider: SharedVoiceProvider = Arc::new(MockEchoProvider::with_behaviour(
+            "mock",
+            MockBehaviour {
+                user_transcript: "from-client-key".into(),
+                ..Default::default()
+            },
+        ));
+        let sink_concrete = Arc::new(MemoryTranscriptSink::new());
+        let sink: SharedTranscriptSink = sink_concrete.clone();
+        let spend: Arc<dyn VoiceSpend> = Arc::new(InMemoryVoiceSpend::new());
+        let (mut ctx, _cancel) =
+            ctx_with_provider(provider, cfg(30, 600), None, Some(sink), spend);
+        // Simulate the handler extracting a non-default session_key
+        // out of the `start` control frame.
+        ctx.session_key = "client-supplied-key".into();
+        ctx.agent_id = Some("agent-from-start".into());
+        let (io, mut handle) = InMemoryIo::new();
+
+        let bridge_handle = tokio::spawn(run_bridge(io, ctx));
+        let _ = tokio::time::timeout(Duration::from_millis(300), handle.outbound_rx.recv()).await;
+        handle
+            .inbound_tx
+            .send(BridgeInFrame::Binary(vec![0u8; 4]))
+            .await
+            .unwrap();
+        // Drain a few outbound frames so the transcript event lands.
+        for _ in 0..5 {
+            let _ = tokio::time::timeout(Duration::from_millis(150), handle.outbound_rx.recv())
+                .await;
+        }
+        handle
+            .inbound_tx
+            .send(BridgeInFrame::Text(r#"{"type":"end"}"#.into()))
+            .await
+            .unwrap();
+        let _ = bridge_handle.await.unwrap();
+
+        let snap = sink_concrete.snapshot().await;
+        assert!(
+            snap.iter().any(|t| t.session_key == "client-supplied-key"
+                && t.role == "user"
+                && t.text == "from-client-key"),
+            "expected sink turn under client-supplied session_key; got {snap:?}"
+        );
     }
 
     #[tokio::test]
