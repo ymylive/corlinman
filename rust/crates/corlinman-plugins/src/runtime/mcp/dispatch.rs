@@ -278,6 +278,12 @@ pub(crate) fn adapter_error_to_corlinman(err: AdapterError, plugin: &str) -> Cor
             }
             other => format!("MCP {plugin}.{tool} call failed: {other}"),
         },
+        AdapterError::Disabled(name) => {
+            format!("MCP plugin {name:?} is administratively disabled")
+        }
+        AdapterError::SentinelIo { plugin, message } => {
+            format!("MCP plugin {plugin:?} sentinel I/O error: {message}")
+        }
     };
     CorlinmanError::PluginRuntime {
         plugin: plugin.to_string(),

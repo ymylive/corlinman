@@ -133,6 +133,17 @@ pub enum AdapterError {
     /// upstream server) doesn't expose.
     #[error("tool {tool:?} not exposed by plugin {plugin:?}")]
     UnknownTool { plugin: String, tool: String },
+
+    /// The plugin is administratively disabled (`.disabled` sentinel
+    /// in the plugin's manifest dir, or admin invoked
+    /// [`McpAdapter::disable_one`] this session). Iter 8.
+    #[error("plugin {0:?} is administratively disabled")]
+    Disabled(String),
+
+    /// Persisting / removing the `.disabled` sentinel file failed.
+    /// Iter 8.
+    #[error("failed to persist disabled flag for {plugin:?}: {message}")]
+    SentinelIo { plugin: String, message: String },
 }
 
 /// Per-plugin runtime state held by the adapter.
@@ -151,6 +162,11 @@ struct PluginSlot {
     /// verbatim — corlinman's dispatcher already validates against
     /// JSON-Schema-draft-07, no shape conversion needed.
     resolved_tools: Vec<Tool>,
+    /// Iter 8: when true, `start_one` is a no-op and `call_tool` rejects
+    /// with `Disabled`. Persisted via a `.disabled` sentinel file in the
+    /// plugin's manifest dir so the disabled state survives a gateway
+    /// restart without a second config file.
+    disabled: bool,
 }
 
 impl PluginSlot {
@@ -217,6 +233,9 @@ impl McpAdapter {
             return Err(AdapterError::MissingMcpConfig(manifest.name.clone()));
         }
         let name = manifest.name.clone();
+        // Honour any `.disabled` sentinel left by a prior admin
+        // disable: the operator's intent must survive gateway restart.
+        let disabled = sentinel_path(&cwd).exists();
         let slot = PluginSlot {
             manifest,
             cwd,
@@ -224,6 +243,7 @@ impl McpAdapter {
             client: None,
             server_info: None,
             resolved_tools: Vec::new(),
+            disabled,
         };
         self.slots.write().await.insert(name, slot);
         Ok(())
@@ -272,6 +292,15 @@ impl McpAdapter {
             let slot = g
                 .get(name)
                 .ok_or_else(|| AdapterError::UnknownPlugin(name.to_string()))?;
+            if slot.disabled {
+                // A disabled slot is a deliberate admin no-op: respect
+                // the sentinel and return without spawning. The status
+                // stays whatever it was (Idle on first register; Stopped
+                // after a previous disable_one). This keeps `disable +
+                // start` an idempotent fail-safe rather than a silent
+                // spawn.
+                return Err(AdapterError::Disabled(name.to_string()));
+            }
             if slot.status == AdapterStatus::Initialized {
                 return Ok(());
             }
@@ -356,6 +385,135 @@ impl McpAdapter {
             c.shutdown().await;
         }
         Ok(())
+    }
+
+    /// Iter 8: read-only check used by admin endpoints to render the
+    /// "disabled" banner without forcing a spawn attempt.
+    pub async fn is_disabled(&self, name: &str) -> Result<bool, AdapterError> {
+        let g = self.slots.read().await;
+        g.get(name)
+            .map(|s| s.disabled)
+            .ok_or_else(|| AdapterError::UnknownPlugin(name.to_string()))
+    }
+
+    /// Iter 8: administratively disable a plugin. Stops the child if
+    /// running, flags the slot so `start_one` is a no-op, and writes
+    /// a `.disabled` sentinel into the plugin's manifest dir so the
+    /// state persists across gateway restart.
+    ///
+    /// Idempotent: calling `disable_one` on an already-disabled slot
+    /// returns `Ok(())` without re-touching the filesystem.
+    ///
+    /// Sentinel-write failure surfaces as
+    /// [`AdapterError::SentinelIo`]; the in-memory `disabled` flag
+    /// is rolled back so admin can retry.
+    pub async fn disable_one(&self, name: &str) -> Result<(), AdapterError> {
+        let (already, cwd, client) = {
+            let mut g = self.slots.write().await;
+            let slot = g
+                .get_mut(name)
+                .ok_or_else(|| AdapterError::UnknownPlugin(name.to_string()))?;
+            let already = slot.disabled;
+            slot.disabled = true;
+            slot.server_info = None;
+            slot.resolved_tools.clear();
+            // Mark Stopped so admin/status reflects "disable took the
+            // child down". We deliberately don't introduce a separate
+            // `Disabled` AdapterStatus variant — the `.disabled`
+            // sentinel + `is_disabled()` is the single source of truth
+            // and adding a status variant would force every consumer
+            // to handle a fifth state.
+            if !already {
+                slot.status = AdapterStatus::Stopped;
+            }
+            (already, slot.cwd.clone(), slot.client.take())
+        };
+
+        if let Some(c) = client {
+            c.shutdown().await;
+        }
+
+        if already {
+            return Ok(());
+        }
+
+        let path = sentinel_path(&cwd);
+        if let Err(err) = std::fs::write(&path, b"disabled\n") {
+            // Roll back the in-memory flag so admin sees the
+            // failure rather than a half-applied state.
+            let mut g = self.slots.write().await;
+            if let Some(slot) = g.get_mut(name) {
+                slot.disabled = false;
+            }
+            return Err(AdapterError::SentinelIo {
+                plugin: name.to_string(),
+                message: format!(
+                    "writing sentinel {}: {err}",
+                    path.display()
+                ),
+            });
+        }
+        tracing::info!(plugin = name, sentinel = %path.display(), "MCP plugin disabled");
+        Ok(())
+    }
+
+    /// Iter 8: re-enable a plugin previously disabled. Removes the
+    /// `.disabled` sentinel file (best-effort: a missing file is fine)
+    /// and clears the in-memory flag. Does NOT auto-spawn — admin must
+    /// follow up with `start_one` (or rely on autostart-on-next-call).
+    pub async fn enable_one(&self, name: &str) -> Result<(), AdapterError> {
+        let cwd = {
+            let mut g = self.slots.write().await;
+            let slot = g
+                .get_mut(name)
+                .ok_or_else(|| AdapterError::UnknownPlugin(name.to_string()))?;
+            if !slot.disabled {
+                return Ok(());
+            }
+            slot.disabled = false;
+            slot.cwd.clone()
+        };
+
+        let path = sentinel_path(&cwd);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                // Roll back: keep the slot disabled so the on-disk
+                // sentinel and in-memory flag stay aligned. The admin
+                // surface returns 500 and ops can retry.
+                let mut g = self.slots.write().await;
+                if let Some(slot) = g.get_mut(name) {
+                    slot.disabled = true;
+                }
+                return Err(AdapterError::SentinelIo {
+                    plugin: name.to_string(),
+                    message: format!(
+                        "removing sentinel {}: {err}",
+                        path.display()
+                    ),
+                });
+            }
+        }
+        tracing::info!(plugin = name, "MCP plugin re-enabled");
+        Ok(())
+    }
+
+    /// Iter 8: stop + start in one shot. Used by
+    /// `POST /admin/plugins/:name/restart` so an operator can recover
+    /// from a `Failed` slot without restarting the gateway. If the
+    /// plugin is currently disabled the call returns
+    /// [`AdapterError::Disabled`] without touching the child, matching
+    /// `start_one`'s precedent.
+    pub async fn restart_one(&self, name: &str) -> Result<(), AdapterError> {
+        // Allow restart while currently Failed by clearing the slot's
+        // in-memory state via stop_one first; start_one's
+        // single-flight + Spawning gate handles the race against any
+        // concurrent admin call.
+        self.stop_one(name).await?;
+        // After stop_one the slot is in `Stopped`; start_one does the
+        // disabled check itself.
+        self.start_one(name).await
     }
 
     /// Internal: do the spawn + initialize + tools/list pipeline.
@@ -535,6 +693,9 @@ impl McpAdapter {
             let slot = g
                 .get(name)
                 .ok_or_else(|| AdapterError::UnknownPlugin(name.to_string()))?;
+            if slot.disabled {
+                return Err(AdapterError::Disabled(name.to_string()));
+            }
             if !slot.resolved_tools.iter().any(|t| t.name == tool) {
                 return Err(AdapterError::UnknownTool {
                     plugin: name.to_string(),
@@ -579,6 +740,24 @@ impl McpAdapter {
         Ok(result)
     }
 
+}
+
+/// Filename of the sentinel file used to persist the
+/// administratively-disabled state of an MCP plugin. Iter 8.
+///
+/// Living in the plugin's manifest dir means the sentinel travels
+/// with the manifest itself (a `git mv` of the dir keeps it
+/// disabled; deleting the dir removes the disable along with the
+/// plugin). The reloader (M6) watches the same directory, so a
+/// future enhancement could let `touch .disabled` outside the
+/// admin API toggle the state — for iter 8 we only require the
+/// admin path to use it.
+pub const DISABLED_SENTINEL_FILENAME: &str = ".disabled";
+
+/// Resolve the sentinel path for a plugin given its `cwd`
+/// (always the manifest directory; see `register`'s cwd argument).
+fn sentinel_path(cwd: &std::path::Path) -> std::path::PathBuf {
+    cwd.join(DISABLED_SENTINEL_FILENAME)
 }
 
 /// Apply a [`ToolsAllowlist`] to the upstream `tools/list` payload and
@@ -1196,5 +1375,244 @@ mod tests {
         // Description fallback: None -> "" in projected Tool.
         assert_eq!(all[1].description, "");
         assert_eq!(all[0].description, "alpha");
+    }
+
+    // ----- Iter 8: disable / enable / restart admin surface -----
+
+    /// `disable_one` stops the child, writes the `.disabled` sentinel,
+    /// and flips `is_disabled` to true. A subsequent `start_one` is a
+    /// no-op that surfaces `Disabled` so admin sees the intended state.
+    #[tokio::test]
+    async fn disable_one_persists_sentinel_and_blocks_start() {
+        if which::which("awk").is_err() {
+            eprintln!("awk not on PATH; skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (cmd, args) = awk_initialize_responder();
+        let m = manifest("dis", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let adapter = McpAdapter::new();
+        adapter
+            .register(m, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        adapter.start_one("dis").await.unwrap();
+        assert!(adapter.is_alive("dis").await.unwrap());
+
+        adapter.disable_one("dis").await.unwrap();
+        assert!(adapter.is_disabled("dis").await.unwrap());
+        assert!(!adapter.is_alive("dis").await.unwrap(), "child must be down");
+        assert_eq!(
+            adapter.status("dis").await.unwrap(),
+            AdapterStatus::Stopped
+        );
+
+        // Sentinel exists on disk.
+        let sentinel = tmp.path().join(DISABLED_SENTINEL_FILENAME);
+        assert!(sentinel.exists(), "sentinel must persist on disk");
+
+        // start_one returns Disabled.
+        let err = adapter
+            .start_one("dis")
+            .await
+            .expect_err("disabled slot must reject start_one");
+        assert!(
+            matches!(err, AdapterError::Disabled(_)),
+            "expected Disabled, got {err:?}"
+        );
+    }
+
+    /// `enable_one` removes the sentinel and clears the flag. A
+    /// subsequent `start_one` succeeds.
+    #[tokio::test]
+    async fn enable_one_clears_sentinel_and_allows_start() {
+        if which::which("awk").is_err() {
+            eprintln!("awk not on PATH; skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (cmd, args) = awk_initialize_responder();
+        let m = manifest("ena", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let adapter = McpAdapter::new();
+        adapter
+            .register(m, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        adapter.start_one("ena").await.unwrap();
+        adapter.disable_one("ena").await.unwrap();
+
+        adapter.enable_one("ena").await.unwrap();
+        assert!(!adapter.is_disabled("ena").await.unwrap());
+        let sentinel = tmp.path().join(DISABLED_SENTINEL_FILENAME);
+        assert!(!sentinel.exists(), "sentinel must be removed");
+
+        adapter
+            .start_one("ena")
+            .await
+            .expect("start must succeed after enable");
+        assert!(adapter.is_alive("ena").await.unwrap());
+    }
+
+    /// A `.disabled` sentinel left over from a previous gateway run
+    /// keeps the slot disabled across re-register: the new adapter
+    /// honours the file without admin reasserting the disable.
+    #[tokio::test]
+    async fn disabled_sentinel_persists_across_register() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(DISABLED_SENTINEL_FILENAME),
+            b"disabled\n",
+        )
+        .unwrap();
+
+        let m = manifest(
+            "ghost-disabled",
+            "/definitely/not/real/c2-iter8",
+            &[],
+            5_000,
+        );
+        let adapter = McpAdapter::new();
+        adapter
+            .register(m, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        assert!(adapter.is_disabled("ghost-disabled").await.unwrap());
+
+        // start_one rejects without trying to spawn (the binary doesn't
+        // exist, so a *Spawn* error here would mean the disabled gate
+        // missed).
+        let err = adapter
+            .start_one("ghost-disabled")
+            .await
+            .expect_err("disabled-on-register must reject start");
+        assert!(
+            matches!(err, AdapterError::Disabled(_)),
+            "expected Disabled, got {err:?}"
+        );
+    }
+
+    /// `disable_one` is idempotent: a second call on an already-
+    /// disabled slot succeeds without rewriting the sentinel.
+    #[tokio::test]
+    async fn disable_one_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = manifest("idem-dis", "/no-binary", &[], 5_000);
+        let adapter = McpAdapter::new();
+        adapter
+            .register(m, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        adapter.disable_one("idem-dis").await.unwrap();
+        adapter
+            .disable_one("idem-dis")
+            .await
+            .expect("idempotent second disable must succeed");
+        assert!(adapter.is_disabled("idem-dis").await.unwrap());
+    }
+
+    /// `enable_one` is idempotent: a second call (or a call on a
+    /// never-disabled slot) is a no-op.
+    #[tokio::test]
+    async fn enable_one_is_idempotent_when_not_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = manifest("idem-ena", "/no-binary", &[], 5_000);
+        let adapter = McpAdapter::new();
+        adapter
+            .register(m, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        adapter
+            .enable_one("idem-ena")
+            .await
+            .expect("enable on already-enabled slot is no-op");
+        assert!(!adapter.is_disabled("idem-ena").await.unwrap());
+    }
+
+    /// `restart_one` brings a `Stopped` slot back to `Initialized`
+    /// without admin needing two calls.
+    #[tokio::test]
+    async fn restart_one_recovers_stopped_slot() {
+        if which::which("awk").is_err() {
+            eprintln!("awk not on PATH; skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (cmd, args) = awk_initialize_responder();
+        let m = manifest("rest", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let adapter = McpAdapter::new();
+        adapter
+            .register(m, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        adapter.start_one("rest").await.unwrap();
+        adapter.stop_one("rest").await.unwrap();
+        assert_eq!(
+            adapter.status("rest").await.unwrap(),
+            AdapterStatus::Stopped
+        );
+
+        adapter.restart_one("rest").await.expect("restart succeeds");
+        assert_eq!(
+            adapter.status("rest").await.unwrap(),
+            AdapterStatus::Initialized
+        );
+    }
+
+    /// `restart_one` on a disabled slot returns `Disabled` without
+    /// touching the child (sentinel takes precedence over restart
+    /// requests).
+    #[tokio::test]
+    async fn restart_one_respects_disabled_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = manifest("rest-dis", "/no-binary", &[], 5_000);
+        let adapter = McpAdapter::new();
+        adapter
+            .register(m, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        adapter.disable_one("rest-dis").await.unwrap();
+        let err = adapter
+            .restart_one("rest-dis")
+            .await
+            .expect_err("disabled slot must reject restart");
+        assert!(
+            matches!(err, AdapterError::Disabled(_)),
+            "expected Disabled, got {err:?}"
+        );
+    }
+
+    /// `call_tool` on a disabled slot rejects with `Disabled` even if
+    /// the slot was previously initialized (the disable transition
+    /// stops the child, so the resolved tools list also clears).
+    #[tokio::test]
+    async fn call_tool_rejects_when_disabled() {
+        if which::which("awk").is_err() {
+            eprintln!("awk not on PATH; skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (cmd, args) = awk_initialize_responder();
+        let m = manifest("dis-call", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let adapter = McpAdapter::new();
+        adapter
+            .register(m, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        adapter.start_one("dis-call").await.unwrap();
+        adapter.disable_one("dis-call").await.unwrap();
+
+        let err = adapter
+            .call_tool(
+                "dis-call",
+                "echo",
+                JsonValue::Object(Default::default()),
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .expect_err("disabled slot must reject calls");
+        assert!(
+            matches!(err, AdapterError::Disabled(_)),
+            "expected Disabled, got {err:?}"
+        );
     }
 }
