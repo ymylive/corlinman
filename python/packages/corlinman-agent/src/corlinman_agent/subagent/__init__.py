@@ -21,9 +21,18 @@ This iteration (iter 4 of the D3 plan in
   — those live behind the Rust supervisor (iter 5+) and downstream
   iters in this module.
 
-What's intentionally NOT here in iter 4: the ``subagent.spawn`` tool
-registration in the agent registry (iter 8), the PyO3 bridge wiring
-(iter 5), and tool-allowlist filtering (iter 7).
+Iter 7 added :mod:`.runner` tool-allowlist filtering and the
+escalation-reject envelope. Iter 8 (this revision) ships
+:mod:`.tool_wrapper`:
+
+* :func:`subagent_spawn_tool_schema` — the OpenAI descriptor parents
+  drop into ``ChatStart.tools`` so the LLM can emit
+  ``ToolCallEvent("subagent.spawn", {...})``;
+* :func:`dispatch_subagent_spawn` — async shim that takes one tool
+  call's ``args_json``, drives :func:`run_child` (subject to the Rust
+  supervisor's slot acquire), and returns the JSON-encoded
+  :class:`TaskResult` the gateway feeds back as
+  :class:`ToolResult.content`.
 """
 
 from __future__ import annotations
@@ -43,8 +52,16 @@ from corlinman_agent.subagent.runner import (
     TOOL_ALLOWLIST_ESCALATION_ERROR,
     run_child,
 )
+from corlinman_agent.subagent.tool_wrapper import (
+    AGENT_NOT_FOUND_ERROR,
+    ARGS_INVALID_ERROR,
+    dispatch_subagent_spawn,
+    subagent_spawn_tool_schema,
+)
 
 __all__ = [
+    "AGENT_NOT_FOUND_ERROR",
+    "ARGS_INVALID_ERROR",
     "DEFAULT_MAX_DEPTH",
     "DEFAULT_MAX_TOOL_CALLS",
     "DEFAULT_MAX_WALL_SECONDS",
@@ -55,5 +72,7 @@ __all__ = [
     "TaskResult",
     "TaskSpec",
     "ToolCallSummary",
+    "dispatch_subagent_spawn",
     "run_child",
+    "subagent_spawn_tool_schema",
 ]
