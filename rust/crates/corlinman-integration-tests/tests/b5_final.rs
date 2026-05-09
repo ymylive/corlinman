@@ -628,12 +628,20 @@ async fn full_batch_chain() {
     // wall clock even though no individual sub-deadline trips. Per-run
     // local timing on a hot cache stays ~150-300ms, but contended runs
     // observed up to ~6-8s — well below the per-deadline ceilings, but
-    // over the previous 5s sentinel. Bump to 30s so this stays a
-    // catastrophic-regression catch (e.g. an accidentally synchronous
-    // server boot loop) and stops red-flagging healthy contended runs.
+    // over the previous 5s sentinel.
+    //
+    // Phase 4 Wave 3+4 close-out merge bumped the workspace test load
+    // substantially (8 stream branches' worth of new integration tests
+    // running in parallel under `cargo test --workspace`), pushing
+    // observed wall-clock to 30-65s on this contended path even though
+    // no individual sub-deadline tripped. Raise the sentinel to 120s
+    // so it stays a smoke-detector for the synchronous-boot-loop class
+    // of bug (those would run for minutes) without red-flagging healthy
+    // contended runs. The per-deadline ceilings inside the chain
+    // continue to enforce the actual correctness invariants.
     let elapsed = overall.elapsed();
     assert!(
-        elapsed < Duration::from_secs(30),
-        "full_batch_chain must complete under 30s, took {elapsed:?}",
+        elapsed < Duration::from_secs(120),
+        "full_batch_chain must complete under 120s, took {elapsed:?}",
     );
 }

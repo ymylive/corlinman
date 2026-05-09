@@ -34,7 +34,11 @@ command = "true"
     let (_dir, path) = write_manifest(body);
     let m = parse_manifest_file(&path).expect("v1 manifest must parse");
 
-    assert_eq!(m.manifest_version, 2, "v1 must migrate to v2 in-memory");
+    // C2 (Phase 4 W3) raised MAX_SUPPORTED_MANIFEST_VERSION to 3 to host
+    // the new `[mcp]` table; both v1 and v2 manifests now migrate
+    // forward to v3 in-memory. Test renamed only in spirit — the
+    // round-trip target is the latest manifest version in tree.
+    assert_eq!(m.manifest_version, 3, "v1 must migrate to current manifest version in-memory");
     assert_eq!(m.protocols, vec!["openai_function".to_string()]);
     assert!(m.hooks.is_empty());
     assert!(m.skill_refs.is_empty());
@@ -59,7 +63,10 @@ args = ["main.py"]
     let (_dir, path) = write_manifest(body);
     let m = parse_manifest_file(&path).expect("v2 manifest must parse");
 
-    assert_eq!(m.manifest_version, 2);
+    // Same migration story as v1: explicit v2 also forward-migrates to
+    // v3 once parsed, so all v1+v2 manifests converge on the current
+    // schema version regardless of the source declaration.
+    assert_eq!(m.manifest_version, 3);
     assert_eq!(m.protocols, vec!["openai_function", "block"]);
     assert_eq!(m.hooks, vec!["message.received"]);
     assert_eq!(m.skill_refs, vec!["search"]);
