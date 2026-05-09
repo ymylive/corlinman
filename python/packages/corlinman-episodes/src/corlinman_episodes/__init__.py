@@ -17,6 +17,16 @@ Later iters wire the gateway resolver and the on-demand admin route.
 
 from __future__ import annotations
 
+from corlinman_episodes.archive import (
+    ARCHIVED_SENTINEL,
+    COLD_DIR_NAME,
+    COLD_EXEMPT_KINDS,
+    ArchiveSummary,
+    archive_unreferenced_episodes,
+    cold_file_path,
+    iter_cold_files,
+    render_cold_file,
+)
 from corlinman_episodes.classifier import classify
 from corlinman_episodes.cli import (
     main as cli_main,
@@ -80,6 +90,9 @@ from corlinman_episodes.store import (
 )
 
 __all__ = [
+    "ARCHIVED_SENTINEL",
+    "COLD_DIR_NAME",
+    "COLD_EXEMPT_KINDS",
     "DEFAULT_TENANT_ID",
     "HOOK_KINDS_OF_INTEREST",
     "PROMPT_SEGMENTS",
@@ -88,6 +101,7 @@ __all__ = [
     "RUN_STATUS_RUNNING",
     "RUN_STATUS_SKIPPED_EMPTY",
     "SCHEMA_SQL",
+    "ArchiveSummary",
     "DistillationRun",
     "DistilledSummary",
     "EmbedSummary",
@@ -111,13 +125,16 @@ __all__ = [
     "SourcePaths",
     "SummaryFn",
     "SummaryProvider",
+    "archive_unreferenced_episodes",
     "classify",
     "cli_main",
+    "cold_file_path",
     "collect_bundles",
     "decode_embedding",
     "distill",
     "encode_embedding",
     "episodes_run_once",
+    "iter_cold_files",
     "make_constant_provider",
     "make_echo_provider",
     "new_episode_id",
@@ -126,6 +143,7 @@ __all__ = [
     "redact_pii",
     "register_embedding_provider_factory",
     "register_summary_provider_factory",
+    "render_cold_file",
     "run_distill_once",
     "run_embed_pending",
     "score",
