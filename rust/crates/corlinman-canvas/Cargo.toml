@@ -34,6 +34,11 @@ pulldown-cmark = { version = "0.10", default-features = false }
 # Iter 3 — CSV table source. Tiny crate; the `serde` feature is
 # off because we hand-walk records.
 csv = "1"
+# Iter 4 — pure-Rust KaTeX implementation. The `katex-rs` crate is a
+# from-scratch port (no JS engine, no V8) — matches the design's
+# "katex-rs (no JS)". `default = []` already, so we pull only the
+# core renderer; `wasm` / `backtrace` features stay off.
+katex-rs = "0.2.4"
 
 [dev-dependencies]
 serde_json = { workspace = true }

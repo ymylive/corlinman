@@ -11,15 +11,15 @@
 //!
 //! - `code`      → syntect-highlighted HTML — **iter 2 (live)**
 //! - `table`     → markdown / CSV → `<table>` — **iter 3 (live)**
-//! - `latex`     → katex-rs → MathML — iter 4
+//! - `latex`     → katex-rs → HTML+MathML — **iter 4 (live)**
 //! - `sparkline` → hand-rolled SVG — iter 5
 //! - `mermaid`   → deno_core sandbox → SVG — iter 6
 //!
 //! Iter 1 landed only the protocol surface and a stub
 //! [`Renderer`] that returned [`CanvasError::Unimplemented`]. Iter 2
 //! wires the `code` adapter (syntect, class-based emission). Iter 3
-//! wires `table`. Other kinds remain `Unimplemented` until their
-//! respective iters.
+//! wires `table`. Iter 4 wires `latex` (pure-Rust `katex-rs`).
+//! Other kinds remain `Unimplemented` until their respective iters.
 //!
 //! Tidepool aesthetic enforcement: every rendered artifact carries a
 //! `theme_class` (one of `"tp-light"` / `"tp-dark"`) plus class-only
@@ -75,6 +75,9 @@ impl Renderer {
                     csv.as_deref(),
                     theme,
                 )
+            }
+            ArtifactBody::Latex { tex, display } => {
+                adapters::latex::render(tex, *display, theme)
             }
             other_kind => Err(CanvasError::Unimplemented {
                 kind: artifact_body_kind(other_kind),

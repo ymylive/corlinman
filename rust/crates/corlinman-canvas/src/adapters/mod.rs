@@ -6,4 +6,5 @@
 //! lives on the [`crate::Renderer`] handle and is passed in.
 
 pub mod code;
+pub mod latex;
 pub mod table;
