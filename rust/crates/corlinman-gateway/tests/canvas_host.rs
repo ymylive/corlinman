@@ -167,6 +167,16 @@ async fn disabled_endpoints_return_503() {
             Some(json!({"session_id": "cs_00000000", "kind": "a2ui_push"})),
         ),
         ("GET", "/canvas/session/cs_00000000/events", None),
+        // Iter 8 — `/canvas/render` shares the disabled gate.
+        (
+            "POST",
+            "/canvas/render",
+            Some(json!({
+                "artifact_kind": "code",
+                "body": {"language": "rust", "source": "fn main(){}"},
+                "idempotency_key": "art_t",
+            })),
+        ),
     ] {
         let url = gw.url(path);
         let mut req = match method {
@@ -419,6 +429,250 @@ async fn auth_token_required_for_all_three_routes() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    gw.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 W3 C3 iter 8 — `/canvas/render` integration tests.
+//
+// These hit the new synchronous renderer endpoint. Together with the
+// disabled-route assertion at `disabled_endpoints_return_503` (which
+// the iter-8 patch extends with `/canvas/render`) they cover:
+//
+//   - handshake (auth + disabled-config gating)
+//   - happy path for each pure-Rust artifact kind (code/table/latex/sparkline)
+//   - typed adapter-error surface for the gated mermaid build
+//   - 400 on malformed payloads, 413 on oversize bodies
+//
+// The harness is the same `spawn_gateway` used by Phase-1 tests.
+// ---------------------------------------------------------------------------
+
+async fn render_ok(gw: &Gateway, c: &reqwest::Client, payload: Value) -> Value {
+    let resp = post_json(c, &gw.url("/canvas/render"), payload).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK, "render");
+    resp.json().await.unwrap()
+}
+
+#[tokio::test]
+async fn render_requires_auth() {
+    let gw = spawn_gateway(make_config(true)).await;
+    let c = client();
+    let resp = c
+        .post(gw.url("/canvas/render"))
+        .header("content-type", "application/json")
+        .body(
+            json!({
+                "artifact_kind": "code",
+                "body": {"language": "rust", "source": "fn main(){}"},
+                "idempotency_key": "art_t",
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    gw.shutdown().await;
+}
+
+#[tokio::test]
+async fn render_code_artifact_returns_html_and_hash() {
+    let gw = spawn_gateway(make_config(true)).await;
+    let c = client();
+
+    let v = render_ok(
+        &gw,
+        &c,
+        json!({
+            "artifact_kind": "code",
+            "body": {"language": "rust", "source": "fn main() { let x = 1; }"},
+            "idempotency_key": "art_code",
+            "theme_hint": "tp-light",
+        }),
+    )
+    .await;
+
+    let html = v["html_fragment"].as_str().unwrap();
+    assert!(html.contains("cn-canvas-code"), "wrapper class: {html}");
+    assert_eq!(v["render_kind"], "code");
+    assert_eq!(v["theme_class"], "tp-light");
+    let hash = v["content_hash"].as_str().unwrap();
+    assert_eq!(hash.len(), 64, "blake3 hex: {hash}");
+    assert!(hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+
+    gw.shutdown().await;
+}
+
+#[tokio::test]
+async fn render_table_markdown_artifact() {
+    let gw = spawn_gateway(make_config(true)).await;
+    let c = client();
+
+    let v = render_ok(
+        &gw,
+        &c,
+        json!({
+            "artifact_kind": "table",
+            "body": {"markdown": "| a | b |\n|---|---|\n| 1 | 2 |"},
+            "idempotency_key": "art_table",
+        }),
+    )
+    .await;
+
+    let html = v["html_fragment"].as_str().unwrap();
+    assert!(html.contains("<table"), "table tag: {html}");
+    assert_eq!(v["render_kind"], "table");
+
+    gw.shutdown().await;
+}
+
+#[tokio::test]
+async fn render_latex_artifact() {
+    let gw = spawn_gateway(make_config(true)).await;
+    let c = client();
+
+    let v = render_ok(
+        &gw,
+        &c,
+        json!({
+            "artifact_kind": "latex",
+            "body": {"tex": "x^2 + 1", "display": false},
+            "idempotency_key": "art_latex",
+        }),
+    )
+    .await;
+
+    let html = v["html_fragment"].as_str().unwrap();
+    assert!(html.contains("katex"), "katex marker: {html}");
+    assert_eq!(v["render_kind"], "latex");
+
+    gw.shutdown().await;
+}
+
+#[tokio::test]
+async fn render_sparkline_artifact() {
+    let gw = spawn_gateway(make_config(true)).await;
+    let c = client();
+
+    let v = render_ok(
+        &gw,
+        &c,
+        json!({
+            "artifact_kind": "sparkline",
+            "body": {"values": [1.0, 4.0, 2.0, 9.0], "unit": "tps"},
+            "idempotency_key": "art_spark",
+        }),
+    )
+    .await;
+
+    let html = v["html_fragment"].as_str().unwrap();
+    assert!(html.contains("<svg"), "svg tag: {html}");
+    assert!(html.contains("cn-canvas-spark"), "wrapper class: {html}");
+    assert_eq!(v["render_kind"], "sparkline");
+
+    gw.shutdown().await;
+}
+
+#[tokio::test]
+async fn render_mermaid_returns_adapter_error_when_feature_off() {
+    // The default workspace build does NOT enable `corlinman-canvas`'s
+    // `mermaid` feature (see crate Cargo.toml comment). The adapter
+    // surfaces this as a typed `CanvasError::Adapter`, which the
+    // gateway maps to 422 + `code: "adapter_error"`.
+    let gw = spawn_gateway(make_config(true)).await;
+    let c = client();
+
+    let resp = post_json(
+        &c,
+        &gw.url("/canvas/render"),
+        json!({
+            "artifact_kind": "mermaid",
+            "body": {"diagram": "graph LR; A-->B"},
+            "idempotency_key": "art_merm",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["error"], "render_failed");
+    assert_eq!(v["code"], "adapter_error");
+    assert_eq!(v["artifact_kind"], "mermaid");
+
+    gw.shutdown().await;
+}
+
+#[tokio::test]
+async fn render_invalid_payload_400() {
+    let gw = spawn_gateway(make_config(true)).await;
+    let c = client();
+
+    // Unknown artifact_kind — passes the byte cap, fails serde.
+    let resp = post_json(
+        &c,
+        &gw.url("/canvas/render"),
+        json!({
+            "artifact_kind": "klingon",
+            "body": {"x": 1},
+            "idempotency_key": "art_bad",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["error"], "invalid_payload");
+
+    gw.shutdown().await;
+}
+
+#[tokio::test]
+async fn render_body_too_large_413() {
+    let gw = spawn_gateway(make_config(true)).await;
+    let c = client();
+
+    // 300 KB string — exceeds the 256 KB ceiling. Build the JSON
+    // manually so the cost stays in `body_too_large` and not the
+    // serde codepath.
+    let huge = "a".repeat(300_000);
+    let body = format!(
+        r#"{{"artifact_kind":"code","body":{{"language":"rust","source":"{huge}"}},"idempotency_key":"art_big"}}"#
+    );
+    let resp = c
+        .post(gw.url("/canvas/render"))
+        .header("authorization", basic_auth_header())
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["error"], "body_too_large");
+
+    gw.shutdown().await;
+}
+
+#[tokio::test]
+async fn render_is_cache_stable_across_calls() {
+    // Same payload twice must return the same content_hash and the
+    // same html_fragment. The shared renderer's LRU is exercised by
+    // virtue of the second call hitting the cache; we only assert the
+    // observable post-condition.
+    let gw = spawn_gateway(make_config(true)).await;
+    let c = client();
+
+    let p = json!({
+        "artifact_kind": "code",
+        "body": {"language": "rust", "source": "fn main(){let x = 1;}"},
+        "idempotency_key": "art_dedup",
+        "theme_hint": "tp-dark",
+    });
+    let a = render_ok(&gw, &c, p.clone()).await;
+    let b = render_ok(&gw, &c, p).await;
+
+    assert_eq!(a["content_hash"], b["content_hash"]);
+    assert_eq!(a["html_fragment"], b["html_fragment"]);
+    assert_eq!(a["theme_class"], "tp-dark");
 
     gw.shutdown().await;
 }

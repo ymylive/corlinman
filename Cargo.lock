@@ -993,6 +993,7 @@ dependencies = [
  "bytes",
  "corlinman-agent-client",
  "corlinman-auto-rollback",
+ "corlinman-canvas",
  "corlinman-channels",
  "corlinman-core",
  "corlinman-evolution",

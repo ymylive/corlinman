@@ -1,14 +1,40 @@
-//! `/canvas/*` — Canvas Host protocol endpoints (B5-BE1).
+//! `/canvas/*` — Canvas Host endpoints.
 //!
-//! Three routes, all behind [`crate::middleware::admin_auth::require_admin`]:
+//! Phase 1 (B5-BE1) shipped only the transport / session bookkeeping —
+//! `/canvas/session`, `/canvas/frame`, `/canvas/session/:id/events` —
+//! and was explicit that "there is no renderer here". Phase 4 W3 C3
+//! iter 8 closes that gap by mounting one more route on the same
+//! sub-router:
 //!
 //! - `POST /canvas/session`             — create an in-memory canvas session
 //! - `POST /canvas/frame`               — post a frame event to a session
 //! - `GET  /canvas/session/:id/events`  — Server-Sent Events stream
+//! - `POST /canvas/render`              — **iter 8**: synchronous renderer
 //!
-//! There is **no renderer** here — only the transport / session bookkeeping.
-//! The endpoints are config-gated via `[canvas] host_endpoint_enabled`; when
-//! disabled (the default) every route returns 503 with a structured error.
+//! All four are behind [`crate::middleware::admin_auth::require_admin`]
+//! and gated by `[canvas] host_endpoint_enabled`; when the config flag
+//! is off every route returns 503 with a structured error.
+//!
+//! ## Why a separate `/canvas/render` instead of folding into `/frame`
+//!
+//! `phase4-w3-c3-design.md` § "Implementation order" iter 8 originally
+//! sketched in-line enrichment of `present` frames during the SSE
+//! fan-out. C3 iter 8 instead lands a dedicated synchronous endpoint
+//! because:
+//!
+//! 1. The renderer is a pure function. Surfacing it as a request /
+//!    response makes it independently testable, cacheable at the HTTP
+//!    layer, and reusable from non-canvas-session callers (Swift
+//!    client preview, CLI, future static export).
+//! 2. The Phase-1 SSE machinery stays byte-identical — no new failure
+//!    modes around per-event renderer panics, no new latency on the
+//!    fan-out path.
+//! 3. Producers that want enriched-on-fan-out semantics can issue
+//!    `/canvas/render` first, then `/canvas/frame` with the rendered
+//!    HTML in the payload — explicit, idempotency-key safe.
+//!
+//! Folding the renderer back into `/canvas/frame` is a follow-up
+//! iteration if profiling shows producer round-trip cost matters.
 //!
 //! Session state lives in-process in an `Arc<RwLock<HashMap<...>>>`. This is
 //! intentionally a stub: B5-BE1 only needs the protocol wire-up so downstream
@@ -32,6 +58,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use corlinman_canvas::{CanvasError, CanvasPresentPayload, Renderer};
 use corlinman_core::config::Config;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -42,6 +69,22 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::middleware::admin_auth::{require_admin, AdminAuthState};
+
+// ---------------------------------------------------------------------------
+// Iter 8 — renderer constants
+// ---------------------------------------------------------------------------
+
+/// Per-artifact body byte cap for `POST /canvas/render`. Mirrors the
+/// design's `[canvas] max_artifact_bytes = 262144`. Lives here as a
+/// `const` until C3 extends the `[canvas]` config block; switching to
+/// a config-driven value is a one-line change in `render_artifact`.
+const MAX_ARTIFACT_BYTES: usize = 262_144;
+
+/// Renderer cache capacity. Mirrors the design's
+/// `[canvas] cache_max_entries = 512`. Same trajectory as
+/// [`MAX_ARTIFACT_BYTES`] — flips to config-driven once the C3
+/// `[canvas]` extension lands.
+const RENDERER_CACHE_CAPACITY: usize = 512;
 
 /// Whitelist of accepted `kind` values on `POST /canvas/frame`. Anything else
 /// → 400 `invalid_frame_kind`.
@@ -93,6 +136,12 @@ pub struct CanvasEvent {
 pub struct CanvasState {
     config: Arc<ArcSwap<Config>>,
     sessions: Arc<RwLock<HashMap<String, CanvasSession>>>,
+    /// Iter 8 — content-addressed renderer shared by every
+    /// `/canvas/render` request. The crate's adapters lazy-init their
+    /// own state (syntect `SyntaxSet`, katex `KatexContext`) behind
+    /// `OnceLock`s, so this `Arc<Renderer>` is cheap to clone and the
+    /// LRU is shared across handler invocations.
+    renderer: Arc<Renderer>,
 }
 
 impl CanvasState {
@@ -104,7 +153,11 @@ impl CanvasState {
         tokio::spawn(async move {
             janitor_loop(janitor_sessions).await;
         });
-        Self { config, sessions }
+        Self {
+            config,
+            sessions,
+            renderer: Arc::new(Renderer::with_cache(RENDERER_CACHE_CAPACITY)),
+        }
     }
 }
 
@@ -163,13 +216,17 @@ async fn janitor_loop(sessions: Arc<RwLock<HashMap<String, CanvasSession>>>) {
     }
 }
 
-/// Build the canvas sub-router, wrapped in the admin auth guard. The three
+/// Build the canvas sub-router, wrapped in the admin auth guard. The four
 /// routes share the same [`CanvasState`] + [`AdminAuthState`].
 pub fn router(canvas_state: CanvasState, auth_state: AdminAuthState) -> Router {
     Router::new()
         .route("/canvas/session", post(create_session))
         .route("/canvas/frame", post(post_frame))
         .route("/canvas/session/:id/events", get(stream_events))
+        // Iter 8 — synchronous renderer. Independent of the session
+        // store (caller drives `/canvas/render` followed by an
+        // optional `/canvas/frame` if they want SSE fan-out).
+        .route("/canvas/render", post(render_artifact))
         .with_state(canvas_state)
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
@@ -449,6 +506,111 @@ fn build_sse_stream(
         }
     });
     ReceiverStream::new(rx)
+}
+
+// ---------------------------------------------------------------------------
+// POST /canvas/render — Phase 4 W3 C3 iter 8
+// ---------------------------------------------------------------------------
+
+/// Synchronously render a `present`-frame payload to HTML.
+///
+/// Wire shape mirrors `phase4-w3-c3-design.md` § "Protocol surface":
+///
+/// ```json
+/// // request
+/// {
+///   "artifact_kind": "code",
+///   "body": { "language": "rust", "source": "fn main(){}" },
+///   "idempotency_key": "art_a1b2",
+///   "theme_hint": "tp-light"
+/// }
+///
+/// // 200 response
+/// {
+///   "html_fragment": "<pre class=\"cn-canvas-code\">…</pre>",
+///   "theme_class": "tp-light",
+///   "content_hash": "<64-char hex>",
+///   "render_kind": "code",
+///   "warnings": []
+/// }
+/// ```
+///
+/// Failure modes:
+/// - 503 `canvas_host_disabled` — `[canvas] host_endpoint_enabled = false`.
+/// - 400 `invalid_payload`      — JSON didn't match `CanvasPresentPayload`
+///   (unknown artifact_kind, missing fields, mismatched body shape).
+/// - 413 `body_too_large`       — total body bytes exceed `MAX_ARTIFACT_BYTES`.
+/// - 422 `render_failed`        — adapter / mermaid timeout / oversize SVG /
+///   adapter-specific error. Body carries `code` (`Timeout`,
+///   `BodyTooLarge`, `Adapter`, `UnknownKind`) so the UI fallback panel
+///   knows which lucide icon to show.
+///
+/// Authn / authz: ride the existing `require_admin` layer mounted by
+/// [`router`]. No additional checks here — render itself is a pure
+/// function of its input.
+async fn render_artifact(State(state): State<CanvasState>, body: axum::body::Bytes) -> Response {
+    if !canvas_enabled(&state) {
+        return disabled_response();
+    }
+
+    if body.len() > MAX_ARTIFACT_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({
+                "error": "body_too_large",
+                "max_bytes": MAX_ARTIFACT_BYTES,
+                "actual_bytes": body.len(),
+            })),
+        )
+            .into_response();
+    }
+
+    let payload: CanvasPresentPayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_payload",
+                    "message": e.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match state.renderer.render(&payload) {
+        Ok(art) => (StatusCode::OK, Json(art)).into_response(),
+        Err(err) => render_error_response(err),
+    }
+}
+
+/// Map a [`CanvasError`] from the renderer into a structured 4xx
+/// response. The UI's `canvas-artifact-error` component (iter 9) keys
+/// off `code` to pick its lucide icon and messaging.
+fn render_error_response(err: CanvasError) -> Response {
+    let (status, code, kind) = match &err {
+        CanvasError::Unimplemented { kind } => (StatusCode::BAD_REQUEST, "unimplemented", Some(kind)),
+        CanvasError::UnknownKind(_) => (StatusCode::BAD_REQUEST, "unknown_kind", None),
+        CanvasError::BodyTooLarge { kind, .. } => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "body_too_large", Some(kind))
+        }
+        CanvasError::Timeout { kind, .. } => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "timeout", Some(kind))
+        }
+        CanvasError::Adapter { kind, .. } => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "adapter_error", Some(kind))
+        }
+    };
+    let mut body = json!({
+        "error": "render_failed",
+        "code": code,
+        "message": err.to_string(),
+    });
+    if let Some(kind) = kind {
+        body["artifact_kind"] = json!(kind.as_str());
+    }
+    (status, Json(body)).into_response()
 }
 
 // ---------------------------------------------------------------------------
