@@ -31,7 +31,10 @@ mod id;
 mod path;
 mod pool;
 
-pub use admin_schema::{AdminDb, AdminDbError, AdminRow, FederationPeer, TenantRow};
+pub use admin_schema::{
+    hash_api_key_token, AdminDb, AdminDbError, AdminRow, ApiKeyRow, FederationPeer, MintedApiKey,
+    TenantRow,
+};
 pub use id::{TenantId, TenantIdError, DEFAULT_TENANT_ID, TENANT_SLUG_REGEX_STR};
 pub use path::{tenant_db_path, tenant_root_dir};
 pub use pool::{TenantPool, TenantPoolError};

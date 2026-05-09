@@ -86,6 +86,38 @@ CREATE TABLE IF NOT EXISTS tenant_federation_peers (
 );
 CREATE INDEX IF NOT EXISTS idx_federation_peers_source
     ON tenant_federation_peers(source_tenant_id);
+
+-- Phase 4 W3 C4 iter 2: per-(tenant, username) bearer tokens minted via
+-- `POST /admin/api_keys` for native clients. Stores only the sha256 hash
+-- of the cleartext token; the operator is shown the cleartext **once**
+-- on the response to the mint call. Subsequent listings expose the
+-- key id + label + scope + last_used_at, never the cleartext.
+--
+-- `scope` is a free-form string ("chat" today; future: "chat,admin",
+-- "embeddings", etc.). We deliberately keep this textual rather than a
+-- typed enum so adding a new scope at gateway layer doesn't require an
+-- admin-DB schema migration. The gateway's auth middleware (when wired)
+-- splits on comma and matches against the route's required scope.
+--
+-- `revoked_at` is `NULL` for active rows; populated to a unix-millis
+-- stamp once an admin revokes the key. Revoked rows stay in the table
+-- so audit trails survive — callers filter on `revoked_at IS NULL` to
+-- get the active set.
+CREATE TABLE IF NOT EXISTS tenant_api_keys (
+    key_id        TEXT PRIMARY KEY,
+    tenant_id     TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    username      TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    label         TEXT,
+    token_hash    TEXT NOT NULL UNIQUE,
+    created_at_ms INTEGER NOT NULL,
+    last_used_at_ms INTEGER,
+    revoked_at_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_active
+    ON tenant_api_keys(tenant_id) WHERE revoked_at_ms IS NULL;
+CREATE INDEX IF NOT EXISTS idx_api_keys_token_hash
+    ON tenant_api_keys(token_hash);
 "#;
 
 /// One row from `tenants`. `deleted_at` is `Some` only on soft-
@@ -119,6 +151,34 @@ pub struct FederationPeer {
     pub source_tenant_id: TenantId,
     pub accepted_at_ms: i64,
     pub accepted_by: Option<String>,
+}
+
+/// One row from `tenant_api_keys` (Phase 4 W3 C4 iter 2).
+///
+/// `token_hash` is the hex-encoded sha256 of the cleartext token —
+/// **never** the cleartext itself. The cleartext is returned once from
+/// [`AdminDb::mint_api_key`] and never persisted anywhere we can read
+/// back; subsequent listings are hash-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyRow {
+    pub key_id: String,
+    pub tenant_id: TenantId,
+    pub username: String,
+    pub scope: String,
+    pub label: Option<String>,
+    pub token_hash: String,
+    pub created_at_ms: i64,
+    pub last_used_at_ms: Option<i64>,
+    pub revoked_at_ms: Option<i64>,
+}
+
+/// Result of [`AdminDb::mint_api_key`]. Carries the cleartext bearer
+/// token in `token` — surface it to the operator immediately and drop
+/// the struct; the row in the DB only retains the sha256 hash.
+#[derive(Debug, Clone)]
+pub struct MintedApiKey {
+    pub row: ApiKeyRow,
+    pub token: String,
 }
 
 /// Thin CRUD wrapper over the `tenants.sqlite` admin DB.
@@ -428,7 +488,212 @@ impl AdminDb {
         }
         Ok(out)
     }
+
+    /* ---------------- Phase 4 W3 C4 iter 2: tenant_api_keys ---------------- */
+
+    /// Mint a new bearer token for `(tenant, username, scope)`.
+    ///
+    /// Generates a cryptographically random cleartext (`ck_` prefix +
+    /// two `uuid::Uuid::new_v4().simple()` blobs concatenated → 67-char
+    /// total token), stores its sha256 hash, and returns the [`MintedApiKey`]
+    /// envelope. The cleartext lives only in the return value — once
+    /// the caller drops it, recovery is impossible (modulo the hash
+    /// inversion problem). Callers must surface it to the operator
+    /// immediately.
+    ///
+    /// `key_id` is a separate uuid (also `simple()`-formatted) so the
+    /// caller has a stable handle for `revoke_api_key` / `list_api_keys`
+    /// without ever needing to re-display the cleartext token.
+    ///
+    /// Errors:
+    ///   - [`AdminDbError::Sqlx`] on FK violation (tenant doesn't exist),
+    ///   - [`AdminDbError::Sqlx`] wrapping `UniqueViolation` on the
+    ///     near-impossible token-hash collision.
+    pub async fn mint_api_key(
+        &self,
+        tenant_id: &TenantId,
+        username: &str,
+        scope: &str,
+        label: Option<&str>,
+    ) -> Result<MintedApiKey, AdminDbError> {
+        let key_id = uuid::Uuid::new_v4().simple().to_string();
+        let token = format!(
+            "ck_{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let token_hash = hash_api_key_token(&token);
+        let created_at_ms = unix_now_ms();
+
+        sqlx::query(
+            "INSERT INTO tenant_api_keys \
+             (key_id, tenant_id, username, scope, label, token_hash, created_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind(&key_id)
+        .bind(tenant_id.as_str())
+        .bind(username)
+        .bind(scope)
+        .bind(label)
+        .bind(&token_hash)
+        .bind(created_at_ms)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(MintedApiKey {
+            row: ApiKeyRow {
+                key_id,
+                tenant_id: tenant_id.clone(),
+                username: username.to_string(),
+                scope: scope.to_string(),
+                label: label.map(str::to_string),
+                token_hash,
+                created_at_ms,
+                last_used_at_ms: None,
+                revoked_at_ms: None,
+            },
+            token,
+        })
+    }
+
+    /// List active (`revoked_at_ms IS NULL`) keys for a tenant, ordered
+    /// by `created_at_ms DESC` so the UI's "most recent first" view is
+    /// natural. Revoked rows stay in the table for audit but are
+    /// excluded here; callers that need the full set should query the
+    /// pool directly.
+    pub async fn list_api_keys(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<ApiKeyRow>, AdminDbError> {
+        let rows = sqlx::query(
+            "SELECT key_id, tenant_id, username, scope, label, token_hash, \
+                    created_at_ms, last_used_at_ms, revoked_at_ms \
+             FROM tenant_api_keys \
+             WHERE tenant_id = ?1 AND revoked_at_ms IS NULL \
+             ORDER BY created_at_ms DESC",
+        )
+        .bind(tenant_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let slug: String = r.get("tenant_id");
+            let row_tenant_id = TenantId::new(slug.clone()).map_err(|e| {
+                AdminDbError::Sqlx(sqlx::Error::Decode(
+                    format!("invalid tenant_id '{slug}': {e}").into(),
+                ))
+            })?;
+            out.push(ApiKeyRow {
+                key_id: r.get("key_id"),
+                tenant_id: row_tenant_id,
+                username: r.get("username"),
+                scope: r.get("scope"),
+                label: r.get("label"),
+                token_hash: r.get("token_hash"),
+                created_at_ms: r.get("created_at_ms"),
+                last_used_at_ms: r.get("last_used_at_ms"),
+                revoked_at_ms: r.get("revoked_at_ms"),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Revoke a key by `key_id`. Returns `true` when a row was actually
+    /// flipped (active → revoked); `false` when the row was already
+    /// revoked or doesn't exist. Idempotent.
+    pub async fn revoke_api_key(&self, key_id: &str) -> Result<bool, AdminDbError> {
+        let now = unix_now_ms();
+        let res = sqlx::query(
+            "UPDATE tenant_api_keys SET revoked_at_ms = ?1 \
+             WHERE key_id = ?2 AND revoked_at_ms IS NULL",
+        )
+        .bind(now)
+        .bind(key_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Verify a cleartext token. Returns the matching active row when
+    /// the hash matches and `revoked_at_ms IS NULL`; `None` otherwise.
+    /// Constant-time comparison is **not** required at this layer
+    /// because we look up by hash directly — the SQL index makes the
+    /// match an O(1) hash equality on indexed bytes. Updates
+    /// `last_used_at_ms` on hit so the UI's "last used" column stays
+    /// fresh.
+    pub async fn verify_api_key(&self, token: &str) -> Result<Option<ApiKeyRow>, AdminDbError> {
+        let hash = hash_api_key_token(token);
+        let row = sqlx::query(
+            "SELECT key_id, tenant_id, username, scope, label, token_hash, \
+                    created_at_ms, last_used_at_ms, revoked_at_ms \
+             FROM tenant_api_keys \
+             WHERE token_hash = ?1 AND revoked_at_ms IS NULL",
+        )
+        .bind(&hash)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(r) = row else { return Ok(None) };
+        let slug: String = r.get("tenant_id");
+        let row_tenant_id = TenantId::new(slug.clone()).map_err(|e| {
+            AdminDbError::Sqlx(sqlx::Error::Decode(
+                format!("invalid tenant_id '{slug}': {e}").into(),
+            ))
+        })?;
+        let key_id: String = r.get("key_id");
+
+        // Best-effort `last_used_at_ms` bump. Failure here logs a warn
+        // but does not deny verification — the operator's chat request
+        // shouldn't fail on a stats column.
+        let now = unix_now_ms();
+        if let Err(err) = sqlx::query(
+            "UPDATE tenant_api_keys SET last_used_at_ms = ?1 WHERE key_id = ?2",
+        )
+        .bind(now)
+        .bind(&key_id)
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(error = %err, key_id = %key_id, "tenant_api_keys: last_used_at_ms bump failed");
+        }
+
+        Ok(Some(ApiKeyRow {
+            key_id,
+            tenant_id: row_tenant_id,
+            username: r.get("username"),
+            scope: r.get("scope"),
+            label: r.get("label"),
+            token_hash: r.get("token_hash"),
+            created_at_ms: r.get("created_at_ms"),
+            last_used_at_ms: Some(now),
+            revoked_at_ms: r.get("revoked_at_ms"),
+        }))
+    }
 }
+
+/// Hash an api-key cleartext to its hex-encoded sha256 digest. Public
+/// for the gateway's auth middleware so it can pre-hash tokens before
+/// any DB call — verifying a token is then a simple equality check
+/// over an indexed column.
+pub fn hash_api_key_token(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(token.as_bytes());
+    let digest = h.finalize();
+    let mut s = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        // Inline two-char hex emit; pulling in `hex` for one call is
+        // not worth a workspace dep when sha256 outputs are 32 bytes.
+        s.push(HEX[(b >> 4) as usize]);
+        s.push(HEX[(b & 0x0f) as usize]);
+    }
+    s
+}
+
+const HEX: &[char; 16] = &[
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+];
 
 #[cfg(test)]
 mod tests {
@@ -696,5 +961,146 @@ mod tests {
         // diagnose why an expected tenant is missing from `list`.
         let bravo_row = db.get(&bravo).await.unwrap().unwrap();
         assert_eq!(bravo_row.deleted_at, Some(99));
+    }
+
+    /* ---------------- Phase 4 W3 C4 iter 2: tenant_api_keys ---------------- */
+
+    #[tokio::test]
+    async fn mint_api_key_returns_cleartext_then_hashes_in_db() {
+        let (db, _tmp) = fresh().await;
+        let acme = TenantId::new("acme").unwrap();
+        db.create_tenant(&acme, "Acme", 1).await.unwrap();
+
+        let minted = db
+            .mint_api_key(&acme, "alice", "chat", Some("MacBook"))
+            .await
+            .unwrap();
+
+        // Cleartext shape: `ck_` prefix + 64 hex chars.
+        assert!(minted.token.starts_with("ck_"));
+        assert_eq!(minted.token.len(), 67);
+
+        // Stored row has hash, NOT cleartext.
+        assert_ne!(minted.row.token_hash, minted.token);
+        assert_eq!(minted.row.token_hash.len(), 64); // sha256 hex
+        assert_eq!(minted.row.token_hash, hash_api_key_token(&minted.token));
+        assert_eq!(minted.row.username, "alice");
+        assert_eq!(minted.row.scope, "chat");
+        assert_eq!(minted.row.label.as_deref(), Some("MacBook"));
+        assert_eq!(minted.row.tenant_id, acme);
+        assert!(minted.row.last_used_at_ms.is_none());
+        assert!(minted.row.revoked_at_ms.is_none());
+    }
+
+    #[tokio::test]
+    async fn mint_api_key_rejects_unknown_tenant_via_fk() {
+        let (db, _tmp) = fresh().await;
+        let ghost = TenantId::new("ghost").unwrap();
+        // No `create_tenant` first — FK violation surfaces as Sqlx err.
+        let err = db
+            .mint_api_key(&ghost, "alice", "chat", None)
+            .await
+            .expect_err("missing parent tenant must reject mint");
+        assert!(matches!(err, AdminDbError::Sqlx(_)));
+    }
+
+    #[tokio::test]
+    async fn list_api_keys_orders_by_created_desc_and_excludes_revoked() {
+        let (db, _tmp) = fresh().await;
+        let acme = TenantId::new("acme").unwrap();
+        db.create_tenant(&acme, "Acme", 1).await.unwrap();
+
+        let k1 = db.mint_api_key(&acme, "alice", "chat", Some("first")).await.unwrap();
+        // Sleep 2ms so created_at_ms advances; with millisecond precision
+        // back-to-back inserts can land in the same tick.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let k2 = db.mint_api_key(&acme, "bob", "chat", Some("second")).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let k3 = db.mint_api_key(&acme, "carol", "chat", Some("third")).await.unwrap();
+
+        // Most recent first.
+        let listed = db.list_api_keys(&acme).await.unwrap();
+        assert_eq!(listed.len(), 3);
+        assert_eq!(listed[0].key_id, k3.row.key_id);
+        assert_eq!(listed[1].key_id, k2.row.key_id);
+        assert_eq!(listed[2].key_id, k1.row.key_id);
+
+        // Revoke the middle one — list excludes it.
+        let flipped = db.revoke_api_key(&k2.row.key_id).await.unwrap();
+        assert!(flipped, "first revoke must report a hit");
+
+        let listed_after = db.list_api_keys(&acme).await.unwrap();
+        assert_eq!(listed_after.len(), 2);
+        assert_eq!(listed_after[0].key_id, k3.row.key_id);
+        assert_eq!(listed_after[1].key_id, k1.row.key_id);
+
+        // Re-revoking is a no-op miss (idempotent).
+        let again = db.revoke_api_key(&k2.row.key_id).await.unwrap();
+        assert!(!again, "second revoke on same key_id must be false");
+    }
+
+    #[tokio::test]
+    async fn verify_api_key_round_trip_and_bumps_last_used() {
+        let (db, _tmp) = fresh().await;
+        let acme = TenantId::new("acme").unwrap();
+        db.create_tenant(&acme, "Acme", 1).await.unwrap();
+        let minted = db
+            .mint_api_key(&acme, "alice", "chat", None)
+            .await
+            .unwrap();
+
+        // Sentinel value before verify so we can assert the bump moved it.
+        assert!(minted.row.last_used_at_ms.is_none());
+
+        let verified = db
+            .verify_api_key(&minted.token)
+            .await
+            .unwrap()
+            .expect("freshly minted token must verify");
+        assert_eq!(verified.key_id, minted.row.key_id);
+        assert_eq!(verified.tenant_id, acme);
+        assert!(verified.last_used_at_ms.is_some());
+
+        // List view also sees the bump (re-read from DB, not from
+        // the verify return value).
+        let listed = db.list_api_keys(&acme).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].last_used_at_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn verify_api_key_rejects_unknown_token() {
+        let (db, _tmp) = fresh().await;
+        let acme = TenantId::new("acme").unwrap();
+        db.create_tenant(&acme, "Acme", 1).await.unwrap();
+        let _ = db.mint_api_key(&acme, "alice", "chat", None).await.unwrap();
+
+        let none = db.verify_api_key("ck_does_not_exist_12345").await.unwrap();
+        assert!(none.is_none());
+    }
+
+    #[tokio::test]
+    async fn verify_api_key_rejects_revoked_token() {
+        let (db, _tmp) = fresh().await;
+        let acme = TenantId::new("acme").unwrap();
+        db.create_tenant(&acme, "Acme", 1).await.unwrap();
+        let minted = db.mint_api_key(&acme, "alice", "chat", None).await.unwrap();
+        // Sanity check: pre-revoke verify hits.
+        assert!(db.verify_api_key(&minted.token).await.unwrap().is_some());
+        // Revoke + post-revoke verify must miss even though the hash is
+        // still present in the table.
+        assert!(db.revoke_api_key(&minted.row.key_id).await.unwrap());
+        assert!(db.verify_api_key(&minted.token).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn hash_api_key_token_matches_known_sha256() {
+        // sha256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        // — pinned so a stray hashing-impl swap surfaces here.
+        let h = hash_api_key_token("hello");
+        assert_eq!(
+            h,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
     }
 }

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Phase 4 W3 C4 iter 8 — entitlements for the macOS reference client.
+
+  `com.apple.developer.aps-environment` is the load-bearing key here.
+  Without it `application(_:didRegisterForRemoteNotifications…)` is never
+  invoked, the device-token callback never fires, and the gateway's
+  APNs adapter has nowhere to push to.
+
+  `development` is correct for unsigned/dev builds. A shipping build
+  via the Mac App Store flips this to `production`; we don't ship
+  there from C4 (see design doc out-of-scope §"Mac App Store
+  distribution"), so `development` is the only target value.
+
+  `com.apple.security.network.client` is required by the App Sandbox
+  to make outbound HTTPS calls to the gateway. It's the minimum sandbox
+  entitlement for a chat client; we *don't* enable
+  `network.server` because the dev-push socket is a Unix-domain
+  socket the gateway opens, not a TCP server we run.
+
+  Keychain access groups are intentionally absent — the default group
+  (the bundle id) is what `AuthStore` writes under, and we don't need
+  to share creds with sibling apps yet.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.aps-environment</key>
+	<string>development</string>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>

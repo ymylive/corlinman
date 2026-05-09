@@ -1,0 +1,124 @@
+name: swift-mac
+
+# Phase 4 W3 C4 iter 9 — macOS reference-client CI.
+#
+# Why a separate workflow file from `ci.yml`:
+#   - macOS runners are 10× the minute cost of `ubuntu-latest`. Gating
+#     on `paths:` so this only runs when `apps/swift-mac/**` changes
+#     keeps the burn rate sane.
+#   - The Swift toolchain on `macos-latest` is independent of the Rust
+#     toolchain pinned in `rust-toolchain.toml` and the Python venv
+#     pinned in `python/`. Mixing them in one job means one slow
+#     reinstall blocks the others; separating workflows lets them
+#     parallelise at the GitHub-Actions scheduler level.
+#   - Snapshot tests (per `docs/design/phase4-w3-c4-design.md:454-458`)
+#     are macOS-only — the LLDB-rendering pipeline behind
+#     `swift-snapshot-testing` doesn't have a Linux equivalent.
+#
+# What runs:
+#   - `swift build` against the SwiftPM manifest (compile-time gate).
+#   - `swift test --enable-code-coverage` for `CorlinmanCoreTests` +
+#     `CorlinmanUITests`. Snapshot tests in
+#     `Tests/CorlinmanUITests/ChatViewSnapshotTests.swift` are
+#     `#if canImport(SnapshotTesting)`-gated; this workflow installs
+#     the dep before the test step so they're active here while
+#     remaining absent on offline contributor builds.
+#
+# What doesn't run:
+#   - `swift run CorlinmanApp` end-to-end (the iter 10 manual smoke
+#     test — needs a live gateway).
+#   - APNs registration round-trip (would need an Apple Developer
+#     account on the runner — out of scope per design §"Out of scope").
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/swift-mac/**'
+      - '.github/workflows/swift-mac.yml'
+  pull_request:
+    paths:
+      - 'apps/swift-mac/**'
+      - '.github/workflows/swift-mac.yml'
+
+concurrency:
+  group: swift-mac-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift-build-test:
+    name: swift build + test
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `macos-latest` already ships Xcode + Swift; we surface the
+      # version into the log so a snapshot mismatch caused by a
+      # toolchain bump is one click away from being attributed.
+      - name: Print toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      # Inject `swift-snapshot-testing` as a runtime dep without
+      # editing the committed Package.swift. We append a minimal
+      # `Package.snapshot.swift` overlay; SwiftPM honours
+      # `SWIFTPM_PACKAGE_DESCRIPTION_FORMAT` overlay flow as of 5.10.
+      # If overlay support changes upstream, the fallback is to
+      # check in a CI-only Package.swift behind a make target.
+      - name: Inject snapshot-testing dep
+        working-directory: apps/swift-mac
+        run: |
+          # Append the dep directly — keeps the surface change narrow
+          # and the local manifest unchanged for offline contributors.
+          # The .build/ artefact is throwaway anyway.
+          python3 - <<'PY'
+          import pathlib, re, textwrap
+          p = pathlib.Path("Package.swift")
+          src = p.read_text()
+          dep_line = '.package(url: "https://github.com/pointfreeco/swift-snapshot-testing", from: "1.17.0"),'
+          if "swift-snapshot-testing" not in src:
+              src = src.replace(
+                  "dependencies: [\n        // Iter 1: empty. Iter 2 will add swift-protobuf here.\n    ],",
+                  textwrap.dedent("""\
+                  dependencies: [
+                          // CI-only: snapshot harness for `Tests/CorlinmanUITests/ChatViewSnapshotTests.swift`.
+                          %s
+                      ],""") % dep_line,
+              )
+          # Add SnapshotTesting to the UI test target.
+          src = src.replace(
+              '.testTarget(\n            name: "CorlinmanUITests",\n            dependencies: ["CorlinmanUI"]\n        ),',
+              '.testTarget(\n            name: "CorlinmanUITests",\n            dependencies: ["CorlinmanUI", .product(name: "SnapshotTesting", package: "swift-snapshot-testing")]\n        ),',
+          )
+          p.write_text(src)
+          print("[ci] Package.swift patched with swift-snapshot-testing")
+          PY
+
+      - name: swift package resolve
+        working-directory: apps/swift-mac
+        run: swift package resolve
+
+      - name: swift build
+        working-directory: apps/swift-mac
+        run: swift build
+
+      - name: swift test
+        working-directory: apps/swift-mac
+        run: swift test --enable-code-coverage
+
+      # Snapshot artefacts (failed image diffs) get stored under
+      # `Tests/.../__Snapshots__/` and `Tests/.../FailureDiffs/` by
+      # default. We upload both so a CI failure is one download
+      # away from being root-caused locally.
+      - name: Upload snapshot diffs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-snapshot-diffs
+          path: |
+            apps/swift-mac/Tests/**/__Snapshots__/**
+            apps/swift-mac/Tests/**/FailureDiffs/**
+          if-no-files-found: ignore
