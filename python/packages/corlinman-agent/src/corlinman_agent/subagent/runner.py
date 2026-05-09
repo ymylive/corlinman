@@ -1,22 +1,35 @@
 """Happy-path child driver — :func:`run_child`.
 
-Iter 4 (this commit) lands the **happy path only**: the supervisor (Rust,
-``corlinman-subagent`` crate) calls in here once it has decided the spawn
-is allowed and a slot is reserved; the runner builds a fresh
-:class:`ChatStart`, optionally seeds a fresh persona row under a mangled
-``agent_id``, drives a fresh :class:`ReasoningLoop` to exhaustion,
-collects the streamed events, and returns a :class:`TaskResult`.
+Iter 4 landed the **happy path only**; iter 6 layered the cooperative
+``max_wall_seconds`` enforcement on top; iter 7 (this revision) adds the
+**tool-allowlist filter** and **privilege-escalation reject** documented
+in design § "Tool exposure".
 
-What is *deliberately* NOT here yet:
+What :func:`run_child` now does end-to-end:
 
-* timeout enforcement → wraps in ``tokio::time::timeout`` from the Rust
-  side in iter 6;
-* tool-allowlist filtering / escalation reject → iter 7;
-* PyO3 entry point → the supervisor calls this function over GIL in
-  iter 5; for now it's pure Python and unit-tested in isolation;
-* hook-bus observability → iter 9.
+1. Resolve the child's effective tool list via :func:`_filter_tools_for_child`
+   — intersection of ``task.tool_allowlist`` with the parent's
+   ``tools_allowed``; ``None`` allowlist means "inherit parent's set".
+2. Reject escalation outright: a request for any tool the parent doesn't
+   already hold returns a synthetic
+   :class:`TaskResult` with ``finish_reason=REJECTED`` and
+   ``error="tool_allowlist_escalation"`` *before* the loop is driven.
+3. Prune ``subagent.spawn`` from the child's allowlist when the *child's*
+   depth would equal ``max_depth - 1`` — at that depth a grandchild
+   spawn is the next thing the supervisor would refuse with
+   ``DepthCapped`` anyway, so we save the LLM the round-trip.
+4. Project the resulting *names* back onto the parent's *tool schemas*
+   (the OpenAI `tools=` array) so the child's :class:`ChatStart`
+   carries usable tool definitions, not just names.
 
-The split between this happy-path runner and the supervisor is the same
+What is *still* deliberately NOT here:
+
+* PyO3 entry point — the supervisor calls this function over the GIL
+  via the iter-5 bridge; iter 8 wires the production caller.
+* Hook-bus observability — `SubagentSpawned/Completed/...` lands in
+  iter 9.
+
+The split between this runner and the supervisor remains the same
 split documented in the design § "Implementation surface — Rust supervisor
 + Python runner": the **isolation contract** lives where the LLM cannot
 reach it (Rust); the **loop driver** has to call into Python because that's
@@ -43,12 +56,27 @@ from corlinman_agent.reasoning_loop import (
     ToolCallEvent,
 )
 from corlinman_agent.subagent.api import (
+    DEFAULT_MAX_DEPTH,
     FinishReason,
     ParentContext,
     TaskResult,
     TaskSpec,
     ToolCallSummary,
 )
+
+#: Reserved tool name the parent's reasoning loop emits when it wants
+#: to delegate. Pruned from the child's allowlist at the deepest legal
+#: depth (``child_ctx.depth >= max_depth - 1``) so a grandchild can't
+#: spawn a great-grandchild that the supervisor would reject with
+#: :attr:`FinishReason.DEPTH_CAPPED` anyway. Lifting the literal into a
+#: module constant keeps the iter-8 tool-wrapper registration in one
+#: place — registry code imports the same name.
+SUBAGENT_SPAWN_TOOL: str = "subagent.spawn"
+
+#: Sentinel error string surfaced on a privilege-escalation rejection.
+#: Pinned in :attr:`TaskResult.error` so the LLM (and forensic queries)
+#: can branch on the exact reason the child was refused.
+TOOL_ALLOWLIST_ESCALATION_ERROR: str = "tool_allowlist_escalation"
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
     # Avoids forcing a runtime import of corlinman-persona for callers
@@ -69,6 +97,8 @@ async def run_child(
     child_seq: int = 0,
     persona_store: "PersonaStore | None" = None,
     tool_result_timeout: float = 0.05,
+    parent_tools: Sequence[dict[str, Any]] | None = None,
+    max_depth: int = DEFAULT_MAX_DEPTH,
 ) -> TaskResult:
     """Drive one child reasoning loop and return its :class:`TaskResult`.
 
@@ -114,6 +144,25 @@ async def run_child(
         as the loop's own default — for iter 4 (no tools wired) the
         loop short-circuits on the first round, so the value doesn't
         actually gate happy-path tests.
+    parent_tools
+        OpenAI-shaped tool schemas the *parent's* reasoning loop is
+        configured with (each entry has at least ``{"function":
+        {"name": "..."}}`` or a top-level ``"name"``). Iter 7 uses this
+        list as both the *allowlist source-of-truth* (its names form the
+        parent's ``tools_allowed``) and the *schema source* projected
+        onto the child's :class:`ChatStart`. ``None`` is treated as the
+        parent having no tools at all — child gets the empty list
+        regardless of ``task.tool_allowlist`` (calling for tools the
+        parent never had is itself escalation).
+    max_depth
+        The supervisor's ``[subagent].max_depth`` policy value. The
+        runner reads it only for the ``subagent.spawn`` self-prune at
+        ``child_ctx.depth == max_depth - 1`` — *not* for the depth-cap
+        check itself, which still belongs to the supervisor (the runner
+        is called by the supervisor *after* the cap admits the spawn).
+        Defaults to :data:`api.DEFAULT_MAX_DEPTH` so unit tests don't
+        need to thread the policy through; production callers (iter 8)
+        pass the live policy value.
 
     Returns
     -------
@@ -141,6 +190,42 @@ async def run_child(
     started_ms = _now_ms()
     child_ctx = parent_ctx.child_context(agent_card.name, child_seq)
 
+    # Iter 7: tool-allowlist filter + escalation gate. Run *before*
+    # persona seeding / loop construction so a rejected spawn produces
+    # zero side effects (no orphaned persona row, no provider call).
+    # ``parent_tool_names`` is the canonical source-of-truth for what
+    # the parent is allowed to invoke; the child can never see anything
+    # outside this set.
+    parent_tool_names = _tool_names(parent_tools)
+    try:
+        child_tool_names = _filter_tools_for_child(
+            parent_tool_names=parent_tool_names,
+            requested_allowlist=task.tool_allowlist,
+            child_depth=child_ctx.depth,
+            max_depth=max_depth,
+        )
+    except _ToolAllowlistEscalation as exc:
+        logger.info(
+            "subagent.runner.tool_allowlist_escalation",
+            child_session_key=child_ctx.parent_session_key,
+            child_agent_id=child_ctx.parent_agent_id,
+            offending_tools=sorted(exc.offending),
+        )
+        return TaskResult(
+            output_text="",
+            tool_calls_made=[],
+            child_session_key=child_ctx.parent_session_key,
+            child_agent_id=child_ctx.parent_agent_id,
+            elapsed_ms=max(0, _now_ms() - started_ms),
+            finish_reason=FinishReason.REJECTED,
+            error=TOOL_ALLOWLIST_ESCALATION_ERROR,
+        )
+
+    # Project filtered names back onto schemas (the OpenAI-shaped dicts
+    # the reasoning loop forwards to the provider). Empty allowlist →
+    # empty schema list → loop runs as a pure LLM call.
+    child_tools = _project_tool_schemas(parent_tools, child_tool_names)
+
     # Seed persona row before driving the loop. Best-effort: a failure
     # here would prevent the child from running which is heavier than
     # we want for an observability-only side effect.
@@ -162,12 +247,12 @@ async def run_child(
         # supply a fake provider that ignores the model field.
         model="",
         messages=messages,
-        # Tool list is empty in iter 4 (filtering arrives in iter 7).
-        # The reasoning loop treats empty tools as "no tool calls
-        # allowed" which is exactly what we want for the iter-4 happy
-        # path: the mock provider streams text and emits a single
-        # ``done(stop)`` chunk.
-        tools=[],
+        # Iter 7: filtered+pruned schema list. Empty when the parent
+        # had no tools, when ``task.tool_allowlist == []`` (the explicit
+        # "pure LLM" mode), or when every parent tool was excluded by
+        # the depth-prune (only ``subagent.spawn`` at the deepest legal
+        # depth, in practice).
+        tools=child_tools,
         session_key=child_ctx.parent_session_key,
     )
 
@@ -320,6 +405,138 @@ async def _drain_events(
         raise
 
 
+class _ToolAllowlistEscalation(Exception):
+    """Internal signal raised by :func:`_filter_tools_for_child` when a
+    request asks for tools the parent doesn't already hold.
+
+    Caught in :func:`run_child` and translated into a rejected
+    :class:`TaskResult` with ``error=tool_allowlist_escalation``. Not
+    a public exception — callers see the rejection envelope, never
+    this. Carries the offending tool names so the log line is
+    actionable for operators.
+    """
+
+    def __init__(self, offending: set[str]) -> None:
+        super().__init__(
+            f"requested tools not in parent allowlist: {sorted(offending)!r}"
+        )
+        self.offending: frozenset[str] = frozenset(offending)
+
+
+def _filter_tools_for_child(
+    *,
+    parent_tool_names: frozenset[str],
+    requested_allowlist: list[str] | None,
+    child_depth: int,
+    max_depth: int,
+) -> frozenset[str]:
+    """Compute the child's effective tool-name set.
+
+    Implements the design § "Tool exposure" rules verbatim:
+
+    * ``requested_allowlist is None`` (the default) → child inherits
+      ``parent_tool_names`` verbatim.
+    * ``requested_allowlist == []`` → empty set; pure LLM call. Distinct
+      from ``None`` so the parent can opt the child out of all tools
+      without the runner inferring "they meant inherit".
+    * non-empty list → must be a subset of ``parent_tool_names``;
+      anything outside raises :class:`_ToolAllowlistEscalation`.
+
+    After resolution, prune ``subagent.spawn`` when the child is at the
+    deepest depth that could still spawn a grandchild
+    (``child_depth >= max_depth - 1``). The supervisor would refuse the
+    grandchild's spawn anyway with :attr:`FinishReason.DEPTH_CAPPED`;
+    we strip the tool entry so the LLM doesn't waste a round trying.
+
+    Returns a :class:`frozenset` to make the result hash-eq comparable
+    in tests and to telegraph immutability — the iter 9 hook event
+    payload may capture this set verbatim, and we don't want callers
+    accidentally mutating that record.
+    """
+    if requested_allowlist is None:
+        # Inherit: copy the parent's set so the prune below doesn't
+        # mutate the parent's view (frozenset is immutable but the call
+        # site might not realise we already returned that exact object).
+        effective = set(parent_tool_names)
+    else:
+        requested = set(requested_allowlist)
+        # Escalation check first — empty list is a legal subset of every
+        # set so it falls straight through to the prune step.
+        offending = requested - parent_tool_names
+        if offending:
+            raise _ToolAllowlistEscalation(offending)
+        effective = requested
+
+    # Self-prune at the deepest legal depth. ``max_depth - 1`` is the
+    # last depth at which a child *could* spawn a grandchild; pruning
+    # the spawn tool here means the LLM isn't tempted to call it. Below
+    # that depth the spawn tool is left in place so the child can
+    # delegate one more level.
+    if child_depth >= max_depth - 1:
+        effective.discard(SUBAGENT_SPAWN_TOOL)
+
+    return frozenset(effective)
+
+
+def _tool_names(tools: Sequence[dict[str, Any]] | None) -> frozenset[str]:
+    """Extract the OpenAI-shaped tool name set from a schema list.
+
+    Recognises both the wrapped form (``{"type": "function", "function":
+    {"name": "..."}}``) and the flat form (``{"name": "..."}``). The
+    wrapped form is what the gateway forwards to providers; the flat
+    form is what older tests and some adapters use. ``None`` / missing
+    entries are skipped silently — a malformed entry isn't worth
+    crashing the child over; it's just not visible to it.
+    """
+    if not tools:
+        return frozenset()
+    names: set[str] = set()
+    for entry in tools:
+        if not isinstance(entry, dict):
+            continue
+        # Wrapped form (the canonical OpenAI shape).
+        function = entry.get("function")
+        if isinstance(function, dict):
+            name = function.get("name")
+            if isinstance(name, str) and name:
+                names.add(name)
+                continue
+        # Flat form fallback.
+        flat_name = entry.get("name")
+        if isinstance(flat_name, str) and flat_name:
+            names.add(flat_name)
+    return frozenset(names)
+
+
+def _project_tool_schemas(
+    tools: Sequence[dict[str, Any]] | None,
+    keep_names: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Filter the parent's tool-schema list down to the names in
+    ``keep_names``, preserving order.
+
+    Order preservation matters for two reasons: (a) some providers
+    deterministically prefer earlier-listed tools when the model is
+    ambiguous; (b) golden-file tests on iter-8 wire payloads compare
+    the JSON shape verbatim. Falls back to skipping malformed entries
+    (same rationale as :func:`_tool_names`).
+    """
+    if not tools:
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in tools:
+        if not isinstance(entry, dict):
+            continue
+        function = entry.get("function")
+        if isinstance(function, dict):
+            name = function.get("name")
+        else:
+            name = entry.get("name")
+        if isinstance(name, str) and name in keep_names:
+            out.append(entry)
+    return out
+
+
 def _build_child_messages(
     agent_card: AgentCard, task: TaskSpec
 ) -> list[dict[str, Any]]:
@@ -444,4 +661,9 @@ def _now_ms() -> int:
 # even though the runner doesn't itself dataclass-replace anything in
 # iter 4. iter 6 will reach for it when overlaying timeout outcomes
 # onto a partial TaskResult.
-__all__ = ["run_child", "replace"]
+__all__ = [
+    "SUBAGENT_SPAWN_TOOL",
+    "TOOL_ALLOWLIST_ESCALATION_ERROR",
+    "replace",
+    "run_child",
+]

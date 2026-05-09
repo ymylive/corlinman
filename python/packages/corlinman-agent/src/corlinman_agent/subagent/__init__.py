@@ -29,6 +29,7 @@ registration in the agent registry (iter 8), the PyO3 bridge wiring
 from __future__ import annotations
 
 from corlinman_agent.subagent.api import (
+    DEFAULT_MAX_DEPTH,
     DEFAULT_MAX_TOOL_CALLS,
     DEFAULT_MAX_WALL_SECONDS,
     FinishReason,
@@ -37,13 +38,20 @@ from corlinman_agent.subagent.api import (
     TaskSpec,
     ToolCallSummary,
 )
-from corlinman_agent.subagent.runner import run_child
+from corlinman_agent.subagent.runner import (
+    SUBAGENT_SPAWN_TOOL,
+    TOOL_ALLOWLIST_ESCALATION_ERROR,
+    run_child,
+)
 
 __all__ = [
+    "DEFAULT_MAX_DEPTH",
     "DEFAULT_MAX_TOOL_CALLS",
     "DEFAULT_MAX_WALL_SECONDS",
     "FinishReason",
     "ParentContext",
+    "SUBAGENT_SPAWN_TOOL",
+    "TOOL_ALLOWLIST_ESCALATION_ERROR",
     "TaskResult",
     "TaskSpec",
     "ToolCallSummary",

@@ -424,3 +424,205 @@ async def test_child_timeout_decrements_concurrency_via_supervisor() -> None:
     assert elapsed < 5.0, (
         f"runner must return within wall + grace; took {elapsed:.2f}s"
     )
+
+
+# ---------------------------------------------------------------------------
+# Iter 7: tool-allowlist filtering + escalation reject
+#
+# Two design test rows mandated by the doc's "Test matrix":
+#
+# * ``tool_allowlist_escalation_rejected`` — child asks for a tool the
+#   parent does not hold → ``error="tool_allowlist_escalation"``.
+# * ``subagent_spawn_pruned_at_depth_n_minus_1`` — child at the deepest
+#   legal depth must NOT see ``subagent.spawn`` in its tools.
+#
+# Plus three light-weight assertions that lock the inheritance default
+# and the explicit "empty list = no tools" mode (these branches cover
+# the design § "Tool exposure" three-policy table verbatim).
+# ---------------------------------------------------------------------------
+
+
+from corlinman_agent.subagent import (  # noqa: E402  -- placed near tests for locality
+    SUBAGENT_SPAWN_TOOL,
+    TOOL_ALLOWLIST_ESCALATION_ERROR,
+    DEFAULT_MAX_DEPTH,
+)
+
+
+def _tool(name: str) -> dict[str, Any]:
+    """Construct an OpenAI-shaped tool schema entry. The runner only
+    looks at ``function.name``; everything else is provider noise we
+    keep minimal so test golden files stay readable."""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": f"test tool {name}",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+
+class _ToolListCapturingProvider:
+    """Mock provider that records the ``tools=`` keyword the loop forwards.
+
+    The runner builds a :class:`ChatStart` with the filtered schema
+    list; the reasoning loop forwards it to the provider as the
+    ``tools`` kwarg. Capturing it lets tests assert the *child's*
+    effective set verbatim, which is the contract iter 7 owns.
+    """
+
+    def __init__(self) -> None:
+        self.tools_seen: list[Any] = []
+
+    async def chat_stream(
+        self, *, messages: list[dict[str, Any]], **kwargs: Any
+    ) -> AsyncIterator[ProviderChunk]:  # type: ignore[override]
+        # ReasoningLoop._run_one_round passes ``tools=start.tools or None``
+        # — capture either form so the test can assert the post-filter shape.
+        self.tools_seen.append(kwargs.get("tools"))
+        yield ProviderChunk(kind="done", finish_reason="stop")
+
+
+async def test_tool_allowlist_escalation_rejected() -> None:
+    """Child asks for ``forbidden_tool`` while the parent only holds
+    ``web_search``. The runner must short-circuit with
+    ``finish_reason=REJECTED`` and ``error=tool_allowlist_escalation``;
+    no provider call must happen.
+    """
+    provider = _ToolListCapturingProvider()
+    parent_tools = [_tool("web_search")]
+
+    result = await run_child(
+        _parent_ctx(),
+        _agent_card(),
+        TaskSpec(
+            goal="anything",
+            tool_allowlist=["forbidden_tool"],
+        ),
+        provider=provider,
+        parent_tools=parent_tools,
+    )
+
+    assert result.finish_reason is FinishReason.REJECTED
+    assert result.error == TOOL_ALLOWLIST_ESCALATION_ERROR
+    assert result.output_text == ""
+    assert result.tool_calls_made == []
+    # The provider must NOT have been invoked — escalation happens
+    # before the loop is constructed.
+    assert provider.tools_seen == [], (
+        "escalation reject must short-circuit before any provider call"
+    )
+
+
+async def test_subagent_spawn_pruned_at_depth_n_minus_1() -> None:
+    """At ``child_ctx.depth == max_depth - 1`` the runner strips
+    ``subagent.spawn`` from the child's tool list — a grandchild spawn
+    would be refused by the supervisor anyway, so the child must not
+    even see the option.
+
+    The parent (depth 0) holds ``subagent.spawn`` + ``web_search``.
+    The child runs at depth 1 (``parent_ctx.depth=0`` → child_ctx
+    depth becomes 1 after :meth:`ParentContext.child_context`). With
+    ``max_depth=2`` (default), depth 1 == max_depth - 1, so the spawn
+    tool must be pruned.
+    """
+    provider = _ToolListCapturingProvider()
+    parent_tools = [_tool(SUBAGENT_SPAWN_TOOL), _tool("web_search")]
+
+    # parent at depth 0 → child at depth 1 (== max_depth-1 with default 2)
+    await run_child(
+        _parent_ctx(depth=0),
+        _agent_card(),
+        TaskSpec(goal="anything"),  # tool_allowlist=None → inherit parent's
+        provider=provider,
+        parent_tools=parent_tools,
+        max_depth=DEFAULT_MAX_DEPTH,
+    )
+
+    assert len(provider.tools_seen) == 1, "exactly one provider round"
+    seen = provider.tools_seen[0] or []
+    seen_names = {
+        (t.get("function") or {}).get("name") if isinstance(t, dict) else None
+        for t in seen
+    }
+    # ``web_search`` survives, ``subagent.spawn`` is pruned.
+    assert "web_search" in seen_names
+    assert SUBAGENT_SPAWN_TOOL not in seen_names, (
+        "subagent.spawn must be pruned at the deepest legal child depth"
+    )
+
+
+async def test_subagent_spawn_kept_below_depth_cap_minus_one() -> None:
+    """Symmetric: at ``child_depth < max_depth - 1`` the spawn tool
+    survives — the child *can* legally delegate one more level.
+
+    Bumps ``max_depth=4`` so the default-depth-1 child has plenty of
+    room. Locks the design § "tool exposure" branch where
+    ``depth < max_depth - 1`` keeps ``subagent.spawn`` available.
+    """
+    provider = _ToolListCapturingProvider()
+    parent_tools = [_tool(SUBAGENT_SPAWN_TOOL), _tool("web_search")]
+
+    await run_child(
+        _parent_ctx(depth=0),
+        _agent_card(),
+        TaskSpec(goal="anything"),
+        provider=provider,
+        parent_tools=parent_tools,
+        max_depth=4,  # child at depth 1 < 4-1 → spawn tool stays
+    )
+
+    seen = provider.tools_seen[0] or []
+    seen_names = {
+        (t.get("function") or {}).get("name") if isinstance(t, dict) else None
+        for t in seen
+    }
+    assert SUBAGENT_SPAWN_TOOL in seen_names
+    assert "web_search" in seen_names
+
+
+async def test_inherit_when_allowlist_is_none() -> None:
+    """``tool_allowlist=None`` (the default) means "inherit the parent's
+    tool set verbatim". Locks the design § "Tool exposure" first
+    policy: the child sees every tool the parent holds, modulo the
+    iter-7 self-prune (which doesn't fire here because ``subagent.spawn``
+    isn't in the parent set)."""
+    provider = _ToolListCapturingProvider()
+    parent_tools = [_tool("web_search"), _tool("python_eval")]
+
+    await run_child(
+        _parent_ctx(),
+        _agent_card(),
+        TaskSpec(goal="anything"),
+        provider=provider,
+        parent_tools=parent_tools,
+    )
+
+    seen = provider.tools_seen[0] or []
+    seen_names = {
+        (t.get("function") or {}).get("name") if isinstance(t, dict) else None
+        for t in seen
+    }
+    assert seen_names == {"web_search", "python_eval"}
+
+
+async def test_empty_allowlist_is_pure_llm_call() -> None:
+    """``tool_allowlist=[]`` is the explicit "no tools" mode — distinct
+    from ``None`` which means inherit. Useful for "summarise this text"
+    children where the loop should never try a tool call. The reasoning
+    loop forwards ``tools=None`` when the list is empty, so the
+    captured value is ``None`` rather than ``[]``."""
+    provider = _ToolListCapturingProvider()
+    parent_tools = [_tool("web_search"), _tool("python_eval")]
+
+    await run_child(
+        _parent_ctx(),
+        _agent_card(),
+        TaskSpec(goal="anything", tool_allowlist=[]),
+        provider=provider,
+        parent_tools=parent_tools,
+    )
+
+    # Loop translates an empty list to ``tools=None`` on the provider call.
+    assert provider.tools_seen == [None]
