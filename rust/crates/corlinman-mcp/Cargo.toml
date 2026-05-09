@@ -17,5 +17,15 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 
+# Transport (iter 4): axum-mounted /mcp WebSocket route + a thin stdio
+# JSON-RPC peer used by C2's outbound MCP plugin adapter.
+axum = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+
 [dev-dependencies]
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "process", "io-util"] }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
