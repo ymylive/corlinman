@@ -51,6 +51,14 @@ katex-rs = "0.2.4"
 # `CanvasError::Adapter` so producers see "mermaid disabled in this
 # build" rather than a panic.
 deno_core = { version = "0.400.0", optional = true }
+# Iter 7 — content-addressed cache. `blake3` for the 256-bit cache
+# key (fast, pure-Rust SIMD, no C deps); `lru` for a fixed-capacity
+# `LruCache<[u8; 32], Arc<RenderedArtifact>>`. `lru` ships with no
+# default features and stays under 30 KB to the build. Both crates
+# are workspace-fresh; pinning here rather than adding to root
+# `Cargo.toml` keeps the iter-7 diff scoped to the crate.
+blake3 = { version = "1", default-features = false }
+lru = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 serde_json = { workspace = true }
