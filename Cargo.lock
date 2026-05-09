@@ -948,6 +948,7 @@ dependencies = [
  "dashmap",
  "futures",
  "hyper-util",
+ "libc",
  "notify",
  "regex",
  "schemars 0.8.22",
@@ -966,6 +967,7 @@ dependencies = [
  "uuid",
  "validator",
  "walkdir",
+ "which",
 ]
 
 [[package]]

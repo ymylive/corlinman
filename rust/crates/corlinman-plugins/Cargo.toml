@@ -39,3 +39,7 @@ hyper-util = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 regex = { workspace = true }
+which = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
