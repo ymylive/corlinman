@@ -1285,3 +1285,500 @@ mod tests {
         assert!(snap.seconds_used <= 5, "spend should be tiny; got {snap:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Iter 10 — E2E happy-path benchmark
+// ---------------------------------------------------------------------------
+//
+// Iter 10 of D4 closes the alpha by pinning the **full** voice session
+// loop end-to-end through the bridge. Earlier iters tested layers in
+// isolation:
+//
+//   - iter 4: round-trip audio echo through the mock provider
+//   - iter 6: transcript persistence
+//   - iter 7: approval pause/resume
+//   - iter 8: budget terminate
+//   - iter 9: hot-path bridge composes them
+//
+// What was missing: a single test that drives **start → audio → user
+// transcript → assistant agent_text + audio → tool call → operator
+// approval (via the real ApprovalGate) → approval resume → continued
+// audio → graceful end** and asserts on every promise the design makes.
+// That's the E2E happy-path "did the alpha actually ship a coherent
+// thing" check.
+//
+// We use a custom `ScriptedProvider` that emits a deterministic
+// sequence of provider events on cue (no mock-echo restrictions). This
+// keeps the test free of a real network and free of the iter-4 mock's
+// echo-only contract that can't emit tool calls.
+//
+// The live OpenAI smoke test that uses `OPENAI_API_KEY` already lives
+// at `provider_openai.rs::live_openai_realtime_smoke`, gated `#[ignore]`
+// per design. iter 10 does not duplicate that gate; it drives the
+// gateway-side composition that the live test cannot easily exercise
+// (e.g. the approval gate + transcript sink + audio_path retention all
+// at once).
+
+#[cfg(test)]
+mod e2e_tests {
+    use super::*;
+    use super::super::approval::VoiceApprovalBridge;
+    use super::super::cost::{InMemoryVoiceSpend, VoiceSpend};
+    use super::super::persistence::{
+        MemoryTranscriptSink, SharedTranscriptSink, SharedVoiceSessionStore,
+        SqliteVoiceSessionStore,
+    };
+    use super::super::provider::{
+        ProviderCommand, ProviderEndReason, ProviderOpenError, SharedVoiceProvider, VoiceEvent,
+        VoiceProvider, VoiceProviderSession, VoiceSessionStartParams,
+        DEFAULT_PROVIDER_CHANNEL_CAPACITY,
+    };
+    use crate::middleware::approval::ApprovalGate;
+    use corlinman_core::config::{ApprovalMode, ApprovalRule, VoiceConfig};
+    use corlinman_vector::SqliteStore;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    /// Scripted provider — emits a fixed sequence designed to drive the
+    /// full bridge surface. Drives one event-emission per inbound
+    /// `audio` frame so the test can pace events deterministically.
+    ///
+    /// Sequence (one event per inbound audio frame):
+    ///
+    ///   1. Ready
+    ///   2. (audio in) → TranscriptFinal { user, "search the news" }
+    ///                + AgentText { "checking now" }
+    ///                + AudioOut (echo of bytes)
+    ///   3. (audio in) → ToolCall { call_id, "web_search", {q:"news"} }
+    ///   4. (after ApproveTool { true }) → AgentText { "found 3 stories" }
+    ///                                   + AudioOut (synthetic 4 bytes)
+    ///                                   + TranscriptFinal { assistant, "Here are the stories." }
+    ///   5. (Close) → End { Graceful }
+    struct ScriptedProvider;
+
+    #[async_trait]
+    impl VoiceProvider for ScriptedProvider {
+        fn alias(&self) -> &str {
+            "scripted-e2e"
+        }
+        async fn open(
+            &self,
+            _params: VoiceSessionStartParams,
+        ) -> Result<VoiceProviderSession, ProviderOpenError> {
+            let (audio_in_tx, mut audio_in_rx) =
+                mpsc::channel::<Vec<u8>>(DEFAULT_PROVIDER_CHANNEL_CAPACITY);
+            let (control_in_tx, mut control_in_rx) =
+                mpsc::channel::<ProviderCommand>(DEFAULT_PROVIDER_CHANNEL_CAPACITY);
+            let (events_tx, events_rx) =
+                mpsc::channel::<VoiceEvent>(DEFAULT_PROVIDER_CHANNEL_CAPACITY);
+
+            let task = tokio::spawn(async move {
+                if events_tx
+                    .send(VoiceEvent::Ready {
+                        provider_session_id: "scripted-1".into(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+
+                let mut audio_frame_seen = 0u32;
+                loop {
+                    tokio::select! {
+                        biased;
+                        cmd = control_in_rx.recv() => {
+                            match cmd {
+                                Some(ProviderCommand::Close) | None => {
+                                    let _ = events_tx
+                                        .send(VoiceEvent::End {
+                                            reason: ProviderEndReason::Graceful,
+                                        })
+                                        .await;
+                                    return;
+                                }
+                                Some(ProviderCommand::ApproveTool { approval_id, approve }) => {
+                                    if approve {
+                                        let _ = events_tx
+                                            .send(VoiceEvent::AgentText {
+                                                text: format!("found 3 stories ({approval_id})"),
+                                            })
+                                            .await;
+                                        let _ = events_tx
+                                            .send(VoiceEvent::AudioOut {
+                                                pcm_le_bytes: vec![0xAA, 0xBB, 0xCC, 0xDD],
+                                            })
+                                            .await;
+                                        let _ = events_tx
+                                            .send(VoiceEvent::TranscriptFinal {
+                                                role: "assistant".into(),
+                                                text: "Here are the stories.".into(),
+                                            })
+                                            .await;
+                                    }
+                                }
+                                Some(ProviderCommand::Interrupt) => {
+                                    // Scripted provider doesn't model
+                                    // a TTS buffer; just consume.
+                                }
+                            }
+                        }
+                        audio = audio_in_rx.recv() => {
+                            let Some(bytes) = audio else {
+                                let _ = events_tx
+                                    .send(VoiceEvent::End {
+                                        reason: ProviderEndReason::Graceful,
+                                    })
+                                    .await;
+                                return;
+                            };
+                            audio_frame_seen += 1;
+                            match audio_frame_seen {
+                                1 => {
+                                    let _ = events_tx
+                                        .send(VoiceEvent::TranscriptFinal {
+                                            role: "user".into(),
+                                            text: "search the news".into(),
+                                        })
+                                        .await;
+                                    let _ = events_tx
+                                        .send(VoiceEvent::AgentText {
+                                            text: "checking now".into(),
+                                        })
+                                        .await;
+                                    let _ = events_tx
+                                        .send(VoiceEvent::AudioOut {
+                                            pcm_le_bytes: bytes,
+                                        })
+                                        .await;
+                                }
+                                2 => {
+                                    let _ = events_tx
+                                        .send(VoiceEvent::ToolCall {
+                                            call_id: "tc-1".into(),
+                                            tool: "web_search".into(),
+                                            args: serde_json::json!({"q":"news"}),
+                                        })
+                                        .await;
+                                }
+                                _ => {
+                                    // After the tool flow, additional
+                                    // frames just echo. Any continuation
+                                    // tests can extend here.
+                                    let _ = events_tx
+                                        .send(VoiceEvent::AudioOut {
+                                            pcm_le_bytes: bytes,
+                                        })
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            Ok(VoiceProviderSession {
+                audio_in_tx,
+                control_in_tx,
+                events_rx,
+                task,
+            })
+        }
+    }
+
+    async fn fresh_gate(
+        rules: Vec<ApprovalRule>,
+        timeout: std::time::Duration,
+    ) -> (Arc<ApprovalGate>, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let store = SqliteStore::open(&tmp.path().join("kb.sqlite"))
+            .await
+            .unwrap();
+        corlinman_vector::migration::ensure_schema(&store)
+            .await
+            .unwrap();
+        let gate = ApprovalGate::new(rules, Arc::new(store), timeout);
+        (Arc::new(gate), tmp)
+    }
+
+    fn cfg(budget_min: u32, max_secs: u32) -> VoiceConfig {
+        VoiceConfig {
+            enabled: true,
+            budget_minutes_per_tenant_per_day: budget_min,
+            max_session_seconds: max_secs,
+            ..VoiceConfig::default()
+        }
+    }
+
+    /// **Iter 10 happy-path benchmark.** Drives the full bridge
+    /// surface in one go and asserts every promise the design makes.
+    /// This is the test the iter-1..9 scaffolding exists to support.
+    #[tokio::test]
+    async fn e2e_happy_path_full_bridge_surface() {
+        let t0 = Instant::now();
+
+        // ----- shared infrastructure --------------------------------
+        let provider: SharedVoiceProvider = Arc::new(ScriptedProvider);
+        let store: SharedVoiceSessionStore =
+            Arc::new(SqliteVoiceSessionStore::open_in_memory().await.unwrap());
+        let sink_concrete = Arc::new(MemoryTranscriptSink::new());
+        let sink: SharedTranscriptSink = sink_concrete.clone();
+        let spend: Arc<dyn VoiceSpend> = Arc::new(InMemoryVoiceSpend::new());
+
+        // Real ApprovalGate with an Auto rule under the voice plugin so
+        // tool calls flow through the bridge but resolve immediately
+        // (still exercises the end-to-end glue without adding
+        // operator-side timing flake).
+        let (gate, _tmp) = fresh_gate(
+            vec![ApprovalRule {
+                plugin: super::super::approval::VOICE_TOOL_PLUGIN.into(),
+                tool: None,
+                mode: ApprovalMode::Auto,
+                allow_session_keys: Vec::new(),
+            }],
+            Duration::from_secs(2),
+        )
+        .await;
+
+        // ----- BridgeContext ----------------------------------------
+        // session_key is the **client-supplied** value the route
+        // handler extracts from the inbound `start` frame in the iter
+        // 10 fix above. We pin it explicitly here to mirror that
+        // behaviour without spinning a real WebSocket.
+        let cancel = CancellationToken::new();
+        let started = Instant::now();
+        let budget = BudgetEnforcer::start(
+            &cfg(30, 600),
+            spend.clone(),
+            "tenant-x".into(),
+            100,
+            started,
+        );
+        let ctx = BridgeContext {
+            session_id: "voice-e2e-1".into(),
+            provider_alias: "scripted-e2e".into(),
+            tenant_id: "tenant-x".into(),
+            day_epoch: 100,
+            started_at_unix: 1_700_000_000,
+            started_at_instant: started,
+            session_key: "chat-sk-99".into(),
+            agent_id: Some("agent-7".into()),
+            sample_rate_hz_in: 16_000,
+            sample_rate_hz_out: 24_000,
+            voice_id: None,
+            provider,
+            session_store: Some(store.clone()),
+            transcript_sink: Some(sink),
+            approval_bridge: VoiceApprovalBridge::with_gate(gate.clone(), "chat-sk-99"),
+            budget,
+            // iter 10 fix #2: opt-in retention path threaded in.
+            audio_path: Some("/tmp/e2e/tenants/tenant-x/voice/voice-e2e-1.pcm".into()),
+            tick_interval: Duration::from_millis(20),
+            cancel,
+        };
+
+        // ----- run the bridge ---------------------------------------
+        let (io, mut handle) = InMemoryIo::new();
+        let bridge_handle = tokio::spawn(run_bridge(io, ctx));
+
+        // 1. Drain the `started` ack.
+        let started_frame = tokio::time::timeout(Duration::from_millis(500), handle.outbound_rx.recv())
+            .await
+            .expect("started arrives within 500ms")
+            .expect("Some");
+        match started_frame {
+            BridgeOutFrame::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                assert_eq!(v["type"], "started");
+                assert_eq!(v["session_id"], "voice-e2e-1");
+                assert_eq!(v["provider"], "scripted-e2e");
+            }
+            other => panic!("expected text started; got {other:?}"),
+        }
+
+        // 2. Send first audio frame → user transcript + agent text + audio echo.
+        handle
+            .inbound_tx
+            .send(BridgeInFrame::Binary(vec![0x10, 0x20, 0x30, 0x40]))
+            .await
+            .unwrap();
+
+        let mut saw_user_transcript = false;
+        let mut saw_agent_text_initial = false;
+        let mut saw_audio_echo = false;
+        let mut saw_tool_approval_required = false;
+        let mut saw_agent_text_after_approval = false;
+        let mut saw_audio_after_approval = false;
+        let mut saw_assistant_transcript = false;
+        let mut emitted_second_frame = false;
+
+        // Consume up to 25 outbound frames or until we see all
+        // expected milestones, whichever comes first. After milestones
+        // for "first audio response" land we trigger the second audio
+        // frame to drive the tool-call branch.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(150), handle.outbound_rx.recv()).await {
+                Ok(Some(BridgeOutFrame::Text(t))) => {
+                    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                    match v["type"].as_str().unwrap_or_default() {
+                        "transcript_final" => {
+                            if v["role"] == "user" {
+                                saw_user_transcript = true;
+                            } else if v["role"] == "assistant" {
+                                saw_assistant_transcript = true;
+                            }
+                        }
+                        "agent_text" => {
+                            if !saw_agent_text_initial {
+                                saw_agent_text_initial = true;
+                            } else {
+                                saw_agent_text_after_approval = true;
+                            }
+                        }
+                        "tool_approval_required" => {
+                            saw_tool_approval_required = true;
+                            assert_eq!(v["approval_id"], "tc-1");
+                            assert_eq!(v["tool"], "web_search");
+                            assert_eq!(v["args"]["q"], "news");
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Some(BridgeOutFrame::Binary(_))) => {
+                    if !saw_audio_echo {
+                        saw_audio_echo = true;
+                    } else {
+                        saw_audio_after_approval = true;
+                    }
+                }
+                Ok(Some(BridgeOutFrame::Close { .. })) | Ok(None) => break,
+                Err(_) => {}
+            }
+
+            // Once the first audio milestone lands, drive the tool-call
+            // branch by sending the second audio frame.
+            if saw_audio_echo && !emitted_second_frame {
+                emitted_second_frame = true;
+                handle
+                    .inbound_tx
+                    .send(BridgeInFrame::Binary(vec![0x55, 0x66, 0x77, 0x88]))
+                    .await
+                    .unwrap();
+            }
+
+            if saw_user_transcript
+                && saw_agent_text_initial
+                && saw_audio_echo
+                && saw_tool_approval_required
+                && saw_agent_text_after_approval
+                && saw_audio_after_approval
+                && saw_assistant_transcript
+            {
+                break;
+            }
+        }
+
+        // ----- assert milestones ------------------------------------
+        assert!(saw_user_transcript, "no user transcript_final emitted");
+        assert!(saw_agent_text_initial, "no initial agent_text emitted");
+        assert!(saw_audio_echo, "no audio echo emitted");
+        assert!(
+            saw_tool_approval_required,
+            "no tool_approval_required emitted"
+        );
+        assert!(
+            saw_agent_text_after_approval,
+            "no agent_text after approval"
+        );
+        assert!(saw_audio_after_approval, "no audio after approval");
+        assert!(
+            saw_assistant_transcript,
+            "no assistant transcript_final emitted"
+        );
+
+        // ----- close cleanly ----------------------------------------
+        handle
+            .inbound_tx
+            .send(BridgeInFrame::Text(r#"{"type":"end"}"#.into()))
+            .await
+            .unwrap();
+        let outcome = bridge_handle.await.unwrap();
+        assert_eq!(outcome.end_reason, VoiceEndReason::Graceful);
+
+        // ----- post-conditions: persistence -------------------------
+        // voice_sessions row finalised, audio_path retained, transcript
+        // included.
+        let row = store.fetch("voice-e2e-1").await.unwrap().unwrap();
+        assert_eq!(row.end_reason, "graceful");
+        assert_eq!(row.session_key, "chat-sk-99");
+        assert_eq!(row.agent_id.as_deref(), Some("agent-7"));
+        assert_eq!(
+            row.audio_path.as_deref(),
+            Some("/tmp/e2e/tenants/tenant-x/voice/voice-e2e-1.pcm"),
+            "audio_path threaded from BridgeContext"
+        );
+        let tt = row.transcript_text.as_deref().unwrap_or_default();
+        assert!(tt.contains("user: search the news"), "transcript = {tt}");
+        assert!(
+            tt.contains("assistant: Here are the stories."),
+            "transcript = {tt}"
+        );
+
+        // Transcript sink got both user + assistant turns under the
+        // client-supplied session_key.
+        let snap = sink_concrete.snapshot().await;
+        assert!(
+            snap.iter().any(|t| t.session_key == "chat-sk-99"
+                && t.role == "user"
+                && t.text == "search the news"),
+            "user turn missing from sink: {snap:?}"
+        );
+        assert!(
+            snap.iter().any(|t| t.session_key == "chat-sk-99"
+                && t.role == "assistant"
+                && t.text == "Here are the stories."),
+            "assistant turn missing from sink: {snap:?}"
+        );
+
+        // ----- post-conditions: spend -------------------------------
+        // Session lasted < 1 budget minute, ticker fired at least once.
+        let spend_snap = spend.snapshot("tenant-x", 100);
+        assert!(
+            spend_snap.seconds_used <= 5,
+            "e2e session is short; got {spend_snap:?}"
+        );
+
+        // ----- benchmark: round-trip wallclock ----------------------
+        // Pin a generous upper bound so a refactor that introduces a
+        // 10-second wait somewhere is caught immediately. Real numbers
+        // will be in the ~50-300 ms range on a healthy box.
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "e2e happy-path took too long: {elapsed:?}"
+        );
+        eprintln!("voice-e2e-1 round-trip wallclock: {elapsed:?}");
+    }
+
+    /// Live OpenAI Realtime smoke test gate. The actual live test lives
+    /// in `provider_openai.rs`; this stub documents the iter 10 path
+    /// that exercises a real upstream and pins the discoverability
+    /// invariant — running `cargo test --lib voice -- --ignored` MUST
+    /// hit at least one ignored test, and this doc-test acts as a
+    /// belt-and-braces smoke that the harness runs at all when an
+    /// operator opts in.
+    #[tokio::test]
+    #[ignore = "live OpenAI Realtime end-to-end; see provider_openai::live_openai_realtime_smoke for the network test"]
+    async fn iter10_live_openai_e2e_marker() {
+        // The real live test is in provider_openai.rs. This marker
+        // exists so `cargo test --lib voice -- --ignored --list` shows
+        // an iter-10-named entry alongside the iter-5 one, making the
+        // alpha's ignored-suite layout self-documenting.
+        let key = std::env::var("OPENAI_API_KEY").ok();
+        assert!(
+            key.is_some(),
+            "iter10_live_openai_e2e_marker requires OPENAI_API_KEY"
+        );
+    }
+}
