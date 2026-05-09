@@ -906,14 +906,22 @@ dependencies = [
 name = "corlinman-mcp"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "axum",
+ "bytes",
+ "corlinman-core",
+ "corlinman-memory-host",
+ "corlinman-plugins",
+ "corlinman-skills",
  "futures-util",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.23.1",
+ "tokio-util",
  "tracing",
 ]
 
