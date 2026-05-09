@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use corlinman_core::CorlinmanError;
 
 pub mod jsonrpc_stdio;
+pub mod mcp;
 pub mod mcp_stdio;
 pub mod service_grpc;
 
