@@ -17,6 +17,7 @@
 //!
 //! See `docs/design/phase4-w4-d4-design.md`.
 
+pub mod approval;
 pub mod cost;
 pub mod framing;
 pub mod persistence;
@@ -45,6 +46,7 @@ use cost::{
     evaluate_budget, next_utc_midnight, utc_day_epoch, BudgetDecision, BudgetDenyReason,
     InMemoryVoiceSpend, VoiceSpend,
 };
+use crate::middleware::approval::ApprovalGate;
 use framing::{accept_subprotocol, encode_server_control, ServerControl, SubprotocolDecision};
 use persistence::{SharedTranscriptSink, SharedVoiceSessionStore};
 use provider::SharedVoiceProvider;
@@ -83,6 +85,13 @@ pub struct VoiceState {
     /// row to the chat session table so the agent loop sees voice
     /// turns indistinguishably from typed turns.
     pub transcript_sink: Option<SharedTranscriptSink>,
+    /// Iter 7+ tool-approval gate. `None` keeps the chat-side gate
+    /// untouched and makes voice tool-calls auto-approve (matches the
+    /// chat path's `NoMatch → Approved` default). When `Some`, every
+    /// `VoiceEvent::ToolCall` from the provider is filtered through
+    /// the same `pending_approvals` queue that text chat uses, so an
+    /// operator decides voice + chat tool calls from one admin UI.
+    pub approval_gate: Option<Arc<ApprovalGate>>,
 }
 
 impl VoiceState {
@@ -93,6 +102,7 @@ impl VoiceState {
             provider: None,
             session_store: None,
             transcript_sink: None,
+            approval_gate: None,
         }
     }
 
@@ -106,6 +116,7 @@ impl VoiceState {
             provider: None,
             session_store: None,
             transcript_sink: None,
+            approval_gate: None,
         }
     }
 
@@ -132,6 +143,15 @@ impl VoiceState {
     /// without the route handler ever taking a direct dependency.
     pub fn with_transcript_sink(mut self, sink: SharedTranscriptSink) -> Self {
         self.transcript_sink = Some(sink);
+        self
+    }
+
+    /// Iter 7: wire the shared `ApprovalGate` so voice tool-calls go
+    /// through the same `pending_approvals` queue as the chat surface.
+    /// Construction site is `gateway/src/routes/mod.rs` where the
+    /// gate is built once per process and shared with `AdminState`.
+    pub fn with_approval_gate(mut self, gate: Arc<ApprovalGate>) -> Self {
+        self.approval_gate = Some(gate);
         self
     }
 }
