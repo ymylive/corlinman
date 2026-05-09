@@ -471,6 +471,7 @@ mod tests {
                 args: vec![],
                 env: Default::default(),
             },
+            mcp: None,
             communication: Communication {
                 timeout_ms: Some(2_000),
             },
