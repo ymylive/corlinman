@@ -168,6 +168,40 @@ impl MemoryHost for LocalSqliteHost {
             .context("LocalSqliteHost: delete chunk")?;
         Ok(())
     }
+
+    async fn get(&self, id: &str) -> Result<Option<MemoryHit>> {
+        // Phase 4 W3 C1 (MCP `resources/read` over `corlinman://memory/`):
+        // a single-row lookup keyed by the chunk id we returned from
+        // `upsert` / `query`.
+        let chunk_id: i64 = match id.parse() {
+            Ok(n) => n,
+            // Well-formed id requirement is on the caller; an unparseable
+            // id is "unknown to this host", not a hard error.
+            Err(_) => return Ok(None),
+        };
+        let rows = self
+            .store
+            .query_chunks_by_ids(&[chunk_id])
+            .await
+            .context("LocalSqliteHost::get: query chunk by id")?;
+        let chunk = match rows.into_iter().next() {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        Ok(Some(MemoryHit {
+            id: chunk.id.to_string(),
+            content: chunk.content,
+            // No relevance score for direct id lookup — caller didn't
+            // pose a query. 1.0 is the "fully matched" sentinel.
+            score: 1.0,
+            source: self.name.clone(),
+            metadata: serde_json::json!({
+                "file_id": chunk.file_id,
+                "chunk_index": chunk.chunk_index,
+                "namespace": chunk.namespace,
+            }),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -268,6 +302,41 @@ mod tests {
             .await
             .unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_round_trips_upserted_doc() {
+        let (host, _tmp) = fresh_host().await;
+        let id = host
+            .upsert(MemoryDoc {
+                content: "the quick brown fox".into(),
+                metadata: serde_json::Value::Null,
+                namespace: Some("notes".into()),
+            })
+            .await
+            .unwrap();
+
+        let hit = host
+            .get(&id)
+            .await
+            .unwrap()
+            .expect("upserted id must be retrievable");
+        assert_eq!(hit.id, id);
+        assert_eq!(hit.content, "the quick brown fox");
+        assert_eq!(hit.source, "local-kb");
+        // Score is the "direct lookup" sentinel.
+        assert!((hit.score - 1.0).abs() < f32::EPSILON);
+        assert_eq!(hit.metadata["namespace"], "notes");
+    }
+
+    #[tokio::test]
+    async fn get_unknown_id_returns_none() {
+        let (host, _tmp) = fresh_host().await;
+        // Numeric but unused id.
+        assert!(host.get("999999").await.unwrap().is_none());
+        // Non-numeric id maps to "unknown" too (lenient — caller decides
+        // whether to surface as an error).
+        assert!(host.get("not-a-number").await.unwrap().is_none());
     }
 
     #[tokio::test]

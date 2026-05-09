@@ -28,6 +28,7 @@ bytes = { workspace = true }
 
 # Capability adapters (iter 5-7): tools wraps PluginRegistry + runtime,
 # prompts wraps SkillRegistry, resources wraps MemoryHost + skills.
+anyhow = { workspace = true }
 corlinman-core = { path = "../corlinman-core" }
 corlinman-plugins = { path = "../corlinman-plugins" }
 corlinman-skills = { path = "../corlinman-skills" }

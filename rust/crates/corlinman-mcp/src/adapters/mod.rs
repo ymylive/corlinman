@@ -21,9 +21,11 @@
 //! in the auth crate. The shape is upward-compatible with iter 8.
 
 pub mod prompts;
+pub mod resources;
 pub mod tools;
 
 pub use prompts::PromptsAdapter;
+pub use resources::ResourcesAdapter;
 pub use tools::ToolsAdapter;
 
 use async_trait::async_trait;
