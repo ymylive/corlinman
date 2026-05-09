@@ -23,10 +23,12 @@ use serde::{Deserialize, Serialize};
 
 pub mod federation;
 pub mod local_sqlite;
+pub mod read_only;
 pub mod remote_http;
 
 pub use federation::{FederatedMemoryHost, FusionStrategy};
 pub use local_sqlite::LocalSqliteHost;
+pub use read_only::{ReadOnlyMemoryHost, READ_ONLY_REJECT_TAG};
 pub use remote_http::RemoteHttpHost;
 
 /// A pluggable memory source.
