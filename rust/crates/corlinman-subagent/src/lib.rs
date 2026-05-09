@@ -24,6 +24,8 @@
 //!
 //! The full 10-iter plan lives in `docs/design/phase4-w4-d3-design.md`.
 
+pub mod supervisor;
 pub mod types;
 
+pub use supervisor::{AcquireReject, Slot, Supervisor, SupervisorPolicy};
 pub use types::{FinishReason, ParentContext, TaskResult, TaskSpec, ToolCallSummary};
