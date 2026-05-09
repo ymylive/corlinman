@@ -25,6 +25,15 @@ from corlinman_episodes.distiller import (
     make_echo_provider,
     redact_pii,
 )
+from corlinman_episodes.embed import (
+    EmbeddingDimMismatchError,
+    EmbeddingFn,
+    EmbeddingProvider,
+    EmbedSummary,
+    decode_embedding,
+    encode_embedding,
+    populate_pending_embeddings,
+)
 from corlinman_episodes.importance import score
 from corlinman_episodes.runner import RunSummary, episodes_run_once
 from corlinman_episodes.sources import (
@@ -50,6 +59,7 @@ from corlinman_episodes.store import (
     Episode,
     EpisodeKind,
     EpisodesStore,
+    PendingEmbeddingRow,
     RunWindowConflict,
     RunWindowConflictError,
     new_episode_id,
@@ -67,6 +77,10 @@ __all__ = [
     "SCHEMA_SQL",
     "DistillationRun",
     "DistilledSummary",
+    "EmbedSummary",
+    "EmbeddingDimMismatchError",
+    "EmbeddingFn",
+    "EmbeddingProvider",
     "Episode",
     "EpisodeKind",
     "EpisodesConfig",
@@ -74,6 +88,7 @@ __all__ = [
     "HistoryRow",
     "HookEventRow",
     "IdentityMergeRow",
+    "PendingEmbeddingRow",
     "RunSummary",
     "RunWindowConflict",
     "RunWindowConflictError",
@@ -85,12 +100,15 @@ __all__ = [
     "SummaryProvider",
     "classify",
     "collect_bundles",
+    "decode_embedding",
     "distill",
+    "encode_embedding",
     "episodes_run_once",
     "make_constant_provider",
     "make_echo_provider",
     "new_episode_id",
     "new_run_id",
+    "populate_pending_embeddings",
     "redact_pii",
     "score",
     "select_window",

@@ -213,6 +213,21 @@ class Episode:
     schema_version: int = 1
 
 
+@dataclass(frozen=True)
+class PendingEmbeddingRow:
+    """Lightweight projection of an episode awaiting an embedding pass.
+
+    Returned by :meth:`EpisodesStore.fetch_pending_embeddings` so the
+    embedder doesn't have to materialise full :class:`Episode` rows
+    just to call the provider with ``summary_text``. Frozen so the
+    embedder can stash the list and trust ids stay stable through the
+    sweep.
+    """
+
+    episode_id: str
+    summary_text: str
+
+
 @dataclass
 class DistillationRun:
     """Plain dataclass mirror of an ``episode_distillation_runs`` row."""
@@ -371,6 +386,84 @@ class EpisodesStore:
             ),
         )
         await self.conn.commit()
+
+    async def update_episode_embedding(
+        self,
+        *,
+        episode_id: str,
+        embedding: bytes,
+        embedding_dim: int,
+    ) -> None:
+        """Backfill the ``embedding`` BLOB + ``embedding_dim`` for one row.
+
+        Used by :func:`corlinman_episodes.embed.populate_pending_embeddings`
+        — the runner writes episodes with ``embedding=NULL`` so a
+        remote-embedding outage doesn't gate summary persistence; this
+        method completes the second pass.
+
+        Both columns are stamped in the same UPDATE so a partial write
+        can never leave a row with a dim but no vector. ``embedding_dim``
+        is committed alongside the BLOB rather than inferred from the
+        BLOB length on read so a future schema migration that changes
+        the on-disk encoding (e.g. f16) doesn't have to re-derive it.
+        """
+        if embedding_dim <= 0:
+            raise ValueError(
+                f"embedding_dim must be positive, got {embedding_dim}"
+            )
+        # Sanity-check the BLOB size matches the declared dim (f32 = 4
+        # bytes per value). The check is cheap and catches a wrong-dim
+        # callable upstream before the row is committed.
+        if len(embedding) != embedding_dim * 4:
+            raise ValueError(
+                f"embedding bytes {len(embedding)} does not match "
+                f"embedding_dim*4 = {embedding_dim * 4}"
+            )
+        await self.conn.execute(
+            """UPDATE episodes
+               SET embedding = ?, embedding_dim = ?
+               WHERE id = ?""",
+            (embedding, int(embedding_dim), episode_id),
+        )
+        await self.conn.commit()
+
+    async def fetch_pending_embeddings(
+        self,
+        *,
+        tenant_id: str,
+        limit: int | None = None,
+    ) -> list[PendingEmbeddingRow]:
+        """Return rows that need an embedding pass, newest first.
+
+        The second-pass embedder selects rows where ``embedding IS NULL``
+        (rather than re-checking ``embedding_dim`` or some sentinel) —
+        the column is the source of truth, and the ``UPDATE`` writes
+        both atomically so a half-finished row can't show up here as
+        "needs work".
+
+        ``limit=None`` means no cap; the caller can pass a small
+        ``max_episodes`` to bound a single sweep when an embedding
+        provider is rate-limited.
+        """
+        sql = (
+            "SELECT id, summary_text FROM episodes "
+            "WHERE tenant_id = ? AND embedding IS NULL "
+            "ORDER BY ended_at DESC, id DESC"
+        )
+        params: tuple[Any, ...] = (tenant_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (tenant_id, int(limit))
+        cursor = await self.conn.execute(sql, params)
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [
+            PendingEmbeddingRow(
+                episode_id=str(r[0]),
+                summary_text=str(r[1]),
+            )
+            for r in rows
+        ]
 
     async def find_episode_by_natural_key(
         self,
@@ -671,6 +764,7 @@ __all__ = [
     "Episode",
     "EpisodeKind",
     "EpisodesStore",
+    "PendingEmbeddingRow",
     "RunWindowConflict",
     "RunWindowConflictError",
     "new_episode_id",
