@@ -94,6 +94,13 @@ pub struct Config {
     #[serde(default)]
     #[validate(nested)]
     pub canvas: CanvasConfig,
+    /// Phase 4 W3 C1: Model Context Protocol server. Mounted at `/mcp`
+    /// when `enabled = true`. Mirrors the shape of `[wstool]` plus a
+    /// `tokens` array of per-client ACLs. Default keeps `enabled =
+    /// false`, so existing configs deserialise unchanged.
+    #[serde(default)]
+    #[validate(nested)]
+    pub mcp: McpConfig,
     #[serde(default)]
     #[validate(nested)]
     pub nodebridge: NodeBridgeConfig,
@@ -159,6 +166,7 @@ impl Default for Config {
             vector: VectorConfig::default(),
             wstool: WsToolConfig::default(),
             canvas: CanvasConfig::default(),
+            mcp: McpConfig::default(),
             nodebridge: NodeBridgeConfig::default(),
             evolution: EvolutionConfig::default(),
             memory: MemoryConfig::default(),
@@ -1331,6 +1339,127 @@ impl Default for CanvasConfig {
         Self {
             host_endpoint_enabled: false,
             session_ttl_secs: 1800,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [mcp.server] — Model Context Protocol server.
+// ---------------------------------------------------------------------------
+
+/// Phase 4 W3 C1 — server-side MCP (Model Context Protocol 2024-11-05)
+/// endpoint mounted at `/mcp`. Lets Claude Desktop and any MCP client
+/// list & invoke corlinman tools / resources / prompts over a single
+/// WebSocket. Mirrors the shape of [`WsToolConfig`] (`bind` + token);
+/// the live `Vec<TokenAcl>` ACLs are captured by the
+/// `[[mcp.server.tokens]]` array — see [`McpTokenConfig`].
+///
+/// Defaults: `enabled = false` (operator opts in), bind to loopback
+/// `127.0.0.1:18791` (matches `phase4-roadmap.md:368`), heartbeat 20 s.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpConfig {
+    /// Top-level enable flag. When `false` the gateway skips mounting
+    /// `/mcp` entirely.
+    pub enabled: bool,
+    /// `[mcp.server]` knobs. Nested so future `[mcp.client]` (C2's
+    /// outbound mcp-stdio plugin) can land alongside without churn.
+    #[validate(nested)]
+    pub server: McpServerSection,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            server: McpServerSection::default(),
+        }
+    }
+}
+
+/// `[mcp.server]` knobs. Same shape as [`WsToolConfig`] (bind + token)
+/// plus per-token ACLs.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpServerSection {
+    #[validate(length(min = 1))]
+    pub bind: String,
+    /// `Origin` header allowlist for the WebSocket upgrade.
+    /// Empty list disables the check (any Origin admitted).
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+    /// Per-frame size cap (bytes). Inbound frames over this trigger a
+    /// WS close with code 1009 (Message Too Big).
+    #[validate(range(min = 1024, max = 16_777_216))]
+    pub max_frame_bytes: u32,
+    /// Idle WS dropped after this many seconds.
+    #[validate(range(min = 30, max = 86_400))]
+    pub inactivity_timeout_secs: u32,
+    /// PING interval (seconds). Mirrors wstool's default heartbeat.
+    #[validate(range(min = 1, max = 3600))]
+    pub heartbeat_secs: u32,
+    /// Maximum concurrent sessions across all tokens.
+    #[validate(range(min = 1, max = 1024))]
+    pub max_concurrent_sessions: u32,
+    /// One entry per accepted client. Empty when `enabled = true`
+    /// surfaces a validator warning (operator may be staging).
+    #[serde(default)]
+    pub tokens: Vec<McpTokenConfig>,
+}
+
+impl Default for McpServerSection {
+    fn default() -> Self {
+        Self {
+            bind: "127.0.0.1:18791".into(),
+            allowed_origins: Vec::new(),
+            max_frame_bytes: 1_048_576, // 1 MiB
+            inactivity_timeout_secs: 300,
+            heartbeat_secs: 20,
+            max_concurrent_sessions: 8,
+            tokens: Vec::new(),
+        }
+    }
+}
+
+/// One `[[mcp.server.tokens]]` block.
+///
+/// Each entry resolves to a `corlinman_mcp::TokenAcl` at runtime. The
+/// allowlists default to `["*"]` (everything) only when the operator
+/// explicitly sets them; the safe out-of-the-box default is the empty
+/// list (fail-closed). Tenant defaults to the workspace's
+/// `DEFAULT_TENANT_ID`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpTokenConfig {
+    /// Opaque bearer string. Required (validator catches empty entries).
+    #[validate(length(min = 1))]
+    pub token: String,
+    /// Free-form label for logging / metrics.
+    pub label: String,
+    /// Glob patterns against `<plugin>:<tool>`.
+    #[serde(default)]
+    pub tools_allowlist: Vec<String>,
+    /// URI-scheme prefixes (e.g. `"memory"`, `"skill"`, `"persona"`).
+    #[serde(default)]
+    pub resources_allowed: Vec<String>,
+    /// Skill-name globs surfaced as MCP prompts.
+    #[serde(default)]
+    pub prompts_allowed: Vec<String>,
+    /// Tenant id this token's memory reads route to. Empty / missing
+    /// → falls back to `corlinman_tenant::DEFAULT_TENANT_ID`.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+}
+
+impl Default for McpTokenConfig {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+            label: String::new(),
+            tools_allowlist: Vec::new(),
+            resources_allowed: Vec::new(),
+            prompts_allowed: Vec::new(),
+            tenant_id: None,
         }
     }
 }

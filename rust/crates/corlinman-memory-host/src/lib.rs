@@ -51,6 +51,19 @@ pub trait MemoryHost: Send + Sync {
     /// Delete by id.
     async fn delete(&self, id: &str) -> anyhow::Result<()>;
 
+    /// Fetch a single document by id. Returns `Ok(None)` when the id
+    /// is well-formed but unknown to this host; returns `Err(...)` on
+    /// transport / decode failures only.
+    ///
+    /// Default impl returns `Err(anyhow!("get not supported"))` so
+    /// adapters that don't yet implement read-by-id continue compiling.
+    /// The Phase 4 W3 C1 (MCP) `resources/read` flow needs this hook;
+    /// `local_sqlite::LocalSqliteHost` overrides it (federated +
+    /// remote-http inherit the default until they grow a real impl).
+    async fn get(&self, _id: &str) -> anyhow::Result<Option<MemoryHit>> {
+        anyhow::bail!("MemoryHost::get is not implemented for this adapter")
+    }
+
     /// Optional: health check for observability.
     async fn health(&self) -> HealthStatus {
         HealthStatus::Ok
