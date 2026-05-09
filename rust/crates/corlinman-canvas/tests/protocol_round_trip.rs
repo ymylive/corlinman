@@ -118,29 +118,20 @@ fn unknown_kind_round_trips_as_error() {
 
 /// Renderer returns `Unimplemented` for kinds whose adapters
 /// haven't shipped yet. Iter 2 wired `Code`; iter 3 wired `Table`;
-/// iter 4 wired `Latex`. Mermaid / Sparkline remain stubbed until
-/// iter 5-6.
+/// iter 4 wired `Latex`; iter 5 wired `Sparkline`. Only `Mermaid`
+/// remains stubbed until iter 6.
 #[test]
 fn renderer_stub_returns_unimplemented_for_unwired_kinds() {
     let renderer = Renderer::new();
 
-    // Iter 2 wired Code, iter 3 wired Table, iter 4 wired Latex.
-    // Mermaid / Sparkline still stub.
-    let unwired: Vec<(ArtifactKind, ArtifactBody)> = vec![
-        (
-            ArtifactKind::Mermaid,
-            ArtifactBody::Mermaid {
-                diagram: "graph LR; A-->B".into(),
-            },
-        ),
-        (
-            ArtifactKind::Sparkline,
-            ArtifactBody::Sparkline {
-                values: vec![1.0, 2.0],
-                unit: None,
-            },
-        ),
-    ];
+    // Iter 2 wired Code, iter 3 wired Table, iter 4 wired Latex,
+    // iter 5 wired Sparkline. Mermaid still stub.
+    let unwired: Vec<(ArtifactKind, ArtifactBody)> = vec![(
+        ArtifactKind::Mermaid,
+        ArtifactBody::Mermaid {
+            diagram: "graph LR; A-->B".into(),
+        },
+    )];
 
     for (kind, body) in unwired {
         let payload = CanvasPresentPayload {

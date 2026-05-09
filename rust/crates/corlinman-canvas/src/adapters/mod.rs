@@ -7,4 +7,5 @@
 
 pub mod code;
 pub mod latex;
+pub mod sparkline;
 pub mod table;
