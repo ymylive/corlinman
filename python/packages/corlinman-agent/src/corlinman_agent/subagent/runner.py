@@ -25,6 +25,7 @@ where :class:`ReasoningLoop` and the providers live.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Sequence
 from dataclasses import replace
@@ -176,6 +177,14 @@ async def run_child(
     )
 
 
+#: Cooperative-shutdown grace period after a hard timeout fires. After
+#: ``ReasoningLoop.cancel`` is signalled the runner waits up to this many
+#: seconds for the loop's own cancel-aware paths to drain (yielding the
+#: terminal :class:`ErrorEvent`) before force-dropping the loop task.
+#: Matches design § "Timeout handling" — "wait 2s, drops the future".
+_TIMEOUT_GRACE_SECONDS: float = 2.0
+
+
 async def _drive_and_collect(
     loop: ReasoningLoop,
     chat_start: ChatStart,
@@ -183,17 +192,113 @@ async def _drive_and_collect(
     started_ms: int,
     task: TaskSpec,
 ) -> TaskResult:
-    """Drain :meth:`ReasoningLoop.run` into a :class:`TaskResult`.
+    """Drain :meth:`ReasoningLoop.run` into a :class:`TaskResult`,
+    enforcing :attr:`TaskSpec.max_wall_seconds` cooperatively.
 
-    Pulled out as a helper so the iter-6 timeout layer can wrap *just*
-    this step in ``tokio::time::timeout`` without re-doing persona /
-    message construction.
+    Iter 6 (this revision): the drain is wrapped in
+    ``asyncio.wait_for(..., max_wall_seconds)``. On expiry the runner
+    cooperates with the loop's existing cancel path
+    (``ReasoningLoop.cancel("subagent_timeout")`` →
+    ``ErrorEvent(reason="cancelled")``) for up to
+    :data:`_TIMEOUT_GRACE_SECONDS`, then force-drops the task. Either
+    way: the partial ``output_text`` collected so far is preserved
+    verbatim and :attr:`FinishReason.TIMEOUT` lands on the result so
+    the parent's LLM observes the wall-clock failure mode.
+
+    The timeout is enforced from Python rather than from the Rust
+    supervisor's ``tokio::time::timeout`` because the PyO3 bridge
+    (iter 5) hands control to Python under a sync GIL acquisition;
+    a parallel ``tokio::time::timeout`` cannot interrupt that. Putting
+    the budget here keeps the contract self-consistent and lets unit
+    tests exercise it without spinning Rust.
     """
     output_chunks: list[str] = []
     tool_calls: list[ToolCallSummary] = []
-    finish_reason = FinishReason.STOP
-    error_msg: str | None = None
+    state: _DrainState = {
+        "finish_reason": FinishReason.STOP,
+        "error_msg": None,
+    }
 
+    drain_task: asyncio.Task[None] = asyncio.ensure_future(
+        _drain_events(loop, chat_start, output_chunks, tool_calls, state)
+    )
+    try:
+        # ``asyncio.wait_for`` is the cooperative analogue the design
+        # called for. ``task.max_wall_seconds`` is the hard ceiling; the
+        # supervisor (iter 5) caps this from above via the policy
+        # ``max_wall_seconds_ceiling`` (default 300 — see config block).
+        await asyncio.wait_for(
+            asyncio.shield(drain_task),
+            timeout=float(task.max_wall_seconds),
+        )
+    except asyncio.TimeoutError:
+        # Cooperative cancel first: the loop's own cancel handler emits
+        # an ErrorEvent and drains, which lets the drain coroutine exit
+        # cleanly with the partial output already accumulated.
+        loop.cancel("subagent_timeout")
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(drain_task),
+                timeout=_TIMEOUT_GRACE_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # Cooperative grace exhausted — force-drop. ``cancel()`` on
+            # the asyncio.Task throws CancelledError into the coroutine;
+            # we suppress it because we've already captured whatever
+            # the drain produced before the freeze.
+            drain_task.cancel()
+            try:
+                await drain_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        state["finish_reason"] = FinishReason.TIMEOUT
+        # Preserve any partial error_msg the loop set (e.g. cancelled
+        # ErrorEvent). If none, leave error blank — TIMEOUT is itself
+        # the failure indicator the parent's LLM branches on.
+    except Exception as exc:  # pragma: no cover - belt and braces
+        logger.warning(
+            "subagent.runner.loop_uncaught",
+            child_session_key=child_ctx.parent_session_key,
+            error=str(exc),
+        )
+        state["error_msg"] = str(exc)
+        state["finish_reason"] = FinishReason.ERROR
+
+    elapsed_ms = max(0, _now_ms() - started_ms)
+    return TaskResult(
+        output_text="".join(output_chunks),
+        tool_calls_made=tool_calls,
+        child_session_key=child_ctx.parent_session_key,
+        child_agent_id=child_ctx.parent_agent_id,
+        elapsed_ms=elapsed_ms,
+        finish_reason=state["finish_reason"],
+        error=state["error_msg"],
+    )
+
+
+# Drain-state contract: a tiny TypedDict-shaped dict the drain coroutine
+# mutates so the cooperative-cancel path can observe partial output
+# without racing the drain task's own return value. Plain `dict` keeps
+# pyright happy without forcing a TypedDict import for two keys.
+_DrainState = dict
+
+
+async def _drain_events(
+    loop: ReasoningLoop,
+    chat_start: ChatStart,
+    output_chunks: list[str],
+    tool_calls: list[ToolCallSummary],
+    state: _DrainState,
+) -> None:
+    """Pump the reasoning loop's event stream into shared collectors.
+
+    Mutating shared lists (rather than returning a tuple) lets the
+    timeout layer in :func:`_drive_and_collect` recover whatever was
+    collected up to the moment the cancel fired. Without this contract
+    the partial-output guarantee documented in design § "Timeout
+    handling" wouldn't hold — a TaskCancelled would erase the
+    intermediate state along with the task's local frame.
+    """
     try:
         async for event in loop.run(chat_start):
             if isinstance(event, TokenEvent):
@@ -205,38 +310,14 @@ async def _drive_and_collect(
             elif isinstance(event, ToolCallEvent):
                 tool_calls.append(_summarise_tool_call(event))
             elif isinstance(event, DoneEvent):
-                finish_reason = _map_finish_reason(event.finish_reason)
+                state["finish_reason"] = _map_finish_reason(event.finish_reason)
             elif isinstance(event, ErrorEvent):
-                # ReasoningLoop already caught the exception and
-                # converted to a structured event; preserve its message.
-                error_msg = event.message
-                finish_reason = FinishReason.ERROR
-                # Keep iterating in case more events arrive (the loop
-                # contract is that ErrorEvent terminates, but the
-                # async-for cleanup awaits the generator's close).
-    except Exception as exc:  # pragma: no cover - belt and braces
-        # The loop is supposed to convert exceptions to ErrorEvent
-        # internally. If anything escapes (e.g. CancelledError under
-        # iter-6 timeout cancellation) we still produce a well-formed
-        # TaskResult so the supervisor's slot release stays balanced.
-        logger.warning(
-            "subagent.runner.loop_uncaught",
-            child_session_key=child_ctx.parent_session_key,
-            error=str(exc),
-        )
-        error_msg = str(exc)
-        finish_reason = FinishReason.ERROR
-
-    elapsed_ms = max(0, _now_ms() - started_ms)
-    return TaskResult(
-        output_text="".join(output_chunks),
-        tool_calls_made=tool_calls,
-        child_session_key=child_ctx.parent_session_key,
-        child_agent_id=child_ctx.parent_agent_id,
-        elapsed_ms=elapsed_ms,
-        finish_reason=finish_reason,
-        error=error_msg,
-    )
+                state["error_msg"] = event.message
+                state["finish_reason"] = FinishReason.ERROR
+    except asyncio.CancelledError:
+        # Re-raise so the wait_for sees cancellation. The shared lists
+        # already carry whatever was drained before the cancel fired.
+        raise
 
 
 def _build_child_messages(
