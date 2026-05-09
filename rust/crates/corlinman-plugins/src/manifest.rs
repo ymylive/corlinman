@@ -1057,4 +1057,196 @@ command = "npx"
         assert_eq!(m.manifest_version, v1);
         assert_eq!(m.manifest_version, 3);
     }
+
+    // ---------- Iter 9: v2→v3 migration polish ----------
+    //
+    // The migration path is implemented in `migrate_to_current_in_memory`
+    // (manifest.rs:459-484). Iter 9's job is to harden the surface
+    // around it: backwards-compat aliases, repeated-load idempotency,
+    // and the on-disk file invariant ("we never rewrite what's on
+    // disk; the loader fills defaults in memory only").
+
+    /// `parse_manifest_file` does NOT rewrite the manifest on disk
+    /// when migrating an old version. The on-disk byte stream is the
+    /// operator's source of truth; the gateway lifts to v3 only in
+    /// memory.
+    #[test]
+    fn parse_manifest_file_does_not_rewrite_v1_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        // Author a v1 manifest (no manifest_version stamp at all).
+        std::fs::write(&path, SAMPLE).unwrap();
+        let on_disk_before = std::fs::read_to_string(&path).unwrap();
+
+        let m = parse_manifest_file(&path).unwrap();
+        assert_eq!(m.manifest_version, 3, "v1 must lift to v3 in memory");
+
+        let on_disk_after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            on_disk_before, on_disk_after,
+            "loader must NEVER touch the on-disk manifest"
+        );
+    }
+
+    /// The v2 manifest in `test_v2_manifest_migrates_to_v3` (above)
+    /// also writes nothing on disk — sanity check for the v2 case
+    /// specifically; the v1 case is covered by the test above.
+    #[test]
+    fn parse_manifest_file_does_not_rewrite_v2_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        let body = r#"
+manifest_version = 2
+name = "preserve"
+version = "0.1.0"
+plugin_type = "service"
+protocols = ["openai_function"]
+
+[entry_point]
+command = "true"
+"#;
+        std::fs::write(&path, body).unwrap();
+        let on_disk_before = std::fs::read_to_string(&path).unwrap();
+
+        let m = parse_manifest_file(&path).unwrap();
+        assert_eq!(m.manifest_version, 3);
+
+        let on_disk_after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk_before, on_disk_after);
+    }
+
+    /// Repeated loads of the same on-disk manifest yield byte-stable
+    /// in-memory results — defends against accidentally introducing
+    /// a non-deterministic default value (e.g. a HashMap-iteration
+    /// derived field) into the migration.
+    #[test]
+    fn parse_manifest_file_repeated_loads_are_byte_stable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        std::fs::write(&path, SAMPLE).unwrap();
+        let m1 = parse_manifest_file(&path).unwrap();
+        let m2 = parse_manifest_file(&path).unwrap();
+        let s1 = toml::to_string(&m1).unwrap();
+        let s2 = toml::to_string(&m2).unwrap();
+        assert_eq!(s1, s2, "repeated loads must produce identical TOML");
+    }
+
+    /// `migrate_to_v2_in_memory` is the deprecated alias for
+    /// `migrate_to_current_in_memory`; it must do exactly the same
+    /// thing so any external caller still on the old name keeps
+    /// working until the deprecation period ends.
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_v2_migrate_alias_routes_to_current() {
+        let mut a: PluginManifest = toml::from_str(SAMPLE).unwrap();
+        let mut b: PluginManifest = toml::from_str(SAMPLE).unwrap();
+
+        a.migrate_to_v2_in_memory(); // deprecated path
+        b.migrate_to_current_in_memory();
+
+        // Same version stamp.
+        assert_eq!(a.manifest_version, b.manifest_version);
+        assert_eq!(a.manifest_version, 3);
+        // Same field-by-field shape after migration.
+        assert_eq!(toml::to_string(&a).unwrap(), toml::to_string(&b).unwrap());
+    }
+
+    /// A v1 manifest declaring `plugin_type = "mcp"` gets the
+    /// version-bump-required error — the migration deliberately
+    /// leaves MCP-flavoured manifests at their authored version so
+    /// the validator surfaces the error, rather than silently lifting
+    /// them to v3 (which would mask the operator's typo).
+    #[test]
+    fn v1_mcp_flavoured_manifest_keeps_version_for_validation_error() {
+        // No `manifest_version` stamp = v1 (default = 1).
+        let raw = r#"
+name = "fs"
+version = "0.1.0"
+plugin_type = "mcp"
+[entry_point]
+command = "npx"
+"#;
+        let mut m: PluginManifest = toml::from_str(raw).unwrap();
+        m.migrate_to_current_in_memory();
+        // The migration's v1->v2 step ran (default version is 1, so
+        // the first if-block bumped to 2); the v2->v3 step short-
+        // circuits because plugin_type = "mcp" is the MCP-flavoured
+        // gate. So the in-memory version is 2, not 3.
+        assert_eq!(
+            m.manifest_version, 2,
+            "MCP-flavoured manifests stop migrating at v2 so validation fires"
+        );
+        let err = m.validate_all().unwrap_err();
+        assert!(
+            err.contains("manifest_version >= 3"),
+            "expected version-bump hint, got: {err}"
+        );
+    }
+
+    /// A v3 manifest survives the migration unchanged: no version
+    /// bump, defaults left untouched, on-disk shape == in-memory
+    /// shape after a serialise round-trip.
+    #[test]
+    fn v3_manifest_round_trip_through_migration_is_noop() {
+        let raw = r#"
+manifest_version = 3
+name = "fs"
+version = "0.1.0"
+plugin_type = "mcp"
+
+[entry_point]
+command = "npx"
+
+[mcp]
+autostart = true
+"#;
+        let mut a: PluginManifest = toml::from_str(raw).unwrap();
+        a.migrate_to_current_in_memory();
+        // Run migrate three more times — must be a no-op.
+        a.migrate_to_current_in_memory();
+        a.migrate_to_current_in_memory();
+        a.migrate_to_current_in_memory();
+        a.validate_all().unwrap();
+        assert_eq!(a.manifest_version, 3);
+        assert!(a.mcp.as_ref().unwrap().autostart);
+    }
+
+    /// End-to-end: write a v2 file on disk, load it, observe v3 in
+    /// memory, verify on-disk file unchanged. Mirrors design test
+    /// `v2_to_v3_migration_round_trip` from the test matrix.
+    #[test]
+    fn v2_to_v3_migration_round_trip_e2e() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        let body = r#"
+manifest_version = 2
+name = "rt"
+version = "0.1.0"
+plugin_type = "service"
+protocols = ["openai_function", "block"]
+hooks = ["message.received"]
+skill_refs = ["skill.alpha"]
+
+[entry_point]
+command = "corlinman-channel-rt"
+
+[capabilities]
+disable_model_invocation = false
+"#;
+        std::fs::write(&path, body).unwrap();
+        let on_disk_v2 = std::fs::read_to_string(&path).unwrap();
+
+        let m = parse_manifest_file(&path).unwrap();
+        assert_eq!(m.manifest_version, 3, "in-memory must be v3");
+        assert_eq!(m.protocols, vec!["openai_function", "block"]);
+        assert_eq!(m.hooks, vec!["message.received"]);
+        assert_eq!(m.skill_refs, vec!["skill.alpha"]);
+        assert!(m.mcp.is_none(), "v2 service manifest never gains [mcp]");
+
+        let on_disk_after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            on_disk_v2, on_disk_after,
+            "the on-disk byte stream is the operator's source of truth"
+        );
+    }
 }
