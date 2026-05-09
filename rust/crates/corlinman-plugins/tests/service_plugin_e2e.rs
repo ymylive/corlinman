@@ -152,6 +152,7 @@ fn write_plugin(dir: &Path, python_bin: &Path, extra_pythonpath: Option<&Path>) 
         communication: Default::default(),
         capabilities: Default::default(),
         sandbox: Default::default(),
+        mcp: None,
         meta: None,
         protocols: vec!["openai_function".into()],
         hooks: vec![],

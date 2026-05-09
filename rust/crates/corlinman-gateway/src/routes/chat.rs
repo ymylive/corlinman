@@ -596,6 +596,14 @@ impl ToolExecutor for RegistryToolExecutor {
                 )
                 .await
             }
+            // C2 iter 1: schema landed but the MCP runtime + dispatcher
+            // arrive in iter 6/7. Reject explicitly so a manifest carrying
+            // `plugin_type = "mcp"` fails fast rather than silently
+            // routing through the sync path.
+            PluginType::Mcp => Err(CorlinmanError::PluginRuntime {
+                plugin: manifest.name.clone(),
+                message: "MCP plugin runtime not yet wired (Phase 4 W3 C2 iter 6+)".into(),
+            }),
         };
         let elapsed_ms = started.elapsed().as_millis() as u64;
 

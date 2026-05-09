@@ -65,11 +65,10 @@ impl From<&PluginEntry> for PluginSummaryOut {
 }
 
 fn plugin_type_str(t: PluginType) -> &'static str {
-    match t {
-        PluginType::Sync => "sync",
-        PluginType::Async => "async",
-        PluginType::Service => "service",
-    }
+    // Delegate to the canonical `PluginType::as_str` so a fourth runtime
+    // (e.g. `Mcp` introduced in manifest v3) doesn't require a gateway
+    // edit; matching here was a duplication of the same string table.
+    t.as_str()
 }
 
 /// Sub-router for `/admin/plugins*`. Consumes [`AdminState`] via axum's
