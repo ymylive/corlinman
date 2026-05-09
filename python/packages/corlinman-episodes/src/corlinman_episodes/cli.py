@@ -57,6 +57,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from corlinman_episodes.archive import (
+    ArchiveSummary,
+    archive_unreferenced_episodes,
+)
 from corlinman_episodes.config import DEFAULT_TENANT_ID, EpisodesConfig
 from corlinman_episodes.distiller import (
     SummaryFn,
@@ -69,6 +73,7 @@ from corlinman_episodes.embed import (
     EmbedSummary,
     populate_pending_embeddings,
 )
+from corlinman_episodes.rehydrate import RehydrateSummary, rehydrate_all
 from corlinman_episodes.runner import RunSummary, episodes_run_once
 from corlinman_episodes.sources import SourcePaths
 from corlinman_episodes.store import EpisodesStore
@@ -250,6 +255,52 @@ async def run_embed_pending(
         )
 
 
+async def run_archive_sweep(
+    *,
+    config: EpisodesConfig,
+    episodes_db: Path,
+    cold_root: Path,
+    tenant_id: str = DEFAULT_TENANT_ID,
+    now_ms: int | None = None,
+) -> ArchiveSummary:
+    """Library-level archive sweep — opens the store + delegates.
+
+    The CLI subcommand ``archive-sweep`` and the iter 9 follow-up admin
+    route call into this. The function is async so it composes with
+    the rest of the CLI shell; the SQLite work itself is bounded by
+    the candidate-row count, not by external I/O.
+    """
+    async with EpisodesStore(episodes_db) as store:
+        return await archive_unreferenced_episodes(
+            config=config,
+            store=store,
+            cold_root=cold_root,
+            tenant_id=tenant_id,
+            now_ms=now_ms,
+        )
+
+
+async def run_rehydrate_all(
+    *,
+    episodes_db: Path,
+    cold_root: Path,
+    tenant_id: str = DEFAULT_TENANT_ID,
+) -> RehydrateSummary:
+    """Library-level rehydrate-all — opens the store + delegates.
+
+    Per design §"Decay / pruning" — ``corlinman-episodes rehydrate-all``
+    is the operator-facing escape hatch: pre-migration, post-restore,
+    or whenever a tenant wants every cold row promoted back so a one-
+    off batch query can run without re-hydrating row by row.
+    """
+    async with EpisodesStore(episodes_db) as store:
+        return await rehydrate_all(
+            store=store,
+            cold_root=cold_root,
+            tenant_id=tenant_id,
+        )
+
+
 # ---------------------------------------------------------------------------
 # argparse
 # ---------------------------------------------------------------------------
@@ -390,6 +441,47 @@ def _build_parser() -> argparse.ArgumentParser:
             "registered."
         ),
     )
+
+    archive = sub.add_parser(
+        "archive-sweep",
+        help=(
+            "Move episodes unreferenced for cold_archive_days into "
+            "<cold-root>/episodes_cold/<id>.md and blank hot columns "
+            "(summary_text + embedding) on the row."
+        ),
+    )
+    _add_common_db_args(archive)
+    archive.add_argument(
+        "--cold-root",
+        type=Path,
+        required=True,
+        help=(
+            "Directory under which to write the episodes_cold/ subdir. "
+            "Production layout puts this next to episodes.sqlite."
+        ),
+    )
+    archive.add_argument(
+        "--now-ms",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,  # forensic / test-only
+    )
+
+    rehydrate = sub.add_parser(
+        "rehydrate-all",
+        help=(
+            "Promote every cold archive file back to its hot row "
+            "(reverse of archive-sweep). Operator escape hatch — "
+            "pre-migration, post-restore, batch-query prep."
+        ),
+    )
+    _add_common_db_args(rehydrate)
+    rehydrate.add_argument(
+        "--cold-root",
+        type=Path,
+        required=True,
+        help="Directory containing the episodes_cold/ subdir to walk.",
+    )
     return parser
 
 
@@ -484,6 +576,47 @@ def _print_embed_summary(summary: EmbedSummary, *, as_json: bool) -> None:
         print(f"failed_ids:     {','.join(summary.failed_episode_ids)}")
 
 
+def _print_archive_summary(summary: ArchiveSummary, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(asdict(summary), default=str))
+        return
+    print(f"tenant_id:                 {summary.tenant_id}")
+    print(f"archived:                  {summary.archived}")
+    print(f"skipped_recent:            {summary.skipped_recent}")
+    print(f"skipped_already_archived:  {summary.skipped_already_archived}")
+    print(f"skipped_exempt:            {summary.skipped_exempt}")
+    print(f"bytes_written:             {summary.bytes_written}")
+    print(f"cold_dir:                  {summary.cold_dir}")
+    if summary.archived_episode_ids:
+        print(
+            "archived_ids:              "
+            + ",".join(summary.archived_episode_ids)
+        )
+
+
+def _print_rehydrate_summary(
+    summary: RehydrateSummary, *, as_json: bool
+) -> None:
+    if as_json:
+        print(json.dumps(asdict(summary), default=str))
+        return
+    print(f"tenant_id:             {summary.tenant_id}")
+    print(f"rehydrated:            {summary.rehydrated}")
+    print(f"skipped_already_hot:   {summary.skipped_already_hot}")
+    print(f"skipped_no_row:        {summary.skipped_no_row}")
+    print(f"failed:                {summary.failed}")
+    if summary.rehydrated_episode_ids:
+        print(
+            "rehydrated_ids:        "
+            + ",".join(summary.rehydrated_episode_ids)
+        )
+    if summary.failed_episode_ids:
+        print(
+            "failed_ids:            "
+            + ",".join(summary.failed_episode_ids)
+        )
+
+
 # ---------------------------------------------------------------------------
 # main()
 # ---------------------------------------------------------------------------
@@ -559,6 +692,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_embed_summary(summary, as_json=args.json)
         return 0
 
+    if args.command == "archive-sweep":
+        try:
+            archive_summary = asyncio.run(
+                run_archive_sweep(
+                    config=config,
+                    episodes_db=args.episodes_db,
+                    cold_root=args.cold_root,
+                    tenant_id=args.tenant,
+                    now_ms=args.now_ms,
+                )
+            )
+        except Exception as exc:
+            logger.error("episodes: archive-sweep failed", exc_info=exc)
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        _print_archive_summary(archive_summary, as_json=args.json)
+        return 0
+
+    if args.command == "rehydrate-all":
+        try:
+            rehydrate_summary = asyncio.run(
+                run_rehydrate_all(
+                    episodes_db=args.episodes_db,
+                    cold_root=args.cold_root,
+                    tenant_id=args.tenant,
+                )
+            )
+        except Exception as exc:
+            logger.error("episodes: rehydrate-all failed", exc_info=exc)
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        _print_rehydrate_summary(rehydrate_summary, as_json=args.json)
+        return 0
+
     parser.error(f"unknown command: {args.command}")
     return 2  # parser.error raises; appease type-checkers.
 
@@ -571,6 +738,8 @@ __all__ = [
     "main",
     "register_embedding_provider_factory",
     "register_summary_provider_factory",
+    "run_archive_sweep",
     "run_distill_once",
     "run_embed_pending",
+    "run_rehydrate_all",
 ]

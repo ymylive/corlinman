@@ -34,8 +34,10 @@ from corlinman_episodes.cli import (
 from corlinman_episodes.cli import (
     register_embedding_provider_factory,
     register_summary_provider_factory,
+    run_archive_sweep,
     run_distill_once,
     run_embed_pending,
+    run_rehydrate_all,
 )
 from corlinman_episodes.config import DEFAULT_TENANT_ID, EpisodesConfig
 from corlinman_episodes.distiller import (
@@ -58,6 +60,14 @@ from corlinman_episodes.embed import (
     populate_pending_embeddings,
 )
 from corlinman_episodes.importance import score
+from corlinman_episodes.rehydrate import (
+    ColdEpisode,
+    ColdFileMalformedError,
+    RehydrateSummary,
+    parse_cold_file,
+    rehydrate_all,
+    rehydrate_episode,
+)
 from corlinman_episodes.runner import RunSummary, episodes_run_once
 from corlinman_episodes.sources import (
     HOOK_KINDS_OF_INTEREST,
@@ -102,6 +112,8 @@ __all__ = [
     "RUN_STATUS_SKIPPED_EMPTY",
     "SCHEMA_SQL",
     "ArchiveSummary",
+    "ColdEpisode",
+    "ColdFileMalformedError",
     "DistillationRun",
     "DistilledSummary",
     "EmbedSummary",
@@ -116,6 +128,7 @@ __all__ = [
     "HookEventRow",
     "IdentityMergeRow",
     "PendingEmbeddingRow",
+    "RehydrateSummary",
     "RunSummary",
     "RunWindowConflict",
     "RunWindowConflictError",
@@ -139,13 +152,18 @@ __all__ = [
     "make_echo_provider",
     "new_episode_id",
     "new_run_id",
+    "parse_cold_file",
     "populate_pending_embeddings",
     "redact_pii",
     "register_embedding_provider_factory",
     "register_summary_provider_factory",
+    "rehydrate_all",
+    "rehydrate_episode",
     "render_cold_file",
+    "run_archive_sweep",
     "run_distill_once",
     "run_embed_pending",
+    "run_rehydrate_all",
     "score",
     "select_window",
     "window_too_small",
