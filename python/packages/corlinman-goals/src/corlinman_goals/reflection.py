@@ -26,6 +26,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Final, Protocol
 
 from corlinman_goals.evidence import (
@@ -33,6 +34,7 @@ from corlinman_goals.evidence import (
     EpisodeEvidence,
     EvidenceEpisode,
 )
+from corlinman_goals.evolution_signal import emit_goal_weekly_failed
 from corlinman_goals.state import NO_EVIDENCE_SENTINEL, Goal, GoalEvaluation
 from corlinman_goals.store import GoalStore
 from corlinman_goals.windows import (
@@ -164,6 +166,12 @@ class ReflectionSummary:
     log want to know *which* goals failed, not just "5 errors". The
     counts are also surfaced as Prometheus labels in iter 7+
     (``goals_reflection_total{outcome=...}``).
+
+    iter 9 adds ``signals_emitted`` / ``signal_goal_ids`` so the
+    operator (and the scheduler hook bus) can see how many evolution
+    signals one weekly run sent. This is independent of
+    ``goals_failed`` (those are *exception* counts; signals are
+    *underperformance* counts on goals that scored fine but low).
     """
 
     tier: str
@@ -175,6 +183,8 @@ class ReflectionSummary:
     goals_skipped_idempotent: int = 0
     goals_failed: int = 0
     failed_goal_ids: list[str] = field(default_factory=list)
+    signals_emitted: int = 0
+    signal_goal_ids: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +295,7 @@ async def reflect_once(
     tenant_id: str = "default",
     now_ms: int | None = None,
     evidence_limit: int = DEFAULT_EVIDENCE_LIMIT,
+    evolution_db: Path | None = None,
 ) -> ReflectionSummary:
     """Run one reflection pass for ``tier`` and ``agent_id``.
 
@@ -343,6 +354,8 @@ async def reflect_once(
                 agent_id=agent_id,
                 now_ms=now,
                 evidence_limit=evidence_limit,
+                evolution_db=evolution_db,
+                tenant_id=tenant_id,
             )
         except Exception:
             logger.exception(
@@ -358,6 +371,9 @@ async def reflect_once(
             summary.goals_skipped_idempotent += 1
         else:
             summary.goals_scored += 1
+        if wrote.signal_emitted:
+            summary.signals_emitted += 1
+            summary.signal_goal_ids.append(goal.id)
 
     return summary
 
@@ -366,6 +382,7 @@ async def reflect_once(
 class _PerGoalResult:
     no_evidence: bool
     skipped_idempotent: bool
+    signal_emitted: bool = False
 
 
 async def _reflect_one_goal(
@@ -378,6 +395,8 @@ async def _reflect_one_goal(
     agent_id: str,
     now_ms: int,
     evidence_limit: int,
+    evolution_db: Path | None = None,
+    tenant_id: str = "default",
 ) -> _PerGoalResult:
     """Grade one goal. Splits the per-goal flow out so the run loop
     can wrap with per-goal exception handling without nesting too
@@ -431,17 +450,37 @@ async def _reflect_one_goal(
     )
     narrative = _truncate_narrative(reply.narrative)
 
-    await store.insert_evaluation(
-        GoalEvaluation(
-            goal_id=goal.id,
-            evaluated_at_ms=evaluated_at,
-            score_0_to_10=int(reply.score_0_to_10),
-            narrative=narrative,
-            evidence_episode_ids=cited,
-            reflection_run_id=run_id,
-        )
+    evaluation = GoalEvaluation(
+        goal_id=goal.id,
+        evaluated_at_ms=evaluated_at,
+        score_0_to_10=int(reply.score_0_to_10),
+        narrative=narrative,
+        evidence_episode_ids=cited,
+        reflection_run_id=run_id,
     )
-    return _PerGoalResult(no_evidence=False, skipped_idempotent=False)
+    await store.insert_evaluation(evaluation)
+
+    # iter 9: weekly underperformance trigger. Mid-tier scores < 5 emit
+    # one ``goal.weekly_failed`` signal into ``evolution.sqlite`` so the
+    # evolution loop's clustering layer can fold them into
+    # ``skill_update`` proposals (design §"Why this exists" 2nd
+    # bullet). The emit is best-effort — a missing engine DB or a
+    # schema-too-old condition logs and returns False rather than
+    # failing the reflection run, because the reflection's primary
+    # contract is to write ``goal_evaluations``.
+    signal_emitted = False
+    if evolution_db is not None and tier == "mid":
+        signal_emitted = await emit_goal_weekly_failed(
+            evolution_db=evolution_db,
+            goal=goal,
+            evaluation=evaluation,
+            tenant_id=tenant_id,
+        )
+    return _PerGoalResult(
+        no_evidence=False,
+        skipped_idempotent=False,
+        signal_emitted=signal_emitted,
+    )
 
 
 __all__ = [

@@ -27,6 +27,11 @@ from corlinman_goals.evidence import (
     EvidenceEpisode,
     StaticEvidence,
 )
+from corlinman_goals.evolution_signal import (
+    FAILURE_THRESHOLD,
+    GOAL_WEEKLY_FAILED_EVENT_KIND,
+    emit_goal_weekly_failed,
+)
 from corlinman_goals.placeholders import (
     FAILING_LINE_CAP,
     NO_EVIDENCE_SENTINEL,
@@ -67,6 +72,8 @@ __all__ = [
     "DEFAULT_EVIDENCE_LIMIT",
     "DEFAULT_TENANT_ID",
     "FAILING_LINE_CAP",
+    "FAILURE_THRESHOLD",
+    "GOAL_WEEKLY_FAILED_EVENT_KIND",
     "LONG_TRAILING_MID_WEEKS",
     "LONG_WINDOW_DAYS",
     "MID_WINDOW_DAYS",
@@ -97,6 +104,7 @@ __all__ = [
     "aggregate_long",
     "aggregate_mid",
     "default_target_date_ms",
+    "emit_goal_weekly_failed",
     "long_window",
     "make_callable_grader",
     "make_constant_grader",

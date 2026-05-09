@@ -509,11 +509,15 @@ async def run_reflect_once(
     agent_id: str,
     tenant_id: str = DEFAULT_TENANT_ID,
     now_ms: int | None = None,
+    evolution_db: Path | None = None,
 ) -> ReflectionSummary:
     """Library-level reflect-once — preferred call site for tests.
 
     The CLI ``main()`` resolves the grader + evidence source via the
     factory hooks above and forwards everything else to here.
+    ``evolution_db`` (iter 9) is optional — passing it lets the
+    runner emit ``goal.weekly_failed`` signals when a mid-tier score
+    lands below the underperformance threshold.
     """
     async with GoalStore(db_path) as store:
         return await reflect_once(
@@ -525,6 +529,7 @@ async def run_reflect_once(
             tenant_id=tenant_id,
             now_ms=now_ms,
             evidence_limit=config.evidence_max_episodes,
+            evolution_db=evolution_db,
         )
 
 
@@ -761,6 +766,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Per-tenant episodes.sqlite (D1) for evidence lookup.",
     )
     p_refl.add_argument(
+        "--evolution-db",
+        type=Path,
+        default=None,
+        help=(
+            "Per-tenant evolution.sqlite — when present and tier=mid, "
+            "scores below 5 emit one 'goal.weekly_failed' signal into "
+            "evolution_signals. Best-effort; missing DB is a noop."
+        ),
+    )
+    p_refl.add_argument(
         "--config",
         type=Path,
         default=None,
@@ -960,6 +975,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     agent_id=args.agent_id,
                     tenant_id=args.tenant_id,
                     now_ms=args.now_ms,
+                    evolution_db=args.evolution_db,
                 )
             )
             _emit(
@@ -973,6 +989,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "goals_skipped_idempotent": summary.goals_skipped_idempotent,
                     "goals_failed": summary.goals_failed,
                     "failed_goal_ids": summary.failed_goal_ids,
+                    "signals_emitted": summary.signals_emitted,
+                    "signal_goal_ids": summary.signal_goal_ids,
                 },
                 as_json=args.json,
             )
