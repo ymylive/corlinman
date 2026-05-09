@@ -33,6 +33,12 @@ corlinman-identity = { path = "../corlinman-identity" }
 corlinman-mcp = { path = "../corlinman-mcp" }
 corlinman-skills = { path = "../corlinman-skills" }
 corlinman-memory-host = { path = "../corlinman-memory-host" }
+# Phase 4 W3 C3 iter 8 — Canvas Host renderer is pulled in here so
+# `routes/canvas.rs::render_artifact` can synchronously turn a
+# `CanvasPresentPayload` into HTML. The crate has no `mermaid`
+# feature flag enabled by default; producers asking for `mermaid`
+# get a typed `CanvasError::Adapter` until ops opt in.
+corlinman-canvas = { path = "../corlinman-canvas" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

@@ -1334,12 +1334,46 @@ impl Default for WsToolConfig {
 
 /// Canvas host endpoint (code / diagram preview). Off by default;
 /// `session_ttl_secs` bounds the per-session scratch retention.
+///
+/// C3 (Phase 4 W3) extends this section with renderer knobs. The
+/// gateway's `routes/canvas.rs` reads these on every request via the
+/// `ArcSwap<Config>` snapshot, so live reload picks up changes
+/// without restart. All knobs ship with conservative defaults that
+/// match `phase4-w3-c3-design.md` § "Config knobs":
+///
+/// - `max_artifact_bytes`  — per-render body cap (default 256 KiB)
+/// - `cache_max_entries`   — LRU capacity, `0` disables (default 512)
+/// - `render_timeout_ms`   — mermaid/v8 ceiling (default 5_000)
+/// - `mermaid_enabled`     — kill-switch for the JS adapter (default true)
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
 #[serde(default, deny_unknown_fields)]
 pub struct CanvasConfig {
     pub host_endpoint_enabled: bool,
     #[validate(range(min = 1, max = 86_400))]
     pub session_ttl_secs: u32,
+
+    // ---- C3 renderer knobs ------------------------------------------
+    /// Per-`/canvas/render` request body byte cap. The gateway returns
+    /// `413 body_too_large` for anything larger; the mermaid adapter
+    /// also uses this as its SVG output ceiling. Range mirrors
+    /// `phase4-w3-c3-design.md` (256 KiB default, 1 MiB hard ceiling).
+    #[validate(range(min = 1024, max = 4_194_304))]
+    pub max_artifact_bytes: usize,
+    /// LRU capacity for the renderer's content-addressed cache.
+    /// `0` disables the cache entirely (every render re-dispatches).
+    #[validate(range(max = 65_536))]
+    pub cache_max_entries: usize,
+    /// Hard ceiling on mermaid/V8 execution. Range matches the
+    /// design's 100ms..30_000ms window — anything outside is
+    /// definitely a misconfig.
+    #[validate(range(min = 100, max = 30_000))]
+    pub render_timeout_ms: u64,
+    /// Cheap kill-switch for the mermaid adapter. With the
+    /// `mermaid` cargo feature off this knob is informational only,
+    /// but flipping it to `false` lets operators reject mermaid
+    /// payloads with a typed adapter error before invoking V8 even
+    /// when the build does include it.
+    pub mermaid_enabled: bool,
 }
 
 impl Default for CanvasConfig {
@@ -1347,6 +1381,11 @@ impl Default for CanvasConfig {
         Self {
             host_endpoint_enabled: false,
             session_ttl_secs: 1800,
+            // C3 defaults — see `phase4-w3-c3-design.md` § "Config knobs".
+            max_artifact_bytes: 262_144,
+            cache_max_entries: 512,
+            render_timeout_ms: 5_000,
+            mermaid_enabled: true,
         }
     }
 }
@@ -2953,6 +2992,11 @@ bogus = "field"
 
         assert!(!cfg.canvas.host_endpoint_enabled);
         assert_eq!(cfg.canvas.session_ttl_secs, 1800);
+        // C3 renderer defaults — match `phase4-w3-c3-design.md` § "Config knobs".
+        assert_eq!(cfg.canvas.max_artifact_bytes, 262_144);
+        assert_eq!(cfg.canvas.cache_max_entries, 512);
+        assert_eq!(cfg.canvas.render_timeout_ms, 5_000);
+        assert!(cfg.canvas.mermaid_enabled);
 
         assert_eq!(cfg.nodebridge.listen, "127.0.0.1:18788");
         assert!(!cfg.nodebridge.accept_unsigned);
@@ -3158,6 +3202,41 @@ session_ttl_secs = 600
         let cfg: Config = toml::from_str(frag).unwrap();
         assert!(cfg.canvas.host_endpoint_enabled);
         assert_eq!(cfg.canvas.session_ttl_secs, 600);
+        // Phase-1 fragment: C3 knobs fall back to defaults so existing
+        // operators that only set the host gate stay byte-identical.
+        assert_eq!(cfg.canvas.max_artifact_bytes, 262_144);
+        assert_eq!(cfg.canvas.cache_max_entries, 512);
+        assert_eq!(cfg.canvas.render_timeout_ms, 5_000);
+        assert!(cfg.canvas.mermaid_enabled);
+    }
+
+    #[test]
+    fn canvas_c3_renderer_knobs_parse_and_validate() {
+        // Full C3 fragment: all renderer knobs present, all in-range.
+        let frag = r#"
+[canvas]
+host_endpoint_enabled = true
+session_ttl_secs        = 1200
+max_artifact_bytes      = 524288
+cache_max_entries       = 0
+render_timeout_ms       = 2500
+mermaid_enabled         = false
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        cfg.validate().expect("c3 fragment should validate");
+        assert_eq!(cfg.canvas.max_artifact_bytes, 524_288);
+        assert_eq!(cfg.canvas.cache_max_entries, 0);
+        assert_eq!(cfg.canvas.render_timeout_ms, 2_500);
+        assert!(!cfg.canvas.mermaid_enabled);
+
+        // Out-of-range render_timeout_ms must fail validation —
+        // protects operators from accidentally setting `0` (no
+        // ceiling) or values so high mermaid blocks the gateway.
+        let mut bad = cfg.clone();
+        bad.canvas.render_timeout_ms = 50; // below min
+        assert!(bad.validate().is_err());
+        bad.canvas.render_timeout_ms = 60_000; // above max
+        assert!(bad.validate().is_err());
     }
 
     #[test]
