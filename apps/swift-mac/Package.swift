@@ -46,7 +46,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "CorlinmanApp",
-            dependencies: ["CorlinmanCore", "CorlinmanUI"]
+            dependencies: ["CorlinmanCore", "CorlinmanUI"],
+            // The entitlements file is consumed by Xcode at code-sign
+            // time, not by SwiftPM compilation. Exclude it from the
+            // source list so the SwiftPM build doesn't warn about
+            // an unhandled file every iteration.
+            exclude: ["CorlinmanApp.entitlements"]
         ),
         .testTarget(
             name: "CorlinmanCoreTests",

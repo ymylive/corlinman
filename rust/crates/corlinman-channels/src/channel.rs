@@ -220,6 +220,55 @@ impl Channel for QqChannel {
     }
 }
 
+/// APNs (Apple Push Notification service) adapter — Phase 4 W3 C4
+/// iter 8 stub.
+///
+/// The Swift macOS reference client (`apps/swift-mac/`) registers for
+/// remote notifications and expects the gateway to push
+/// `PushNotification` payloads via APNs HTTP/2. This stub reserves
+/// the adapter slot in the [`ChannelRegistry`] without yet shipping
+/// the HTTP/2 + JWT pipeline:
+///
+/// - [`Channel::enabled`] returns `false` until a future iter adds
+///   `cfg.channels.apns` (config + provider URL + auth-key path).
+///   That keeps `cargo build` green without forcing a config schema
+///   change inside the C4 worktree.
+/// - [`Channel::run`] is therefore never invoked at the moment; it
+///   returns `Ok(())` defensively for the day someone wires the
+///   config struct and the registration path lights up.
+///
+/// The dev-iteration loop uses a Unix-domain socket fallback driven
+/// from `[channels.dev_push]` (also TBD); the Swift client reads
+/// JSON lines off that socket, see
+/// `apps/swift-mac/Sources/CorlinmanCore/PushReceiver.swift:200-220`.
+pub struct ApnsChannel;
+
+#[async_trait::async_trait]
+impl Channel for ApnsChannel {
+    fn id(&self) -> &str {
+        "apns"
+    }
+
+    fn display_name(&self) -> &str {
+        "APNs (stub)"
+    }
+
+    /// Disabled until the gateway grows `cfg.channels.apns`. Returning
+    /// `false` here means [`spawn_all`] never invokes [`Channel::run`]
+    /// on the stub, so the adapter is invisible at runtime.
+    fn enabled(&self, _cfg: &Config) -> bool {
+        false
+    }
+
+    /// Defensive no-op — `enabled` is `false` so this isn't reachable
+    /// today. Kept here so the day someone flips the config flag the
+    /// adapter doesn't panic; the actual HTTP/2 push path lands in a
+    /// follow-on Wave 4 iter.
+    async fn run(&self, _ctx: ChannelContext, _cancel: CancellationToken) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 /// Telegram adapter. Forwards to [`crate::telegram::run_telegram_channel`].
 ///
 /// B4-BE1 is adding webhook handling inside the `telegram/` module in

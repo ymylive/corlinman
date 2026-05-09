@@ -14,5 +14,6 @@ pub mod service;
 pub mod telegram;
 
 pub use channel::{
-    spawn_all, Channel, ChannelContext, ChannelError, ChannelRegistry, QqChannel, TelegramChannel,
+    spawn_all, ApnsChannel, Channel, ChannelContext, ChannelError, ChannelRegistry, QqChannel,
+    TelegramChannel,
 };
