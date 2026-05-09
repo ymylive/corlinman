@@ -27,5 +27,11 @@
 pub mod supervisor;
 pub mod types;
 
+#[cfg(feature = "python")]
+pub mod python_bridge;
+
 pub use supervisor::{AcquireReject, Slot, Supervisor, SupervisorPolicy};
 pub use types::{FinishReason, ParentContext, TaskResult, TaskSpec, ToolCallSummary};
+
+#[cfg(feature = "python")]
+pub use python_bridge::{spawn_child, spawn_child_to_result, BridgeError};
