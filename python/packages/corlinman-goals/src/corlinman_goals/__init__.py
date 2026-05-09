@@ -8,6 +8,13 @@ and reflection job land in later iters of this package.
 
 from __future__ import annotations
 
+from corlinman_goals.evaluator import (
+    LONG_TRAILING_MID_WEEKS,
+    LongScore,
+    MidScore,
+    aggregate_long,
+    aggregate_mid,
+)
 from corlinman_goals.evidence import (
     DEFAULT_EVIDENCE_LIMIT,
     EpisodeEvidence,
@@ -55,6 +62,7 @@ __all__ = [
     "DEFAULT_EVIDENCE_LIMIT",
     "DEFAULT_TENANT_ID",
     "FAILING_LINE_CAP",
+    "LONG_TRAILING_MID_WEEKS",
     "LONG_WINDOW_DAYS",
     "MID_WINDOW_DAYS",
     "NARRATIVE_MAX_CHARS",
@@ -75,9 +83,13 @@ __all__ = [
     "GoalsResolver",
     "Grader",
     "GraderReply",
+    "LongScore",
+    "MidScore",
     "ReflectionSummary",
     "StaticEvidence",
     "Window",
+    "aggregate_long",
+    "aggregate_mid",
     "default_target_date_ms",
     "long_window",
     "make_callable_grader",
