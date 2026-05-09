@@ -8,6 +8,13 @@ and reflection job land in later iters of this package.
 
 from __future__ import annotations
 
+from corlinman_goals.placeholders import (
+    FAILING_LINE_CAP,
+    NO_EVIDENCE_SENTINEL,
+    QUARTERLY_TRAILING_WEEKS,
+    WEEKLY_LINE_CAP,
+    GoalsResolver,
+)
 from corlinman_goals.state import (
     SOURCE_VALUES,
     STATUS_VALUES,
@@ -30,16 +37,21 @@ from corlinman_goals.windows import (
 
 __all__ = [
     "DEFAULT_TENANT_ID",
+    "FAILING_LINE_CAP",
     "LONG_WINDOW_DAYS",
     "MID_WINDOW_DAYS",
+    "NO_EVIDENCE_SENTINEL",
+    "QUARTERLY_TRAILING_WEEKS",
     "SCHEMA_SQL",
     "SHORT_WINDOW_HOURS",
     "SOURCE_VALUES",
     "STATUS_VALUES",
     "TIER_VALUES",
+    "WEEKLY_LINE_CAP",
     "Goal",
     "GoalEvaluation",
     "GoalStore",
+    "GoalsResolver",
     "Window",
     "default_target_date_ms",
     "long_window",
