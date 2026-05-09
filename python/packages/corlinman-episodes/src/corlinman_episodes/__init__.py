@@ -2,10 +2,13 @@
 
 The package surfaces are layered iter-by-iter — iter 1 shipped the
 schema + ``EpisodeKind``; iter 2 added the source-event gatherer and
-the run-log CRUD; iter 3 adds the importance scorer, the heuristic
+the run-log CRUD; iter 3 added the importance scorer, the heuristic
 classifier, and the LLM distillation pipeline (with PII redaction +
-a stub-provider seam for tests). Later iters wire embeddings, the
-runner, the gateway resolver, and the on-demand admin route.
+a stub-provider seam for tests); iter 4 wires the end-to-end
+:func:`episodes_run_once` runner that ties window selection,
+collection, classification, importance, and distillation into one
+idempotent pass. Later iters wire embeddings, the gateway resolver,
+and the on-demand admin route.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from corlinman_episodes.distiller import (
     redact_pii,
 )
 from corlinman_episodes.importance import score
+from corlinman_episodes.runner import RunSummary, episodes_run_once
 from corlinman_episodes.sources import (
     HOOK_KINDS_OF_INTEREST,
     HistoryRow,
@@ -70,6 +74,7 @@ __all__ = [
     "HistoryRow",
     "HookEventRow",
     "IdentityMergeRow",
+    "RunSummary",
     "RunWindowConflict",
     "RunWindowConflictError",
     "SessionMessage",
@@ -81,6 +86,7 @@ __all__ = [
     "classify",
     "collect_bundles",
     "distill",
+    "episodes_run_once",
     "make_constant_provider",
     "make_echo_provider",
     "new_episode_id",
