@@ -13,14 +13,15 @@ import Foundation
 /// so a stray downgrade fails CI loudly.
 public enum CorlinmanCoreInfo {
     /// Human-readable build banner. Only used in logs and tests today.
-    public static let banner = "CorlinmanCore (Phase 4 W3 C4 iter 8 — chat-ui+auth+push)"
+    public static let banner = "CorlinmanCore (Phase 4 W3 C4 iter 9 — chat-ui+auth+push+ci)"
 
     /// Bumped every time the public surface changes in a non-additive way.
     /// Iter 1 → 0.1.0 (skeleton); iter 4 → 0.2.0 (chat stream + models);
     /// iter 5 → 0.3.0 (SessionStore); iter 6 → 0.4.0 (UI views +
     /// `ChatViewModel`); iter 7 → 0.5.0 (AuthStore + GatewayClient
     /// admin REST + onboarding); iter 8 → 0.6.0 (PushReceiver +
-    /// APNsTokenAdapter + dev-socket fallback); future iters keep
-    /// bumping for streaming integration, etc.
-    public static let version = "0.6.0"
+    /// APNsTokenAdapter + dev-socket fallback); iter 9 → 0.6.1
+    /// (snapshot-test scaffolding + macOS CI workflow; no public
+    /// surface change so patch bump only).
+    public static let version = "0.6.1"
 }

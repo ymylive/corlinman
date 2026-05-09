@@ -17,6 +17,14 @@
 // `swift-protobuf` for the proto-derived JSON models; iter 6 adds GRDB for
 // `SessionStore`. Keeping the manifest dependency-free at iter 1 makes
 // `swift package describe` succeed even on machines without network access.
+//
+// Iter 9 adds CI-side snapshot tests via Pointfree's
+// `swift-snapshot-testing`. We deliberately *do not* commit that
+// dependency to the manifest — `.github/workflows/swift-mac.yml`
+// patches it in before `swift test` so contributors who clone offline
+// don't get a hard build break. The test file uses
+// `#if canImport(SnapshotTesting)` to disappear quietly when the dep
+// isn't resolved.
 
 import PackageDescription
 
