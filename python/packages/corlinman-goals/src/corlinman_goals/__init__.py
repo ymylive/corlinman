@@ -8,6 +8,11 @@ and reflection job land in later iters of this package.
 
 from __future__ import annotations
 
+from corlinman_goals.cli import (
+    GoalsConfig,
+    register_evidence_factory,
+    register_grader_factory,
+)
 from corlinman_goals.evaluator import (
     LONG_TRAILING_MID_WEEKS,
     LongScore,
@@ -80,6 +85,7 @@ __all__ = [
     "Goal",
     "GoalEvaluation",
     "GoalStore",
+    "GoalsConfig",
     "GoalsResolver",
     "Grader",
     "GraderReply",
@@ -96,6 +102,8 @@ __all__ = [
     "make_constant_grader",
     "mid_window",
     "reflect_once",
+    "register_evidence_factory",
+    "register_grader_factory",
     "short_window",
     "tier_rank",
 ]
