@@ -15,12 +15,18 @@ dependencies = [
     "corlinman-grpc",
     "corlinman-providers",
     "corlinman-tagmemo",
+    # D3 (subagent runner): seeds a fresh persona row per child via
+    # PersonaStore.upsert with a mangled `agent_id`. Optional at runtime —
+    # runner.run_child accepts persona_store=None for callers that don't
+    # need persona accounting (unit tests).
+    "corlinman-persona",
 ]
 
 [tool.uv.sources]
 corlinman-grpc = { workspace = true }
 corlinman-providers = { workspace = true }
 corlinman-tagmemo = { workspace = true }
+corlinman-persona = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
