@@ -125,6 +125,13 @@ pub struct Config {
     /// any pre-Phase-4 config unchanged and behave exactly as before.
     #[serde(default)]
     pub tenants: TenantsConfig,
+    /// Phase 4 W4 D4: realtime voice surface. Optional like
+    /// `embedding` — absent section = disabled, route returns 503.
+    /// Same Option<…> pattern keeps pre-Phase-4 configs round-tripping
+    /// through serde unchanged.
+    #[serde(default)]
+    #[validate(nested)]
+    pub voice: Option<VoiceConfig>,
     pub meta: Meta,
 }
 
@@ -172,6 +179,7 @@ impl Default for Config {
             memory: MemoryConfig::default(),
             persona: PersonaConfig::default(),
             tenants: TenantsConfig::default(),
+            voice: None,
             meta: Meta::default(),
         }
     }
@@ -1972,6 +1980,102 @@ impl Default for TenantsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// [voice] — Phase 4 W4 D4
+// ---------------------------------------------------------------------------
+//
+// Realtime audio surface. The /voice WebSocket on the gateway accepts
+// PCM-16 from a client and streams TTS back, brokered by a single
+// upstream provider (OpenAI Realtime first). Cost-gated under three
+// layers: feature flag, per-tenant minutes-per-day budget, and a
+// hard session-length cap.
+//
+// `provider_alias` references a key under [providers.*]. The validator
+// (see [`Config::validate_report`]) emits a warning if the alias does
+// not resolve when `enabled = true`.
+//
+// Mirrors the [embedding] / [persona] shape: an absent section is a
+// disabled section, so existing pre-D4 configs parse unchanged. The
+// struct itself is non-Option-wrapped here because the parent field
+// is `Option<VoiceConfig>` — every field below is required when the
+// section is present.
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceConfig {
+    /// Master switch. False = `/voice` returns `503 voice_disabled`
+    /// with `Retry-After: 86400` (so monitors don't hammer).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Provider slot name under `[providers.*]`. Single-tenant
+    /// config-driven — no per-request model picker. Tenants who want
+    /// to A/B switch flip the alias.
+    #[serde(default = "default_voice_provider_alias")]
+    pub provider_alias: String,
+    /// Per-tenant daily voice minutes budget. Enforced both at
+    /// session-start (refuse with `429 budget_exhausted`) and
+    /// mid-session (a 1-Hz ticker terminates with close code `4002`
+    /// once accumulated seconds exceed the cap).
+    #[validate(range(min = 0, max = 1440))]
+    #[serde(default = "default_voice_budget_minutes")]
+    pub budget_minutes_per_tenant_per_day: u32,
+    /// Hard kill at session length cap regardless of budget. Defends
+    /// against a stuck session no client has the courtesy to end.
+    #[validate(range(min = 1, max = 7200))]
+    #[serde(default = "default_voice_max_session_seconds")]
+    pub max_session_seconds: u32,
+    /// Default off — PCM is large and audio is sensitive. When true,
+    /// audio writes to `<data_dir>/tenants/<t>/voice/<session_id>.pcm`.
+    /// Encrypted-at-rest is not alpha scope.
+    #[serde(default)]
+    pub retain_audio: bool,
+    /// Retention TTL for audio files when `retain_audio = true`.
+    /// A scheduled sweep job deletes files past TTL.
+    #[validate(range(min = 1, max = 365))]
+    #[serde(default = "default_voice_audio_retention_days")]
+    pub audio_retention_days: u32,
+    /// Client PCM rate; provider may resample.
+    #[serde(default = "default_voice_sample_rate_in")]
+    pub sample_rate_hz_in: u32,
+    /// TTS rate the gateway emits to clients.
+    #[serde(default = "default_voice_sample_rate_out")]
+    pub sample_rate_hz_out: u32,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider_alias: default_voice_provider_alias(),
+            budget_minutes_per_tenant_per_day: default_voice_budget_minutes(),
+            max_session_seconds: default_voice_max_session_seconds(),
+            retain_audio: false,
+            audio_retention_days: default_voice_audio_retention_days(),
+            sample_rate_hz_in: default_voice_sample_rate_in(),
+            sample_rate_hz_out: default_voice_sample_rate_out(),
+        }
+    }
+}
+
+fn default_voice_provider_alias() -> String {
+    "openai-realtime".to_string()
+}
+fn default_voice_budget_minutes() -> u32 {
+    30
+}
+fn default_voice_max_session_seconds() -> u32 {
+    600
+}
+fn default_voice_audio_retention_days() -> u32 {
+    7
+}
+fn default_voice_sample_rate_in() -> u32 {
+    16_000
+}
+fn default_voice_sample_rate_out() -> u32 {
+    24_000
+}
+
+// ---------------------------------------------------------------------------
 // [meta]
 // ---------------------------------------------------------------------------
 
@@ -2187,6 +2291,45 @@ slot. Set `kind = \"...\"` explicitly. Valid kinds: {}",
                         path: "embedding.dimension".into(),
                         code: "embedding_dimension_zero".into(),
                         message: "embedding.dimension must be > 0".into(),
+                        level: IssueLevel::Error,
+                    });
+                }
+            }
+        }
+
+        // Voice section: if present + enabled, `provider_alias` must reference
+        // a declared providers slot. We emit a warning (not an error) to
+        // match the `[voice]` design contract: the section is optional, the
+        // alpha is opt-in, and a misconfigured alias should surface in
+        // `config validate` output without blocking the rest of the config.
+        if let Some(voice) = &self.voice {
+            if voice.enabled {
+                if voice.provider_alias.trim().is_empty() {
+                    issues.push(ValidationIssue {
+                        path: "voice.provider_alias".into(),
+                        code: "voice_provider_alias_empty".into(),
+                        message: "voice.enabled = true but provider_alias is empty".into(),
+                        level: IssueLevel::Error,
+                    });
+                } else if !self
+                    .providers
+                    .contains_key(voice.provider_alias.as_str())
+                {
+                    issues.push(ValidationIssue {
+                        path: "voice.provider_alias".into(),
+                        code: "voice_provider_alias_missing".into(),
+                        message: format!(
+                            "voice.provider_alias = '{}' but no [providers.{}] block is declared",
+                            voice.provider_alias, voice.provider_alias
+                        ),
+                        level: IssueLevel::Warn,
+                    });
+                }
+                if voice.sample_rate_hz_in == 0 || voice.sample_rate_hz_out == 0 {
+                    issues.push(ValidationIssue {
+                        path: "voice.sample_rate_hz_*".into(),
+                        code: "voice_sample_rate_zero".into(),
+                        message: "voice sample rates must be > 0".into(),
                         level: IssueLevel::Error,
                     });
                 }
@@ -3409,5 +3552,127 @@ enabled = true
         );
         let reparsed: Config = toml::from_str(&toml_text).unwrap();
         assert!(reparsed.providers.contains_key("openai"));
+    }
+
+    // ---------------------------------------------------------------------
+    // [voice] — Phase 4 W4 D4 iter 1
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn voice_section_absent_means_disabled() {
+        // A pre-Phase-4 config has no [voice] section; Config::default()
+        // mirrors that shape (`voice: None`). Iter-1 contract: absent
+        // section = disabled, no errors, round-trips through serde.
+        let cfg = Config::default();
+        assert!(cfg.voice.is_none());
+        let toml_text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            !toml_text.contains("[voice]"),
+            "default config must NOT emit [voice]; got:\n{toml_text}"
+        );
+        let reparsed: Config = toml::from_str(&toml_text).unwrap();
+        assert!(reparsed.voice.is_none());
+    }
+
+    #[test]
+    fn voice_section_round_trips_with_defaults() {
+        // Smallest legal [voice] block — every other field uses serde's
+        // `default = ...` callbacks. Operators should be able to flip the
+        // flag without copy-pasting every knob.
+        let toml_in = r#"
+[server]
+port = 7000
+
+[voice]
+enabled = true
+"#;
+        let cfg: Config = toml::from_str(toml_in).expect("voice minimal toml parses");
+        let voice = cfg.voice.as_ref().expect("voice section present");
+        assert!(voice.enabled);
+        assert_eq!(voice.provider_alias, "openai-realtime");
+        assert_eq!(voice.budget_minutes_per_tenant_per_day, 30);
+        assert_eq!(voice.max_session_seconds, 600);
+        assert!(!voice.retain_audio);
+        assert_eq!(voice.audio_retention_days, 7);
+        assert_eq!(voice.sample_rate_hz_in, 16_000);
+        assert_eq!(voice.sample_rate_hz_out, 24_000);
+    }
+
+    #[test]
+    fn voice_validate_warns_when_provider_alias_missing() {
+        // enabled = true with an alias that doesn't resolve to a
+        // [providers.*] block: validator emits a Warn (not Error) so the
+        // alpha can be toggled on before the operator wires the provider.
+        let mut cfg = Config::default();
+        cfg.voice = Some(VoiceConfig {
+            enabled: true,
+            provider_alias: "no-such-provider".into(),
+            ..VoiceConfig::default()
+        });
+        let issues = cfg.validate_report();
+        let voice_issue = issues
+            .iter()
+            .find(|i| i.code == "voice_provider_alias_missing")
+            .expect("expected voice_provider_alias_missing issue");
+        assert_eq!(voice_issue.level, IssueLevel::Warn);
+    }
+
+    #[test]
+    fn voice_validate_silent_when_disabled() {
+        // enabled = false with a bogus alias is fine — operators should be
+        // able to keep the section around with `enabled = false` for
+        // reference (mirrors the [embedding] disabled-but-present pattern).
+        let mut cfg = Config::default();
+        cfg.voice = Some(VoiceConfig {
+            enabled: false,
+            provider_alias: "no-such-provider".into(),
+            ..VoiceConfig::default()
+        });
+        let issues = cfg.validate_report();
+        assert!(
+            issues
+                .iter()
+                .all(|i| !i.code.starts_with("voice_")),
+            "no voice_* issues when disabled; got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn voice_validate_errors_on_zero_sample_rate() {
+        // sample_rate_hz_in = 0 is impossible audio; should hard-error
+        // rather than silently produce a broken WebSocket session.
+        let mut cfg = Config::default();
+        cfg.voice = Some(VoiceConfig {
+            enabled: true,
+            provider_alias: "openai".into(), // present in default seed
+            sample_rate_hz_in: 0,
+            ..VoiceConfig::default()
+        });
+        let issues = cfg.validate_report();
+        let issue = issues
+            .iter()
+            .find(|i| i.code == "voice_sample_rate_zero")
+            .expect("expected voice_sample_rate_zero issue");
+        assert_eq!(issue.level, IssueLevel::Error);
+    }
+
+    #[test]
+    fn voice_validate_range_caps_budget_minutes() {
+        // Validator-derive `range(min = 0, max = 1440)` rejects 25h/day
+        // budgets — a misconfig that would otherwise be a silent way to
+        // disable the cost gate.
+        let mut cfg = Config::default();
+        cfg.voice = Some(VoiceConfig {
+            enabled: false,
+            budget_minutes_per_tenant_per_day: 9_999,
+            ..VoiceConfig::default()
+        });
+        let issues = cfg.validate_report();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.path.contains("budget_minutes_per_tenant_per_day")),
+            "expected validator-derive issue on budget_minutes; got: {issues:?}"
+        );
     }
 }

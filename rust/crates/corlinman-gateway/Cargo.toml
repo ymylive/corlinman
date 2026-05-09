@@ -67,6 +67,7 @@ toml = { workspace = true }
 dirs = { workspace = true }
 base64 = "0.22"
 dashmap = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 schemars = { workspace = true }
 sqlx = { workspace = true }
 opentelemetry = "0.24"
