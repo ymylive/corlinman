@@ -20,6 +20,7 @@
 pub mod cost;
 pub mod framing;
 pub mod provider;
+pub mod provider_openai;
 
 use std::sync::Arc;
 use std::time::SystemTime;
