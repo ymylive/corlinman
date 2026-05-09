@@ -305,6 +305,7 @@ version = "0.1.0"
 source = { editable = "python/packages/corlinman-agent" }
 dependencies = [
     { name = "corlinman-grpc" },
+    { name = "corlinman-persona" },
     { name = "corlinman-providers" },
     { name = "corlinman-tagmemo" },
     { name = "numpy" },
@@ -316,6 +317,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "corlinman-grpc", editable = "python/packages/corlinman-grpc" },
+    { name = "corlinman-persona", editable = "python/packages/corlinman-persona" },
     { name = "corlinman-providers", editable = "python/packages/corlinman-providers" },
     { name = "corlinman-tagmemo", editable = "python/packages/corlinman-tagmemo" },
     { name = "numpy", specifier = ">=1.26" },
