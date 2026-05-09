@@ -11,14 +11,14 @@ import XCTest
 @testable import CorlinmanCore
 
 final class CorlinmanCoreTests: XCTestCase {
-    /// Iter 4 contract: banner advertises the chat-stream surface and
-    /// the version is at `0.2.0`. Bumped each time `CorlinmanCore`
-    /// gains a non-additive public surface.
+    /// Iter 7 contract: banner advertises the chat-ui+auth surface
+    /// and the version is at `0.5.0`. Bumped each time
+    /// `CorlinmanCore` gains a non-additive public surface.
     func test_buildInfo_reportsCurrentIter() {
         XCTAssertTrue(
-            CorlinmanCoreInfo.banner.contains("chat-ui"),
-            "build banner must advertise chat-ui; got \(CorlinmanCoreInfo.banner)"
+            CorlinmanCoreInfo.banner.contains("chat-ui+auth"),
+            "build banner must advertise chat-ui+auth; got \(CorlinmanCoreInfo.banner)"
         )
-        XCTAssertEqual(CorlinmanCoreInfo.version, "0.4.0")
+        XCTAssertEqual(CorlinmanCoreInfo.version, "0.5.0")
     }
 }

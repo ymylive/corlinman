@@ -1,10 +1,12 @@
 // Phase 4 W3 C4 — umbrella file for `CorlinmanUI`.
 //
 // Iter 6 split the concrete views (`ChatView`, `MessageList`,
-// `Composer`) into their own file and added `ChatViewModel`. The
-// placeholder root view stays here as a minimal fallback the App
-// can render before auth/store wiring is complete (today the App
-// uses it; iter 7+ swaps in `OnboardingView` → `ChatView`).
+// `Composer`) into their own file and added `ChatViewModel`. Iter 7
+// added `OnboardingView` + `OnboardingViewModel` for first-launch
+// credential capture. The placeholder root view below stays as a
+// minimal post-onboarding stub the App swaps in after the operator
+// finishes minting an api_key — iter 10 replaces it with a real
+// streaming `ChatView` wired to the live gateway.
 
 import SwiftUI
 
@@ -20,10 +22,10 @@ public struct PlaceholderRootView: View {
         VStack(spacing: 12) {
             Text("Corlinman macOS reference client")
                 .font(.title2)
-            Text("Phase 4 W3 C4 — iter 6 (chat view scaffolded)")
+            Text("Phase 4 W3 C4 — iter 7 (post-onboarding placeholder)")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            Text("Streaming + persistence wired in CorlinmanCore/CorlinmanUI; auth + onboarding land in iter 7+.")
+            Text("Onboarding minted an api_key. Iter 10 swaps this for the live ChatView.")
                 .font(.footnote)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
