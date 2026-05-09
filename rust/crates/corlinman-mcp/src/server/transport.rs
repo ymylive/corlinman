@@ -35,8 +35,10 @@ use serde_json::Value as JsonValue;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use crate::adapters::SessionContext;
 use crate::error::McpError;
 use crate::schema::{JsonRpcRequest, JsonRpcResponse};
+use crate::server::auth::{resolve_token, TokenAcl};
 use crate::server::session::SessionState;
 
 /// WebSocket close code for "Message Too Big" (RFC 6455 §7.4.1).
@@ -51,19 +53,32 @@ pub const DEFAULT_MAX_FRAME_BYTES: usize = 1_048_576;
 /// either the gateway runtime config or hand-built test fixtures.
 #[derive(Debug, Clone)]
 pub struct McpServerConfig {
-    /// Accepted bearer tokens. **Empty list = reject everything**
+    /// Accepted bearer-token ACLs. **Empty list = reject everything**
     /// (fail-closed posture mirrors `meta_approver_users = []`).
-    pub tokens: Vec<String>,
+    /// Each ACL pins per-capability allowlists + tenant scope; iter 8
+    /// upgraded the field from a flat `Vec<String>` so the transport's
+    /// pre-upgrade gate and the per-call adapter context resolve from
+    /// one source of truth.
+    pub tokens: Vec<TokenAcl>,
     /// Per-frame size limit. Inbound frames over this trigger a
     /// 1009 close.
     pub max_frame_bytes: usize,
 }
 
 impl McpServerConfig {
-    /// Convenience: a single token, default frame cap.
+    /// Convenience: a single permissive token, default frame cap.
+    /// Used by tests; production tokens should narrow the ACL.
     pub fn with_token(token: impl Into<String>) -> Self {
         Self {
-            tokens: vec![token.into()],
+            tokens: vec![TokenAcl::permissive(token)],
+            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+        }
+    }
+
+    /// Convenience: a single fully-pinned ACL.
+    pub fn with_acl(acl: TokenAcl) -> Self {
+        Self {
+            tokens: vec![acl],
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
         }
     }
@@ -81,6 +96,11 @@ impl Default for McpServerConfig {
 /// Pluggable JSON-RPC frame handler. Iter 4's default is the stub in
 /// [`StubMethodNotFoundHandler`]; iter 5 supplies an adapter-backed
 /// implementation.
+///
+/// Iter 8 widens the signature with the per-connection
+/// [`SessionContext`] derived from the resolved [`TokenAcl`]. Handlers
+/// pass the context straight to their adapters so allowlist + tenant
+/// scoping fire on every method call.
 #[async_trait]
 pub trait FrameHandler: Send + Sync + 'static {
     /// Handle one inbound JSON-RPC request. The handler MUST inspect
@@ -93,12 +113,12 @@ pub trait FrameHandler: Send + Sync + 'static {
         &self,
         req: JsonRpcRequest,
         session: &Mutex<SessionState>,
+        ctx: &SessionContext,
     ) -> Result<Option<JsonRpcResponse>, McpError>;
 }
 
-/// Default handler used by iter 4's tests: ignores `session`, returns
-/// `MethodNotFound` for every request, drops every notification.
-/// Replaced by [`crate::server::dispatch::Dispatcher`] in iter 5.
+/// Default handler used by iter 4's tests: ignores `session` and `ctx`,
+/// returns `MethodNotFound` for every request, drops every notification.
 pub struct StubMethodNotFoundHandler;
 
 #[async_trait]
@@ -107,6 +127,7 @@ impl FrameHandler for StubMethodNotFoundHandler {
         &self,
         req: JsonRpcRequest,
         _session: &Mutex<SessionState>,
+        _ctx: &SessionContext,
     ) -> Result<Option<JsonRpcResponse>, McpError> {
         if req.is_notification() {
             return Ok(None);
@@ -168,12 +189,21 @@ async fn ws_upgrade_handler(
             return reject_unauthorized("missing token");
         }
     };
-    if !state.cfg.tokens.iter().any(|t| t == &token) {
-        warn!(?peer, "mcp: invalid token; rejecting pre-upgrade");
-        return reject_unauthorized("invalid token");
-    }
+    let acl = match resolve_token(&state.cfg.tokens, &token) {
+        Some(acl) => acl.clone(),
+        None => {
+            warn!(?peer, "mcp: invalid token; rejecting pre-upgrade");
+            return reject_unauthorized("invalid token");
+        }
+    };
+    info!(
+        ?peer,
+        label = %acl.label,
+        tenant = %acl.effective_tenant(),
+        "mcp: token resolved; upgrading"
+    );
     let state2 = state.clone();
-    ws.on_upgrade(move |socket| connection_loop(socket, state2))
+    ws.on_upgrade(move |socket| connection_loop(socket, state2, acl))
 }
 
 fn reject_unauthorized(message: &str) -> axum::response::Response {
@@ -188,12 +218,15 @@ fn reject_unauthorized(message: &str) -> axum::response::Response {
 }
 
 /// Per-connection reader/writer loop. One WebSocket = one
-/// [`SessionState`]. Inbound frames go to the handler; the handler's
-/// reply (or a lifted error) goes back out on the socket.
-async fn connection_loop(socket: WebSocket, state: Arc<ServerState>) {
+/// [`SessionState`] + one [`SessionContext`] (derived from the resolved
+/// [`TokenAcl`] at pre-upgrade). Inbound frames go to the handler with
+/// both pinned; the handler's reply (or a lifted error) goes back out on
+/// the socket.
+async fn connection_loop(socket: WebSocket, state: Arc<ServerState>, acl: TokenAcl) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let session = Mutex::new(SessionState::new());
-    info!("mcp: connection opened");
+    let ctx = acl.to_session_context();
+    info!(label = %acl.label, "mcp: connection opened");
 
     while let Some(frame) = ws_rx.next().await {
         let text = match frame {
@@ -247,7 +280,7 @@ async fn connection_loop(socket: WebSocket, state: Arc<ServerState>) {
 
         let id = req.id.clone();
         let is_notif = req.is_notification();
-        match state.handler.handle(req, &session).await {
+        match state.handler.handle(req, &session, &ctx).await {
             Ok(Some(resp)) => {
                 if let Err(err) = send_json(&mut ws_tx, &resp).await {
                     warn!(%err, "mcp: write failed; tearing down");
@@ -328,6 +361,54 @@ mod tests {
             msg.contains("401") || msg.to_lowercase().contains("unauthorized"),
             "expected 401, got {msg}"
         );
+    }
+
+    /// Iter 8: a structured ACL token must be accepted at pre-upgrade
+    /// just like a permissive one, *and* the connection's resolved
+    /// `SessionContext` must carry the ACL's tenant + allowlists onto
+    /// every handler call.
+    #[tokio::test]
+    async fn structured_acl_resolves_through_pre_upgrade() {
+        let acl = TokenAcl {
+            token: "acl-token".into(),
+            label: "scoped-laptop".into(),
+            tools_allowlist: vec!["kb:*".into()],
+            resources_allowed: vec!["skill".into()],
+            prompts_allowed: vec!["*".into()],
+            tenant_id: Some("alpha".into()),
+        };
+        let (addr, _h) = spawn(McpServerConfig::with_acl(acl)).await;
+        let url = format!("ws://{addr}/mcp?token=acl-token");
+        let (mut ws, resp) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 101, "must upgrade");
+
+        // Stub handler still returns MethodNotFound — the goal is to
+        // confirm the upgrade path doesn't drop a structured ACL.
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(serde_json::json!("p")),
+            method: "tools/list".into(),
+            params: serde_json::Value::Null,
+        };
+        ws.send(TgMessage::Text(serde_json::to_string(&req).unwrap()))
+            .await
+            .unwrap();
+        let reply = ws.next().await.expect("reply").expect("ok");
+        match reply {
+            TgMessage::Text(t) => {
+                let parsed: JsonRpcResponse = serde_json::from_str(&t).unwrap();
+                match parsed {
+                    JsonRpcResponse::Error { error, .. } => {
+                        // Stub still returns MethodNotFound; the
+                        // handler-side ACL plumbing is exercised in the
+                        // dedicated `tests/auth_acl.rs` integration test.
+                        assert_eq!(error.code, error_codes::METHOD_NOT_FOUND);
+                    }
+                    other => panic!("expected error, got {other:?}"),
+                }
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
     }
 
     #[tokio::test]
