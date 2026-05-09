@@ -7,10 +7,12 @@
 //! adapters under [`crate::adapters`].
 
 pub mod auth;
+pub mod dispatch;
 pub mod session;
 pub mod transport;
 
 pub use auth::{resolve_token, TokenAcl, DEFAULT_TENANT_ID};
+pub use dispatch::{AdapterDispatcher, ServerInfo};
 pub use session::{
     initialize_reply, SessionPhase, SessionState, INITIALIZED_NOTIFICATION,
     INITIALIZE_METHOD,

@@ -20,4 +20,7 @@ pub use schema::{
     error_codes, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JSONRPC_VERSION,
     MCP_PROTOCOL_VERSION,
 };
-pub use server::{SessionPhase, SessionState};
+pub use server::{
+    AdapterDispatcher, McpServer, McpServerConfig, ServerInfo, SessionPhase, SessionState,
+    TokenAcl, DEFAULT_TENANT_ID,
+};

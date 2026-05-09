@@ -53,7 +53,7 @@ pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(300);
 /// Top-level sections which cannot be applied without a process restart.
 /// We still swap (the snapshot is the source of truth) but emit an extra
 /// `<section>.restart_required` event so operators get a loud warning.
-const RESTART_REQUIRED_SECTIONS: &[&str] = &["server", "wstool", "nodebridge"];
+const RESTART_REQUIRED_SECTIONS: &[&str] = &["server", "wstool", "nodebridge", "mcp"];
 
 /// Watcher over the gateway's live `corlinman.toml`. Clone-cheap (everything
 /// is behind `Arc`s) so subsystems that want a cheap read-only handle to the
