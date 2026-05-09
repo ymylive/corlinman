@@ -486,6 +486,52 @@ pub async fn build_runtime_full_with_evolution(
     };
     let canvas_state = CanvasState::new(config_handle.clone());
     let base_router = base_router.merge(routes::canvas::router(canvas_state, canvas_auth_state));
+
+    // Phase 4 W3 C1 iter 9: mount `/mcp` when `[mcp].enabled = true`.
+    // The MCP server is built once at boot from the live registries.
+    // `[mcp]` is in `RESTART_REQUIRED_SECTIONS`, so a config hot-reload
+    // does NOT pick up changes here — operators see the
+    // `mcp.restart_required` event and must restart the gateway.
+    let base_router = {
+        let snapshot = config_handle.load_full();
+        if snapshot.mcp.enabled {
+            // C1 ships an empty memory-host map at the gateway layer:
+            // production memory hosts live in the Python tier today.
+            // The `corlinman://memory/...` resource scheme will surface
+            // an empty list until a Rust MemoryHost-trait implementation
+            // is wired here in a later iteration.
+            let memory_hosts: std::collections::BTreeMap<
+                String,
+                std::sync::Arc<dyn corlinman_memory_host::MemoryHost>,
+            > = std::collections::BTreeMap::new();
+            let skills_dir = resolve_data_dir().join(&snapshot.skills.dir);
+            let skills = Arc::new(
+                corlinman_skills::SkillRegistry::load_from_dir(&skills_dir)
+                    .unwrap_or_else(|err| {
+                        tracing::warn!(
+                            error = %err,
+                            dir = %skills_dir.display(),
+                            "mcp: skill registry load failed; mounting with empty skills",
+                        );
+                        corlinman_skills::SkillRegistry::default()
+                    }),
+            );
+            match crate::mcp::build_router(&snapshot.mcp, registry.clone(), skills, memory_hosts) {
+                Some(mcp_router) => {
+                    tracing::info!(
+                        bind = %snapshot.mcp.server.bind,
+                        token_count = snapshot.mcp.server.tokens.len(),
+                        "mcp: /mcp mounted",
+                    );
+                    base_router.merge(mcp_router)
+                }
+                None => base_router,
+            }
+        } else {
+            base_router
+        }
+    };
+
     let router = mount_admin_routes(base_router, admin_state);
 
     (router, backend_opt, registry, config_handle, cfg_path)

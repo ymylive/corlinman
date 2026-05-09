@@ -301,6 +301,7 @@ mod tests {
             communication: Default::default(),
             capabilities: Default::default(),
             sandbox: Default::default(),
+            mcp: None,
             meta: None,
             protocols: vec!["openai_function".into()],
             hooks: vec![],

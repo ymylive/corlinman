@@ -497,6 +497,7 @@ mod tests {
                 memory: Some("64m".into()),
                 ..Default::default()
             },
+            mcp: None,
             meta: None,
             protocols: vec!["openai_function".into()],
             hooks: vec![],
@@ -520,6 +521,7 @@ mod tests {
             communication: Default::default(),
             capabilities: Default::default(),
             sandbox: Default::default(),
+            mcp: None,
             meta: None,
             protocols: vec!["openai_function".into()],
             hooks: vec![],
@@ -641,6 +643,7 @@ mod tests {
             communication: Default::default(),
             capabilities: Default::default(),
             sandbox: Default::default(),
+            mcp: None,
             meta: None,
             protocols: vec!["openai_function".into()],
             hooks: vec![],

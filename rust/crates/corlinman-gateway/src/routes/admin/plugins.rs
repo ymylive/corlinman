@@ -2,6 +2,18 @@
 //!
 //! Read-only views onto the plugin registry. The UI consumes these on the
 //! Plugins page (list table → row detail drawer).
+//!
+//! Phase 4 W3 C2 iter 8: this module additionally exports
+//! [`mcp_admin_router`] — a sub-router that exposes
+//! `POST /admin/plugins/:name/disable|enable|restart` against an
+//! [`Arc<McpAdapter>`]. The router is intentionally state-disjoint
+//! from [`AdminState`]: the gateway wiring step (Wave 4 follow-up)
+//! will merge it into the admin tree once the boot path constructs an
+//! `McpAdapter` and stores it in app state. Until then the router is
+//! exercised by the unit tests in this file (which spawn a real awk
+//! MCP fixture) and by integration callers that explicitly opt in.
+
+use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
@@ -13,6 +25,7 @@ use axum::{
 use corlinman_plugins::manifest::PluginType;
 use corlinman_plugins::registry::{Diagnostic, PluginEntry};
 use corlinman_plugins::runtime::jsonrpc_stdio::execute as jsonrpc_execute;
+use corlinman_plugins::runtime::mcp::adapter::{AdapterError, McpAdapter};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
@@ -65,11 +78,10 @@ impl From<&PluginEntry> for PluginSummaryOut {
 }
 
 fn plugin_type_str(t: PluginType) -> &'static str {
-    match t {
-        PluginType::Sync => "sync",
-        PluginType::Async => "async",
-        PluginType::Service => "service",
-    }
+    // Delegate to the canonical `PluginType::as_str` so a fourth runtime
+    // (e.g. `Mcp` introduced in manifest v3) doesn't require a gateway
+    // edit; matching here was a duplication of the same string table.
+    t.as_str()
 }
 
 /// Sub-router for `/admin/plugins*`. Consumes [`AdminState`] via axum's
@@ -349,6 +361,141 @@ fn diagnostic_for(plugin: &str, d: &Diagnostic) -> Option<Value> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4 W3 C2 iter 8 — admin mutations against an `McpAdapter`.
+//
+// Three POST endpoints, each idempotent at the adapter layer:
+//
+//   POST /admin/plugins/:name/disable  -> { disabled: true }   (sentinel persisted)
+//   POST /admin/plugins/:name/enable   -> { disabled: false }  (sentinel removed)
+//   POST /admin/plugins/:name/restart  -> { status: "<after>" } (stop+start)
+//
+// The router is state-disjoint from `AdminState` so it can land in
+// the plugin admin module without touching `AdminState` (which is
+// out of scope for the C2 worktree). Boot wiring merges this into
+// the admin tree alongside the read-only routes once the gateway
+// gains an `McpAdapter` field.
+// ---------------------------------------------------------------------------
+
+/// Build the iter-8 admin sub-router for MCP-plugin lifecycle
+/// mutations. Caller passes an `Arc<McpAdapter>` shared with the
+/// chat dispatcher; admin and dispatch share the same instance.
+pub fn mcp_admin_router(adapter: Arc<McpAdapter>) -> Router {
+    Router::new()
+        .route("/admin/plugins/:name/disable", post(disable_mcp_plugin))
+        .route("/admin/plugins/:name/enable", post(enable_mcp_plugin))
+        .route("/admin/plugins/:name/restart", post(restart_mcp_plugin))
+        .with_state(adapter)
+}
+
+async fn disable_mcp_plugin(
+    State(adapter): State<Arc<McpAdapter>>,
+    Path(name): Path<String>,
+) -> axum::response::Response {
+    match adapter.disable_one(&name).await {
+        Ok(()) => Json(json!({
+            "name": name,
+            "disabled": true,
+            "stopped": true,
+        }))
+        .into_response(),
+        Err(err) => adapter_error_response(err),
+    }
+}
+
+async fn enable_mcp_plugin(
+    State(adapter): State<Arc<McpAdapter>>,
+    Path(name): Path<String>,
+) -> axum::response::Response {
+    match adapter.enable_one(&name).await {
+        Ok(()) => Json(json!({
+            "name": name,
+            "disabled": false,
+        }))
+        .into_response(),
+        Err(err) => adapter_error_response(err),
+    }
+}
+
+async fn restart_mcp_plugin(
+    State(adapter): State<Arc<McpAdapter>>,
+    Path(name): Path<String>,
+) -> axum::response::Response {
+    match adapter.restart_one(&name).await {
+        Ok(()) => {
+            let status = adapter
+                .status(&name)
+                .await
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_else(|_| "unknown".into());
+            Json(json!({
+                "name": name,
+                "restarted": true,
+                "status": status,
+            }))
+            .into_response()
+        }
+        Err(err) => adapter_error_response(err),
+    }
+}
+
+/// Project [`AdapterError`] onto the admin HTTP error envelope. The
+/// status codes follow the convention used by the rest of admin:
+///
+///   - `UnknownPlugin` → 404 (admin asked for a plugin that isn't
+///     registered with the adapter)
+///   - `Disabled` → 409 (operation rejected because of a deliberate
+///     state — Conflict is the closest standard semantic)
+///   - `SentinelIo` → 500 (filesystem can't persist the change; admin
+///     should retry or inspect disk)
+///   - everything else → 502 (upstream MCP child / handshake / call
+///     failure)
+fn adapter_error_response(err: AdapterError) -> axum::response::Response {
+    let (status, code, message) = match &err {
+        AdapterError::UnknownPlugin(name) => (
+            StatusCode::NOT_FOUND,
+            "plugin_not_found",
+            format!("MCP plugin {name:?} is not registered with the adapter"),
+        ),
+        AdapterError::Disabled(name) => (
+            StatusCode::CONFLICT,
+            "plugin_disabled",
+            format!("MCP plugin {name:?} is administratively disabled"),
+        ),
+        AdapterError::SentinelIo { plugin, message } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "sentinel_io_error",
+            format!("sentinel I/O for {plugin:?}: {message}"),
+        ),
+        AdapterError::NotMcpPlugin(name) => (
+            StatusCode::BAD_REQUEST,
+            "not_mcp_plugin",
+            format!("plugin {name:?} is not plugin_type = \"mcp\""),
+        ),
+        AdapterError::MissingMcpConfig(name) => (
+            StatusCode::BAD_REQUEST,
+            "missing_mcp_config",
+            format!("plugin {name:?} is missing the [mcp] manifest table"),
+        ),
+        // Spawn / handshake / call failures collapse to 502 so admin
+        // sees the upstream-failure banner. The text-of-source chain
+        // carries the diagnosable detail.
+        other => (
+            StatusCode::BAD_GATEWAY,
+            "mcp_adapter_error",
+            other.to_string(),
+        ),
+    };
+    (
+        status,
+        Json(json!({
+            "error": code,
+            "message": message,
+        })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +655,271 @@ mod tests {
         };
         assert!(diagnostic_for("alpha", &d).is_some());
         assert!(diagnostic_for("beta", &d).is_none());
+    }
+
+    // ----- Iter 8: MCP admin mutations (disable / enable / restart) -----
+
+    use corlinman_plugins::manifest::{
+        AllowlistMode, EntryPoint, EnvPassthrough, McpConfig, PluginManifest,
+        ResourcesAllowlist, RestartPolicy, ToolsAllowlist,
+    };
+
+    fn mcp_manifest(name: &str, command: &str, args: &[&str]) -> Arc<PluginManifest> {
+        Arc::new(PluginManifest {
+            manifest_version: 3,
+            name: name.into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            author: String::new(),
+            plugin_type: PluginType::Mcp,
+            entry_point: EntryPoint {
+                command: command.into(),
+                args: args.iter().map(|s| s.to_string()).collect(),
+                env: Default::default(),
+            },
+            communication: Default::default(),
+            capabilities: Default::default(),
+            sandbox: Default::default(),
+            mcp: Some(McpConfig {
+                autostart: false,
+                restart_policy: RestartPolicy::OnCrash,
+                crash_loop_max: 3,
+                crash_loop_window_secs: 60,
+                handshake_timeout_ms: 5_000,
+                idle_shutdown_secs: 0,
+                env_passthrough: EnvPassthrough {
+                    allow: vec![],
+                    deny: vec![],
+                },
+                tools_allowlist: ToolsAllowlist {
+                    mode: AllowlistMode::All,
+                    names: vec![],
+                },
+                resources_allowlist: ResourcesAllowlist::default(),
+            }),
+            meta: None,
+            protocols: vec!["openai_function".into()],
+            hooks: vec![],
+            skill_refs: vec![],
+        })
+    }
+
+    /// `which`-equivalent check using only `std`: returns true when
+    /// `awk` exists on PATH. The plugins crate has the `which` crate
+    /// in its dev-deps; rather than pulling that into the gateway
+    /// just for a portability skip, we shell out to `command -v`.
+    fn awk_available() -> bool {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v awk >/dev/null 2>&1 && command -v sh >/dev/null 2>&1")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Awk responder identical to the iter-4/5/7 fixtures — minimal
+    /// MCP server that echoes initialize / tools/list / tools/call.
+    fn awk_responder() -> (&'static str, Vec<String>) {
+        let script = r#"awk '
+            {
+                line=$0
+                m = match(line, /"id":[ ]*[0-9]+/)
+                if (m == 0) { m = match(line, /"id":[ ]*"[^"]*"/) }
+                if (m == 0) { next }
+                idstr = substr(line, RSTART+5, RLENGTH-5)
+                gsub(/^[ ]+/, "", idstr)
+                if (line ~ /"method"[ ]*:[ ]*"initialize"/) {
+                    printf "{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"awk-mcp\",\"version\":\"0.0.1\"}}}\n", idstr
+                    fflush()
+                }
+                else if (line ~ /"method"[ ]*:[ ]*"tools\/list"/) {
+                    printf "{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"tools\":[{\"name\":\"echo\",\"description\":\"\",\"inputSchema\":{\"type\":\"object\"}}]}}\n", idstr
+                    fflush()
+                }
+                else if (line ~ /"method"[ ]*:[ ]*"tools\/call"/) {
+                    printf "{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"isError\":false}}\n", idstr
+                    fflush()
+                }
+            }'"#;
+        ("sh", vec!["-c".into(), script.into()])
+    }
+
+    /// Helper: build an `Arc<McpAdapter>` with `name` registered + started.
+    /// Returns the tempdir so the manifest dir survives the test.
+    async fn live_adapter_with(
+        name: &str,
+    ) -> (tempfile::TempDir, Arc<McpAdapter>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cmd, args) = awk_responder();
+        let m = mcp_manifest(name, cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let adapter = Arc::new(McpAdapter::new());
+        adapter
+            .register(m, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        adapter.start_one(name).await.unwrap();
+        (tmp, adapter)
+    }
+
+    #[tokio::test]
+    async fn admin_disable_endpoint_returns_disabled_true() {
+        if !awk_available() {
+            eprintln!("awk not on PATH; skipping");
+            return;
+        }
+        let (_tmp, adapter) = live_adapter_with("admin-dis").await;
+        let app = mcp_admin_router(adapter.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/admin-dis/disable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["disabled"], true);
+        assert_eq!(v["stopped"], true);
+        assert!(adapter.is_disabled("admin-dis").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn admin_enable_endpoint_clears_disabled() {
+        if !awk_available() {
+            eprintln!("awk not on PATH; skipping");
+            return;
+        }
+        let (_tmp, adapter) = live_adapter_with("admin-ena").await;
+        adapter.disable_one("admin-ena").await.unwrap();
+
+        let app = mcp_admin_router(adapter.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/admin-ena/enable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["disabled"], false);
+        assert!(!adapter.is_disabled("admin-ena").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn admin_restart_endpoint_recovers_to_initialized() {
+        if !awk_available() {
+            eprintln!("awk not on PATH; skipping");
+            return;
+        }
+        let (_tmp, adapter) = live_adapter_with("admin-rest").await;
+        adapter.stop_one("admin-rest").await.unwrap();
+
+        let app = mcp_admin_router(adapter.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/admin-rest/restart")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["restarted"], true);
+        assert_eq!(v["status"], "initialized");
+    }
+
+    #[tokio::test]
+    async fn admin_disable_endpoint_unknown_returns_404() {
+        let adapter = Arc::new(McpAdapter::new());
+        let app = mcp_admin_router(adapter);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/ghost/disable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "plugin_not_found");
+    }
+
+    #[tokio::test]
+    async fn admin_restart_endpoint_disabled_returns_409() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = mcp_manifest("admin-dis-409", "/no-binary", &[]);
+        let adapter = Arc::new(McpAdapter::new());
+        adapter
+            .register(m, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        adapter.disable_one("admin-dis-409").await.unwrap();
+
+        let app = mcp_admin_router(adapter);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/admin-dis-409/restart")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "plugin_disabled");
+    }
+
+    #[tokio::test]
+    async fn admin_disable_then_enable_round_trip() {
+        if !awk_available() {
+            eprintln!("awk not on PATH; skipping");
+            return;
+        }
+        let (_tmp, adapter) = live_adapter_with("admin-rt").await;
+        let app = mcp_admin_router(adapter.clone());
+
+        // Disable
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/admin-rt/disable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(adapter.is_disabled("admin-rt").await.unwrap());
+
+        // Enable
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/admin-rt/enable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!adapter.is_disabled("admin-rt").await.unwrap());
     }
 }

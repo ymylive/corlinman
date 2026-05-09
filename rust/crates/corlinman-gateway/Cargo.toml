@@ -30,6 +30,9 @@ corlinman-scheduler = { path = "../corlinman-scheduler" }
 corlinman-tenant = { path = "../corlinman-tenant" }
 corlinman-replay = { path = "../corlinman-replay" }
 corlinman-identity = { path = "../corlinman-identity" }
+corlinman-mcp = { path = "../corlinman-mcp" }
+corlinman-skills = { path = "../corlinman-skills" }
+corlinman-memory-host = { path = "../corlinman-memory-host" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -75,3 +78,11 @@ tracing-opentelemetry = "0.25"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tower = { workspace = true }
 tempfile = "3"
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+tokio-util = { workspace = true }
+corlinman-skills = { path = "../corlinman-skills" }
+corlinman-memory-host = { path = "../corlinman-memory-host" }
+toml = { workspace = true }

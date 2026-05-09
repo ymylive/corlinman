@@ -44,6 +44,7 @@ fn manifest(name: &str, sandbox: SandboxConfig, python_script: &str) -> (PluginM
         communication: Default::default(),
         capabilities: Default::default(),
         sandbox,
+        mcp: None,
         meta: None,
         protocols: vec!["openai_function".into()],
         hooks: vec![],

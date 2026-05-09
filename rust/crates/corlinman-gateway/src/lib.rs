@@ -11,6 +11,7 @@ pub mod grpc;
 pub mod legacy_migration;
 pub mod log_broadcast;
 pub mod log_retention;
+pub mod mcp;
 pub mod metrics;
 pub mod middleware;
 pub mod placeholder;

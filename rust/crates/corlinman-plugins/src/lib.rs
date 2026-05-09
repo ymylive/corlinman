@@ -22,8 +22,9 @@ pub use discovery::{
     discover, roots_from_env_var, DiscoveredPlugin, DiscoveryDiagnostic, Origin, SearchRoot,
 };
 pub use manifest::{
-    parse_manifest_file, Capabilities, Communication, EntryPoint, ManifestParseError,
-    PluginManifest, PluginType, SandboxConfig, Tool,
+    parse_manifest_file, AllowlistMode, Capabilities, Communication, EntryPoint, EnvPassthrough,
+    ManifestParseError, McpConfig, PluginManifest, PluginType, ResourcesAllowlist, RestartPolicy,
+    SandboxConfig, Tool, ToolsAllowlist,
 };
 pub use registry::{Diagnostic, PluginEntry, PluginRegistry};
 pub use supervisor::{PluginChild, PluginSupervisor};

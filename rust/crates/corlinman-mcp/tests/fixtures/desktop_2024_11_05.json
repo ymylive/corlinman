@@ -1,0 +1,181 @@
+{
+  "fixture_version": 1,
+  "description": "Synthesised Claude-Desktop MCP 2024-11-05 session — handshake → tools/list → tools/call → resources/list → resources/read → close. Used by `tests/desktop_fixture.rs` to lock the wire shape against future drift. Captured by hand to reflect Desktop's frame ordering (no real Desktop binary needed); a real-Desktop capture replaces this when the test environment gains a Desktop install.",
+  "fixture_state": {
+    "plugin_name": "kb",
+    "tools": [
+      { "name": "search", "description": "search the kb" }
+    ],
+    "skills": [
+      { "name": "summarize", "description": "summarise content", "body": "## summarize\n\nGiven a chunk of text, produce a tight summary.\n" }
+    ]
+  },
+  "exchanges": [
+    {
+      "step": 1,
+      "label": "initialize",
+      "direction": "client_to_server",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "desktop-init-1",
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2024-11-05",
+          "capabilities": {},
+          "clientInfo": { "name": "claude-desktop", "version": "0.7.4" }
+        }
+      }
+    },
+    {
+      "step": 2,
+      "label": "initialize_reply",
+      "direction": "server_to_client",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "desktop-init-1",
+        "result": {
+          "protocolVersion": "2024-11-05",
+          "capabilities": {
+            "tools": {},
+            "resources": { "subscribe": false },
+            "prompts": {}
+          },
+          "serverInfo": { "name": "corlinman", "version": "*" }
+        }
+      },
+      "ignore_paths": ["result.serverInfo.version"]
+    },
+    {
+      "step": 3,
+      "label": "initialized_notification",
+      "direction": "client_to_server",
+      "frame": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "step": 4,
+      "label": "tools_list_request",
+      "direction": "client_to_server",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "desktop-tools-1",
+        "method": "tools/list",
+        "params": {}
+      }
+    },
+    {
+      "step": 5,
+      "label": "tools_list_reply",
+      "direction": "server_to_client",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "desktop-tools-1",
+        "result": {
+          "tools": [
+            {
+              "name": "kb:search",
+              "description": "search the kb",
+              "inputSchema": { "type": "object" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step": 6,
+      "label": "tools_call_request",
+      "direction": "client_to_server",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "desktop-tools-2",
+        "method": "tools/call",
+        "params": {
+          "name": "kb:search",
+          "arguments": { "q": "what is corlinman" }
+        }
+      }
+    },
+    {
+      "step": 7,
+      "label": "tools_call_reply",
+      "direction": "server_to_client",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "desktop-tools-2",
+        "result": {
+          "content": [
+            { "type": "text", "text": "{\"results\":[]}" }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "step": 8,
+      "label": "resources_list_request",
+      "direction": "client_to_server",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "desktop-res-1",
+        "method": "resources/list",
+        "params": {}
+      }
+    },
+    {
+      "step": 9,
+      "label": "resources_list_reply",
+      "direction": "server_to_client",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "desktop-res-1",
+        "result": {
+          "resources": [
+            {
+              "uri": "corlinman://skill/summarize",
+              "name": "skill:summarize",
+              "description": "summarise content",
+              "mimeType": "text/markdown"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step": 10,
+      "label": "resources_read_request",
+      "direction": "client_to_server",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "desktop-res-2",
+        "method": "resources/read",
+        "params": { "uri": "corlinman://skill/summarize" }
+      }
+    },
+    {
+      "step": 11,
+      "label": "resources_read_reply",
+      "direction": "server_to_client",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "desktop-res-2",
+        "result": {
+          "contents": [
+            {
+              "uri": "corlinman://skill/summarize",
+              "mimeType": "text/markdown",
+              "text": "## summarize\n\nGiven a chunk of text, produce a tight summary.\n"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step": 12,
+      "label": "close",
+      "direction": "client_to_server",
+      "frame_kind": "ws_close"
+    }
+  ]
+}
