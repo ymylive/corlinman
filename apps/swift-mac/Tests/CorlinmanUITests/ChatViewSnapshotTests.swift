@@ -5,7 +5,7 @@
 //
 //   - chat_view_snapshot_idle
 //   - chat_view_snapshot_streaming_typing_indicator
-//   - approval_sheet_snapshot     (deferred — sheet ships at iter 10/11)
+//   - approval_sheet_snapshot     (added iter 10 — `ApprovalSheet` shipped)
 //
 // We add two more for `OnboardingView` so the credentials and tenant-
 // picker phases get snapshot coverage too — auth UX regressions are
@@ -143,6 +143,26 @@ final class ChatViewSnapshotTests: XCTestCase {
         vm.adminPassword = "hunter2"
         let view = OnboardingView(viewModel: vm)
             .frame(width: 600, height: 460)
+        assertSnapshot(matching: view, as: .image(precision: 0.99))
+    }
+
+    /// Iter-10 mandated row: `approval_sheet_snapshot`. Render the
+    /// sheet against a hand-built `PendingApproval` so the bubble UI
+    /// has a deterministic surface to compare against.
+    func test_approvalSheet_snapshot() {
+        let prompt = PendingApproval(
+            turnId: "turn-7",
+            callId: "call-99",
+            plugin: "shell",
+            tool: "run",
+            argsPreview: "ls /etc"
+        )
+        let view = ApprovalSheet(
+            prompt: prompt,
+            onResolve: { _, _, _ in },
+            onCancel: {}
+        )
+        .frame(width: 480, height: 380)
         assertSnapshot(matching: view, as: .image(precision: 0.99))
     }
 

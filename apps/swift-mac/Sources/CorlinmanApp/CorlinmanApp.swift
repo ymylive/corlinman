@@ -1,12 +1,17 @@
 // Phase 4 W3 C4 iter 1+ — `@main` entry point for the macOS reference client.
 //
-// Iter 7 wires `OnboardingView` for the first-launch path and falls
-// through to the placeholder once auth is staged. Iter 8 attaches an
-// `NSApplicationDelegateAdaptor` so APNs can hand back device tokens
-// (`docs/design/phase4-w3-c4-design.md:380-383` documents why a pure
-// SwiftUI lifecycle alone can't capture this callback). The placeholder
-// stays in the picture until iter 10 swaps it for the streaming
-// `ChatView` bound to a real `ChatViewModel`.
+// Iter 7 wired `OnboardingView` for the first-launch path; iter 8 hung
+// the AppDelegate adaptor for APNs. Iter 10 swaps the post-onboarding
+// placeholder for `MainShellView` — the live `ChatView` bound to a
+// real `ChatViewModel`. That lights up the design doc's iter-10
+// acceptance gate (`docs/design/phase4-w3-c4-design.md:507-514`):
+// onboard → chat → approve → push, all on the same SwiftUI tree.
+//
+// `LiveChatStreamSource` bridges `CorlinmanCore`'s networking to the
+// `ChatStreamSource` protocol declared in `CorlinmanUI`. The bridge
+// is one extension at the App layer because Core can't import UI
+// (UI depends on Core, not the other way), but the App layer can
+// import both.
 
 import SwiftUI
 #if canImport(AppKit)
@@ -156,10 +161,9 @@ final class AppSession: ObservableObject {
     }
 }
 
-/// Top-level routing: onboarding vs post-auth placeholder. Each
-/// route owns its own view model so re-entering onboarding (e.g.
-/// after a "log out" gesture in a future iter) starts from a clean
-/// state.
+/// Top-level routing: onboarding vs main shell. Each route owns its
+/// own view model so re-entering onboarding (e.g. after a "log out"
+/// gesture in a future iter) starts from a clean state.
 struct RootView: View {
     @ObservedObject var session: AppSession
 
@@ -171,8 +175,41 @@ struct RootView: View {
                     session.didCompleteOnboarding(creds)
                 }
             ))
+        } else if let creds = session.authStore.credentials,
+                  let store = try? SessionStore(path: (try? SessionStore.defaultPath()) ?? ":memory:") {
+            // Live shell: real ChatView, real session store, real
+            // approval client. The chat-stream source closes over
+            // `authStore.apiKey` so a future tenant switch picks up
+            // the freshly minted bearer.
+            let liveSource = LiveChatStreamSource(
+                baseURL: creds.gatewayBaseURL,
+                bearerProvider: { [authStore = session.authStore] in authStore.apiKey }
+            )
+            let approvalClient = URLSessionApprovalClient(
+                baseURL: creds.gatewayBaseURL,
+                bearerProvider: { [authStore = session.authStore] in authStore.apiKey }
+            )
+            MainShellView(
+                source: LiveSourceBridge(inner: liveSource),
+                tenantSlug: creds.tenantSlug ?? "default",
+                store: store,
+                approvalClient: approvalClient
+            )
         } else {
+            // Defensive: onboarding said we're done but creds couldn't
+            // be read back. Surface the placeholder so the operator
+            // can `clearAll` from a future settings menu and re-onboard.
             PlaceholderRootView()
         }
+    }
+}
+
+/// Bridge `LiveChatStreamSource` (Core protocol) to `ChatStreamSource`
+/// (UI protocol). The two protocols have identical shape; the bridge
+/// is the App layer's job because Core can't import UI.
+struct LiveSourceBridge: ChatStreamSource, @unchecked Sendable {
+    let inner: LiveChatStreamSource
+    func openStream(for prompt: String, sessionKey: String) -> ChatStream {
+        inner.openStream(for: prompt, sessionKey: sessionKey)
     }
 }

@@ -11,15 +11,16 @@ import XCTest
 @testable import CorlinmanCore
 
 final class CorlinmanCoreTests: XCTestCase {
-    /// Iter 9 contract: banner advertises chat-ui+auth+push+ci and
-    /// the version is at `0.6.1` (snapshot scaffolding only — patch
-    /// bump). Bumped each time `CorlinmanCore` gains a non-additive
-    /// public surface, or once per ship-able iteration.
+    /// Iter 10 contract: banner advertises the close-out surface
+    /// (e2e-acceptance + approval + demo-contract) and the version
+    /// minor-bumps to `0.7.0`. Bumped each time `CorlinmanCore`
+    /// gains a non-additive public surface, or once per ship-able
+    /// iteration.
     func test_buildInfo_reportsCurrentIter() {
         XCTAssertTrue(
-            CorlinmanCoreInfo.banner.contains("chat-ui+auth+push+ci"),
-            "build banner must advertise chat-ui+auth+push+ci; got \(CorlinmanCoreInfo.banner)"
+            CorlinmanCoreInfo.banner.contains("e2e-acceptance+approval+demo-contract"),
+            "build banner must advertise iter 10 surfaces; got \(CorlinmanCoreInfo.banner)"
         )
-        XCTAssertEqual(CorlinmanCoreInfo.version, "0.6.1")
+        XCTAssertEqual(CorlinmanCoreInfo.version, "0.7.0")
     }
 }

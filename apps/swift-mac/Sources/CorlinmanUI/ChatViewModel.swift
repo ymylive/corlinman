@@ -1,6 +1,15 @@
 // Phase 4 W3 C4 iter 6 — `ChatViewModel`: glue between `ChatStream`
 // (network) + `SessionStore` (persistence) + `ChatView` (rendering).
 //
+// Iter 10 extends the model with `pendingApproval` and an
+// `ApprovalClient` hook so `ApprovalSheet` can present the awaiting-
+// approval prompt and POST the operator's decision back.
+// `awaiting_approval` SSE frames already lift through `ChatChunk`
+// (`Models.swift:54`); the view model remembers the most-recent one
+// keyed by `(turnId, callId)` and clears it once the operator
+// resolves it. That's the iter-10 close-out for the design test row
+// `approval_sheet_snapshot` and the deferred iter-9 surface.
+//
 // The view model is `@MainActor` so SwiftUI mutations land on the
 // main thread without ceremony. Network reads come off the
 // `ChatStream` async iterator, but consumed inside a `Task { … }`
@@ -61,6 +70,26 @@ public protocol ChatStreamSource: Sendable {
     func openStream(for prompt: String, sessionKey: String) -> ChatStream
 }
 
+/// Awaiting-approval prompt the view model surfaces to `ApprovalSheet`.
+/// One in-flight at a time — the agent serialises its tool calls so
+/// queueing multiple is a future iter (post-C4) when concurrent
+/// approval becomes a real shape.
+public struct PendingApproval: Equatable, Sendable, Identifiable {
+    public let id: String              // `callId`, unique per call
+    public let turnId: String
+    public let plugin: String
+    public let tool: String
+    public let argsPreview: String
+
+    public init(turnId: String, callId: String, plugin: String, tool: String, argsPreview: String) {
+        self.id = callId
+        self.turnId = turnId
+        self.plugin = plugin
+        self.tool = tool
+        self.argsPreview = argsPreview
+    }
+}
+
 /// Drives `ChatView`. Pure logic — the SwiftUI view consumes
 /// `messages` and `isStreaming` and calls `send` / `cancelStreaming`.
 @MainActor
@@ -71,26 +100,34 @@ public final class ChatViewModel: ObservableObject {
     /// last error inline. Cleared on the next successful send.
     @Published public private(set) var lastError: String?
 
+    /// Iter 10 — surfaced to `ApprovalSheet`. Non-nil while the agent
+    /// is blocked on operator approval; cleared when `resolveApproval`
+    /// completes (or the user cancels the stream).
+    @Published public private(set) var pendingApproval: PendingApproval?
+
     private let source: ChatStreamSource
-    private let sessionKey: String
+    public let sessionKey: String
     private let store: SessionStore?
     private var streamTask: Task<Void, Never>?
+    private let approvalClient: ApprovalClient?
 
     /// Tenant slug used when persisting new session rows. The view
     /// model itself doesn't enforce tenant scoping — the caller picks
     /// which tenant a chat belongs to and passes it in.
-    private let tenantSlug: String
+    public let tenantSlug: String
 
     public init(
         source: ChatStreamSource,
         sessionKey: String = UUID().uuidString,
         tenantSlug: String,
-        store: SessionStore? = nil
+        store: SessionStore? = nil,
+        approvalClient: ApprovalClient? = nil
     ) {
         self.source = source
         self.sessionKey = sessionKey
         self.tenantSlug = tenantSlug
         self.store = store
+        self.approvalClient = approvalClient
     }
 
     /// Hydrate `messages` from the local cache. The view calls this
@@ -146,8 +183,53 @@ public final class ChatViewModel: ObservableObject {
         streamTask?.cancel()
         streamTask = nil
         isStreaming = false
+        // A cancel mid-approval should drop the prompt so the sheet
+        // dismisses (the gateway will resync the awaiting-approval
+        // state on the next turn if it's still pending).
+        pendingApproval = nil
         if let last = messages.last, last.role == .assistant, last.isStreaming {
             messages[messages.count - 1].isStreaming = false
+        }
+    }
+
+    // MARK: - Approval
+
+    /// Iter 10 — relay an operator decision back via
+    /// `POST /v1/chat/completions/:turn_id/approve`. Returns once the
+    /// gateway has acknowledged so the sheet can dismiss with a
+    /// success state. The streaming task continues to run while this
+    /// is in flight; the next SSE chunks drop into the open assistant
+    /// slot (whether new tokens, another `awaiting_approval`, or
+    /// `done`).
+    ///
+    /// Idempotent w.r.t. `pendingApproval`: clears the cached prompt
+    /// only on success so a transient network failure leaves the
+    /// sheet open for retry.
+    public func resolveApproval(
+        approved: Bool,
+        scope: ApprovalDecision.Scope = .once,
+        denyMessage: String? = nil
+    ) async {
+        guard let prompt = pendingApproval else { return }
+        guard let client = approvalClient else {
+            lastError = "approval client not configured"
+            return
+        }
+        let decision = ApprovalDecision(
+            callId: prompt.id,
+            approved: approved,
+            scope: scope,
+            denyMessage: denyMessage
+        )
+        do {
+            _ = try await client.submit(turnId: prompt.turnId, decision: decision)
+            // Only clear on confirmed success — otherwise leave the
+            // sheet up so the operator can retry.
+            if pendingApproval?.id == prompt.id {
+                pendingApproval = nil
+            }
+        } catch {
+            lastError = "approve failed: \(error)"
         }
     }
 
@@ -169,11 +251,22 @@ public final class ChatViewModel: ObservableObject {
                     // confuse the typing indicator. Iter 9's
                     // `ApprovalSheet` is the right surface for these.
                     break
-                case .awaitingApproval(_, let callId, let plugin, let tool, let preview):
+                case .awaitingApproval(let turnId, let callId, let plugin, let tool, let preview):
                     let banner = "[awaiting approval] \(plugin):\(tool) — \(preview)"
                     assistantBuffer += assistantBuffer.isEmpty ? banner : "\n\(banner)"
                     apply(assistantBuffer: assistantBuffer, at: assistantIndex,
                           callId: callId)
+                    // Iter 10 — surface to `ApprovalSheet`. The sheet
+                    // calls `resolveApproval(...)` once the operator
+                    // picks; the gateway picks up the SSE stream once
+                    // the decision lands.
+                    pendingApproval = PendingApproval(
+                        turnId: turnId,
+                        callId: callId,
+                        plugin: plugin,
+                        tool: tool,
+                        argsPreview: preview
+                    )
                 case .done:
                     didFinish = true
                 }

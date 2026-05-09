@@ -46,6 +46,27 @@ public struct ChatView: View {
         }
         .frame(minWidth: 480, minHeight: 320)
         .task { viewModel.loadFromCache() }
+        // Iter 10 — pop the approval sheet whenever the view model
+        // surfaces a pending awaiting-approval chunk. We `item:`-bind
+        // so a fresh prompt with a different `callId` re-presents the
+        // sheet without dismissing animation jank.
+        .sheet(item: Binding(
+            get: { viewModel.pendingApproval },
+            set: { _ in /* dismiss is driven by view model */ }
+        )) { prompt in
+            ApprovalSheet(
+                prompt: prompt,
+                onResolve: { approved, scope, deny in
+                    Task { await viewModel.resolveApproval(approved: approved, scope: scope, denyMessage: deny) }
+                },
+                onCancel: {
+                    // Cancel = treat as deny with no message; gives
+                    // the gateway a definitive answer instead of
+                    // leaving the agent stalled.
+                    Task { await viewModel.resolveApproval(approved: false, scope: .once, denyMessage: nil) }
+                }
+            )
+        }
     }
 }
 
