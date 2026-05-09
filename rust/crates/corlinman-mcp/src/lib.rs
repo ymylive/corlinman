@@ -12,7 +12,7 @@ pub mod error;
 pub mod schema;
 pub mod server;
 
-pub use adapters::{CapabilityAdapter, SessionContext, ToolsAdapter};
+pub use adapters::{CapabilityAdapter, PromptsAdapter, SessionContext, ToolsAdapter};
 pub use error::McpError;
 pub use schema::{
     error_codes, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JSONRPC_VERSION,

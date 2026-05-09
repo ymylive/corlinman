@@ -20,8 +20,10 @@
 //! shape so adapter unit tests can exercise the filter without dragging
 //! in the auth crate. The shape is upward-compatible with iter 8.
 
+pub mod prompts;
 pub mod tools;
 
+pub use prompts::PromptsAdapter;
 pub use tools::ToolsAdapter;
 
 use async_trait::async_trait;
