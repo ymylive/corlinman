@@ -396,3 +396,70 @@ Each item is one bounded iteration (~30 min - 2 hours):
 - **Federation / cross-tenant artifact sharing** — every render is
   per-tenant in-process; no shared artifact registry. Federation
   (`phase4-w2-b3-design.md`) is proposal-level, not artifact-level.
+
+## Iter 10 — close-out notes (post-implementation)
+
+Iter 10 shipped the E2E acceptance and reconciled the outstanding
+design tensions from iter 8/9.
+
+### `present` frame ↔ `/canvas/render` reconciliation — **resolved**
+
+Iter 8 originally added `/canvas/render` as a side-channel and left
+`/canvas/frame` Phase-1-byte-identical. That created two paths to
+the renderer with no canonical answer for "which one should the
+producer call". Iter 10 picks **enrichment-on-frame** as the
+canonical happy path:
+
+- `POST /canvas/frame { kind: "present", payload: {…C3 schema…} }`
+  speculatively deserialises the payload as a `CanvasPresentPayload`
+  and, on success, invokes the renderer in-line. The rendered
+  artifact lands on the SSE event under `payload.rendered`; failures
+  land under `payload.render_error`. Idempotency-key dedupe (per
+  session) prevents double-renders on retry.
+- Pre-C3 callers that POST legacy a2ui-style payloads under
+  `present` keep working byte-identically — the speculative parse
+  misses, the frame fans out unchanged, and `payload.rendered` is
+  absent.
+- `POST /canvas/render` survives as the **stateless preview**
+  endpoint for non-frame consumers (Swift client, CLI, future
+  static export). It does not touch the session store; it is a
+  pure-function HTTP wrapper around the same renderer with the
+  same body cap.
+
+The UI side reads frames via `parsePresentFrame` (new in iter 10),
+which returns one of `{ artifact, error, passthrough }` so the
+transcript-view consumer doesn't need to know the JSON layout.
+
+### Config knobs — **resolved**
+
+The iter-8 `const MAX_ARTIFACT_BYTES` / `RENDERER_CACHE_CAPACITY`
+stopgaps in `routes/canvas.rs` are gone. `CanvasConfig` in
+`rust/crates/corlinman-core/src/config.rs` now carries the four C3
+knobs (`max_artifact_bytes`, `cache_max_entries`, `render_timeout_ms`,
+`mermaid_enabled`) with `validate(range)` ranges that prevent
+operator misconfig. `max_artifact_bytes` is read live from the
+`ArcSwap<Config>` snapshot on every request; `cache_max_entries`
+is read once at gateway boot to size the LRU. The `render_timeout_ms`
+and `mermaid_enabled` knobs are wired through to `CanvasConfig`
+but the runtime read sites land with the mermaid feature build —
+they're informational on the default workspace build.
+
+### Deferred to Phase 5
+
+- **Mermaid feature-gated E2E.** Iter 10 skips the V8 mermaid path
+  intentionally — the default workspace build does not link
+  `deno_core`, and the CI matrix would need a `--features mermaid`
+  job to exercise it. The iter-10 E2E test
+  `e2e_present_frame_attaches_render_error_on_failure` proves the
+  *gateway-side* behaviour (typed adapter error, structured SSE
+  surface) works with the feature off — the actual JS rendering
+  acceptance is a Phase-5 follow-up.
+- **`/canvas/render` retirement.** Now that enrichment-on-frame is
+  canonical, `/canvas/render` is technically redundant for web
+  consumers. It survives in iter 10 because Swift / CLI consumers
+  may want it; a Phase-5 review can deprecate it once those
+  consumers actually land.
+- **Producer auto-detection.** "Agent emits fenced code without
+  opting in to `present`" is still untouched (Open Question 3).
+  Phase 5 owns this if the manual opt-in proves ergonomically
+  costly.

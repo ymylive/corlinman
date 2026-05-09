@@ -26,6 +26,7 @@ import {
 } from "./canvas-artifact";
 import { CanvasArtifactLoading } from "./canvas-artifact-loading";
 import { CanvasArtifactError } from "./canvas-artifact-error";
+import { parsePresentFrame } from "./parse-present-frame";
 
 afterEach(() => {
   cleanup();
@@ -196,5 +197,84 @@ describe("CanvasArtifactError", () => {
     // We don't assert on the specific zh-CN string, only that the
     // alert mounted without throwing and carries the code attr.
     expect(alert).toHaveAttribute("data-error-code", "generic");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4 W3 C3 iter 10 — E2E acceptance for `present`-frame parsing
+// + downstream rendering. Closes the renderer-on-frame contract on
+// the UI side: a gateway-shaped SSE event roundtrips through
+// `parsePresentFrame` into a `RenderedArtifact` that `CanvasArtifact`
+// renders without further wiring.
+// ---------------------------------------------------------------------------
+
+describe("parsePresentFrame (iter 10 E2E)", () => {
+  it("extracts a RenderedArtifact from an enriched present frame", () => {
+    const evt = {
+      event_id: "ev_1",
+      session_id: "cs_abc",
+      kind: "present",
+      at_ms: 1,
+      payload: {
+        artifact_kind: "code",
+        body: { language: "rust", source: "fn main(){}" },
+        idempotency_key: "art_e2e",
+        rendered: {
+          html_fragment:
+            '<pre class="cn-canvas-code"><code><span>fn</span> main</code></pre>',
+          theme_class: "tp-light",
+          content_hash: "f".repeat(64),
+          render_kind: "code",
+          warnings: [],
+        },
+      },
+    };
+    const parsed = parsePresentFrame(evt);
+    expect(parsed?.kind).toBe("artifact");
+    if (parsed?.kind === "artifact") {
+      expect(parsed.idempotencyKey).toBe("art_e2e");
+      expect(parsed.artifact.render_kind).toBe("code");
+      // Drop into the live component.
+      render(<CanvasArtifact artifact={parsed.artifact} />);
+      const fig = screen.getByRole("figure");
+      expect(fig.querySelector("pre.cn-canvas-code")).not.toBeNull();
+      expect(fig).toHaveAttribute("data-render-kind", "code");
+    }
+  });
+
+  it("extracts a render_error from a failed present frame", () => {
+    const evt = {
+      kind: "present",
+      payload: {
+        artifact_kind: "mermaid",
+        body: { diagram: "graph LR; A-->B" },
+        idempotency_key: "art_merm",
+        render_error: {
+          code: "adapter_error",
+          message: "mermaid disabled in this build",
+          artifact_kind: "mermaid",
+        },
+      },
+    };
+    const parsed = parsePresentFrame(evt);
+    expect(parsed?.kind).toBe("error");
+    if (parsed?.kind === "error") {
+      expect(parsed.code).toBe("adapter_error");
+      expect(parsed.artifactKind).toBe("mermaid");
+    }
+  });
+
+  it("returns passthrough for legacy a2ui-style present payloads", () => {
+    const evt = {
+      kind: "present",
+      payload: { component: "Box", props: { children: "hi" } },
+    };
+    const parsed = parsePresentFrame(evt);
+    expect(parsed?.kind).toBe("passthrough");
+  });
+
+  it("returns null for non-present frames", () => {
+    expect(parsePresentFrame({ kind: "navigate", payload: {} })).toBeNull();
+    expect(parsePresentFrame({ kind: "a2ui_push", payload: {} })).toBeNull();
   });
 });
