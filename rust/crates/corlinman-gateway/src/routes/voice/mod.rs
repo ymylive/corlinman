@@ -18,6 +18,7 @@
 //! See `docs/design/phase4-w4-d4-design.md`.
 
 pub mod approval;
+pub mod bridge;
 pub mod budget;
 pub mod cost;
 pub mod framing;
@@ -26,9 +27,10 @@ pub mod provider;
 pub mod provider_openai;
 
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use axum::{
     extract::{
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
@@ -41,8 +43,12 @@ use axum::{
 };
 use corlinman_core::config::Config;
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use approval::VoiceApprovalBridge;
+use bridge::{run_bridge, BridgeContext, BridgeInFrame, BridgeIo, BridgeIoError, BridgeOutFrame};
+use budget::BudgetEnforcer;
 use cost::{
     evaluate_budget, next_utc_midnight, utc_day_epoch, BudgetDecision, BudgetDenyReason,
     InMemoryVoiceSpend, VoiceSpend,
@@ -296,35 +302,176 @@ async fn voice_handler(
     // (provider unavailable, immediate disconnect, etc.).
     let _post = state.spend.record_session_start(&tenant, day_epoch);
 
-    let provider = voice_cfg.provider_alias.clone();
-    ws.protocols([accepted])
-        .on_upgrade(move |socket| run_voice_session(socket, provider))
+    let provider_alias = voice_cfg.provider_alias.clone();
+    let session_state = state.clone();
+    let voice_cfg_for_session = voice_cfg.clone();
+    ws.protocols([accepted]).on_upgrade(move |socket| {
+        run_voice_session(
+            socket,
+            provider_alias,
+            session_state,
+            voice_cfg_for_session,
+            tenant,
+            day_epoch,
+        )
+    })
 }
 
-/// Iter-2 stub upgrade-handler body. Sends a single `started` event
-/// then closes the socket with WebSocket close code 1000 (normal).
+/// Voice session driver. Two modes:
 ///
-/// Iter 4+ replaces this with the real bridge: spawn the provider
-/// WebSocket task, the client-pump task, and the control plane. The
-/// shape stays the same so the upgrade handler above is stable across
-/// later iters.
-async fn run_voice_session(mut socket: WebSocket, provider_alias: String) {
-    // Mint a transient session id so even iter-2 round-trips are
-    // distinguishable in logs. Iter 3+ promotes this to the row id.
+/// 1. **Stub** (iter 2 fallback): when `state.provider` is `None`,
+///    sends a single `started` event then closes with code 1000.
+///    Tests that exercise gate / framing without a provider use
+///    this path; production must wire a provider via
+///    [`VoiceState::with_provider`].
+/// 2. **Live bridge** (iter 9): when a provider is wired, hands off
+///    to [`bridge::run_bridge`] with a [`WebSocketBridgeIo`] adapter
+///    and a fully-built [`BridgeContext`]. The bridge owns the pump
+///    loop, budget ticker, transcript sink writes, and approval
+///    pause logic; this fn is just the construction site.
+async fn run_voice_session(
+    mut socket: WebSocket,
+    provider_alias: String,
+    state: VoiceState,
+    voice_cfg: corlinman_core::config::VoiceConfig,
+    tenant: String,
+    day_epoch: u64,
+) {
     let session_id = format!("voice-{}", uuid::Uuid::new_v4());
-    let started = encode_server_control(&ServerControl::Started {
-        session_id: session_id.clone(),
-        provider: provider_alias,
-    });
-    if let Err(e) = socket.send(Message::Text(started)).await {
-        debug!(target: "voice", session_id, err = %e, "failed to send started event; closing");
+
+    let Some(provider) = state.provider.clone() else {
+        // Iter-2 stub fallback. The handler still sends `started`
+        // so a client probing without a configured provider knows
+        // the gateway is alive and the negotiation succeeded.
+        let started = encode_server_control(&ServerControl::Started {
+            session_id: session_id.clone(),
+            provider: provider_alias,
+        });
+        if let Err(e) = socket.send(Message::Text(started)).await {
+            debug!(target: "voice", session_id, err = %e, "failed to send started event; closing");
+            return;
+        }
+        let close = CloseFrame {
+            code: 1000,
+            reason: "voice provider not configured".into(),
+        };
+        let _ = socket.send(Message::Close(Some(close))).await;
         return;
-    }
-    let close = CloseFrame {
-        code: 1000,
-        reason: "iter-2 stub: session not yet wired".into(),
     };
-    let _ = socket.send(Message::Close(Some(close))).await;
+
+    // Per-session cancel token; signals graceful shutdown to the
+    // bridge if the gateway-level lifecycle cancels (e.g. process
+    // shutdown). The route handler doesn't currently propagate a
+    // shutdown token down — when it does, this is the join point.
+    let cancel = CancellationToken::new();
+
+    // Approval bridge: if the gateway has a real ApprovalGate,
+    // every voice tool-call goes through it; otherwise the bridge
+    // auto-approves (matches the chat-side `NoMatch → Approved`
+    // default).
+    let approval_bridge = match state.approval_gate.clone() {
+        Some(gate) => VoiceApprovalBridge::with_gate(gate, session_id.clone()),
+        None => VoiceApprovalBridge::no_gate(session_id.clone()),
+    };
+
+    let started_at_instant = Instant::now();
+    let started_at_unix = now_unix_secs() as i64;
+    let budget = BudgetEnforcer::start(
+        &voice_cfg,
+        state.spend.clone(),
+        tenant.clone(),
+        day_epoch,
+        started_at_instant,
+    );
+
+    let ctx = BridgeContext {
+        session_id: session_id.clone(),
+        provider_alias: provider_alias.clone(),
+        tenant_id: tenant,
+        day_epoch,
+        started_at_unix,
+        started_at_instant,
+        // The Mac/web client supplies session_key via the `start`
+        // control frame, but iter 9 falls back to the session_id when
+        // the parent handler hasn't extracted that yet — iter 10's
+        // E2E harness wires the proper extraction. The session_key
+        // path through `transcript_sink.append_turn` still works
+        // because it's just a foreign key into the chat sessions
+        // table.
+        session_key: session_id.clone(),
+        agent_id: None,
+        sample_rate_hz_in: voice_cfg.sample_rate_hz_in,
+        sample_rate_hz_out: voice_cfg.sample_rate_hz_out,
+        voice_id: None,
+        provider,
+        session_store: state.session_store.clone(),
+        transcript_sink: state.transcript_sink.clone(),
+        approval_bridge,
+        budget,
+        // Production tick = 1 Hz per design.
+        tick_interval: Duration::from_secs(1),
+        cancel,
+    };
+
+    let outcome = run_bridge(WebSocketBridgeIo::new(socket), ctx).await;
+    debug!(
+        target: "voice",
+        session_id, end_reason = ?outcome.end_reason,
+        duration_secs = outcome.duration_secs, "voice session closed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bridge I/O adapter for axum's WebSocket
+// ---------------------------------------------------------------------------
+
+/// Wraps an [`axum::extract::ws::WebSocket`] to fit the bridge's
+/// generic [`BridgeIo`] surface. Axum's WebSocket is split into
+/// inbound `next()` and outbound `send()` halves; we keep both on the
+/// same struct because the bridge always serialises the two anyway.
+struct WebSocketBridgeIo {
+    socket: WebSocket,
+}
+
+impl WebSocketBridgeIo {
+    fn new(socket: WebSocket) -> Self {
+        Self { socket }
+    }
+}
+
+#[async_trait]
+impl BridgeIo for WebSocketBridgeIo {
+    async fn recv(&mut self) -> Option<BridgeInFrame> {
+        loop {
+            match self.socket.recv().await {
+                Some(Ok(Message::Text(t))) => return Some(BridgeInFrame::Text(t)),
+                Some(Ok(Message::Binary(b))) => return Some(BridgeInFrame::Binary(b)),
+                Some(Ok(Message::Close(_))) => return Some(BridgeInFrame::ClosedByClient),
+                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                    // Keep-alives — let axum auto-respond and keep
+                    // looping for the next real frame.
+                    continue;
+                }
+                Some(Err(e)) => {
+                    debug!(target: "voice", err = %e, "websocket recv errored; treating as close");
+                    return None;
+                }
+                None => return None,
+            }
+        }
+    }
+
+    async fn send(&mut self, frame: BridgeOutFrame) -> Result<(), BridgeIoError> {
+        let msg = match frame {
+            BridgeOutFrame::Text(t) => Message::Text(t),
+            BridgeOutFrame::Binary(b) => Message::Binary(b),
+            BridgeOutFrame::Close { code, reason } => Message::Close(Some(CloseFrame {
+                code,
+                reason: reason.into(),
+            })),
+        };
+        self.socket.send(msg).await.map_err(|_| BridgeIoError)
+    }
 }
 
 /// Build the canonical `503 voice_disabled` response.
