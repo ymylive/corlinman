@@ -19,6 +19,7 @@
 
 pub mod cost;
 pub mod framing;
+pub mod provider;
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -43,6 +44,7 @@ use cost::{
     InMemoryVoiceSpend, VoiceSpend,
 };
 use framing::{accept_subprotocol, encode_server_control, ServerControl, SubprotocolDecision};
+use provider::SharedVoiceProvider;
 
 /// State carried by the `/voice` route.
 ///
@@ -60,6 +62,12 @@ use framing::{accept_subprotocol, encode_server_control, ServerControl, Subproto
 pub struct VoiceState {
     pub config: Arc<ArcSwap<Config>>,
     pub spend: Arc<dyn VoiceSpend>,
+    /// Iter 4+ pluggable provider adapter. `None` keeps the iter-2
+    /// stub close path intact for tests that only exercise the gate
+    /// layers (flag, subprotocol, budget) without a provider; iter 5
+    /// flips to `Some(OpenAIRealtimeProvider)` when `OPENAI_API_KEY`
+    /// is set.
+    pub provider: Option<SharedVoiceProvider>,
 }
 
 impl VoiceState {
@@ -67,6 +75,7 @@ impl VoiceState {
         Self {
             config,
             spend: Arc::new(InMemoryVoiceSpend::new()),
+            provider: None,
         }
     }
 
@@ -74,7 +83,19 @@ impl VoiceState {
     /// pre-populated with day usage to exercise the over-budget
     /// branch).
     pub fn with_spend(config: Arc<ArcSwap<Config>>, spend: Arc<dyn VoiceSpend>) -> Self {
-        Self { config, spend }
+        Self {
+            config,
+            spend,
+            provider: None,
+        }
+    }
+
+    /// Wire a provider adapter in. Iter 4 ships the trait + mock; iter
+    /// 5 wires the real OpenAI Realtime adapter; iter 6+ uses this
+    /// seam to drive transcript persistence + audio retention.
+    pub fn with_provider(mut self, provider: SharedVoiceProvider) -> Self {
+        self.provider = Some(provider);
+        self
     }
 }
 
