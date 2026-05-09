@@ -13,10 +13,11 @@ import Foundation
 /// so a stray downgrade fails CI loudly.
 public enum CorlinmanCoreInfo {
     /// Human-readable build banner. Only used in logs and tests today.
-    public static let banner = "CorlinmanCore (Phase 4 W3 C4 iter 4 — chat-stream)"
+    public static let banner = "CorlinmanCore (Phase 4 W3 C4 iter 5 — sessions)"
 
     /// Bumped every time the public surface changes in a non-additive way.
     /// Iter 1 → 0.1.0 (skeleton); iter 4 → 0.2.0 (chat stream + models);
-    /// future iterations bump for `SessionStore`, `AuthStore`, etc.
-    public static let version = "0.2.0"
+    /// iter 5 → 0.3.0 (SessionStore); future iters bump for `AuthStore`,
+    /// `PushReceiver`, etc.
+    public static let version = "0.3.0"
 }
