@@ -25,6 +25,14 @@ SOURCE_VALUES: Final[frozenset[str]] = frozenset(
     {"operator_cli", "operator_ui", "agent_self", "seed"}
 )
 
+# Sentinel narrative the reflection job writes when no episodes were
+# available. ``{{goals.failing}}`` excludes these because "no activity"
+# is not the same as "actively failing". Lives here (not in
+# :mod:`placeholders`) so :mod:`evaluator` and :mod:`reflection` can
+# import it without dragging in the placeholder ↔ evaluator cycle that
+# iter 8's cascade-aware ``{{goals.weekly}}`` would otherwise create.
+NO_EVIDENCE_SENTINEL: Final[str] = "no_evidence"
+
 
 @dataclass
 class Goal:
@@ -92,6 +100,7 @@ class GoalEvaluation:
 
 
 __all__ = [
+    "NO_EVIDENCE_SENTINEL",
     "SOURCE_VALUES",
     "STATUS_VALUES",
     "TIER_VALUES",

@@ -30,8 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
-from corlinman_goals.placeholders import NO_EVIDENCE_SENTINEL
-from corlinman_goals.state import Goal, GoalEvaluation
+from corlinman_goals.state import NO_EVIDENCE_SENTINEL, Goal, GoalEvaluation
 from corlinman_goals.store import DEFAULT_TENANT_ID, GoalStore
 from corlinman_goals.windows import Window
 

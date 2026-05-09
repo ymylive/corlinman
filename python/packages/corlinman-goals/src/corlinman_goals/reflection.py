@@ -33,8 +33,7 @@ from corlinman_goals.evidence import (
     EpisodeEvidence,
     EvidenceEpisode,
 )
-from corlinman_goals.placeholders import NO_EVIDENCE_SENTINEL
-from corlinman_goals.state import Goal, GoalEvaluation
+from corlinman_goals.state import NO_EVIDENCE_SENTINEL, Goal, GoalEvaluation
 from corlinman_goals.store import GoalStore
 from corlinman_goals.windows import (
     Window,

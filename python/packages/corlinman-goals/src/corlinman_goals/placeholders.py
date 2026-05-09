@@ -34,8 +34,14 @@ from __future__ import annotations
 import time
 from typing import Final
 
-from corlinman_goals.state import Goal, GoalEvaluation
+from corlinman_goals.evaluator import aggregate_mid
+from corlinman_goals.state import (
+    NO_EVIDENCE_SENTINEL,
+    Goal,
+    GoalEvaluation,
+)
 from corlinman_goals.store import DEFAULT_TENANT_ID, GoalStore
+from corlinman_goals.windows import Window
 
 # Caps for the bounded placeholder outputs. Surfaced as constants so the
 # assembler / tests can import them without re-deriving the design's
@@ -44,10 +50,10 @@ WEEKLY_LINE_CAP: Final[int] = 8
 FAILING_LINE_CAP: Final[int] = 5
 QUARTERLY_TRAILING_WEEKS: Final[int] = 12
 
-# Sentinel narrative the reflection job writes when no episodes were
-# available. ``{{goals.failing}}`` excludes these because "no activity"
-# is not the same as "actively failing".
-NO_EVIDENCE_SENTINEL: Final[str] = "no_evidence"
+# ``NO_EVIDENCE_SENTINEL`` is now defined in :mod:`corlinman_goals.state`
+# and re-exported here for backward compat with the iter-3 import path.
+# Lifting it to ``state`` broke the placeholders ↔ evaluator cycle that
+# iter 8's cascade-aware ``{{goals.weekly}}`` introduced.
 
 _MS_PER_SECOND: Final[int] = 1000
 _SECONDS_PER_DAY: Final[int] = 86_400
@@ -83,6 +89,20 @@ def _scored_bullet(body: str, score: int, narrative: str) -> str:
     rather than re-escape; the prompt is the consumer.
     """
     return f"- {body}: score {score} — {narrative}"
+
+
+def _cascade_bullet(body: str, display: float, narrative: str) -> str:
+    """Bullet with a fractional cascade-display score.
+
+    Used by ``{{goals.weekly}}`` when the cascade evaluator (iter 6) folds
+    child-short averages into a mid's display score. Format keeps the
+    operator-readable shape: ``- <body>: score 6.5 — <narrative>``.
+    Integer-valued cascades render without a trailing ``.0`` so direct
+    scores still look like the design's example output.
+    """
+    if float(display).is_integer():
+        return f"- {body}: score {int(display)} — {narrative}"
+    return f"- {body}: score {display:.1f} — {narrative}"
 
 
 def _truncated_suffix(remaining: int) -> str:
@@ -170,20 +190,80 @@ class GoalsResolver:
         prev_week_lo = now - 2 * _WEEK_MS
         prev_week_hi = now - _WEEK_MS
 
-        # Walk the active mid goals, look up the most recent evaluation
-        # falling inside the previous-week window, and emit a scored
-        # bullet if one exists; bare body otherwise.
+        # Iter 8: ``{{goals.weekly}}`` integrates the cascade evaluator
+        # so a mid whose direct score is None but whose child shorts
+        # have signal still surfaces a useful number. Per design
+        # §"Cascading", the displayed value is
+        # ``max(direct_score, avg(child shorts in window))``.
+        #
+        # We use the *previous* week's window (``[now-2w, now-1w)``) for
+        # cascade aggregation so the placeholder reflects the score the
+        # last reflection wrote — not a half-formed in-progress week.
+        prev_week_window = Window(start_ms=prev_week_lo, end_ms=prev_week_hi)
+
         lines: list[str] = []
         for goal in active_mid:
             scored = await self._most_recent_eval_in_range(
                 goal, lo_ms=prev_week_lo, hi_ms=prev_week_hi
             )
-            if scored is None:
-                lines.append(_bullet(goal.body))
-            else:
-                lines.append(
-                    _scored_bullet(goal.body, scored.score_0_to_10, scored.narrative)
+            cascade = await aggregate_mid(
+                store=self._store,
+                mid_goal=goal,
+                window=prev_week_window,
+                tenant_id=self._tenant_id,
+            )
+            # Three cases:
+            #
+            # 1. Cascade has a display score AND it beats the direct
+            #    (or there is no direct) — emit cascade bullet, with
+            #    the direct narrative if present, else a synthesised
+            #    "via children" line.
+            # 2. Direct evaluation is present but cascade is the same
+            #    — fall back to scored bullet (preserves narrative).
+            # 3. No direct, no cascade — bare bullet.
+            if cascade.display_score is None:
+                if scored is None:
+                    lines.append(_bullet(goal.body))
+                else:
+                    lines.append(
+                        _scored_bullet(
+                            goal.body,
+                            scored.score_0_to_10,
+                            scored.narrative,
+                        )
+                    )
+                continue
+
+            direct_value = (
+                float(scored.score_0_to_10) if scored is not None else None
+            )
+            cascade_outranks_direct = (
+                direct_value is None
+                or cascade.display_score > direct_value
+            )
+            if cascade_outranks_direct and cascade.children_avg is not None and (
+                direct_value is None or cascade.children_avg > direct_value
+            ):
+                # Cascade adds signal beyond the direct score.
+                narrative = (
+                    scored.narrative
+                    if scored is not None
+                    else (
+                        "via "
+                        f"{len(cascade.contributing_child_ids)} child goals"
+                    )
                 )
+                lines.append(
+                    _cascade_bullet(goal.body, cascade.display_score, narrative)
+                )
+            elif scored is not None:
+                lines.append(
+                    _scored_bullet(
+                        goal.body, scored.score_0_to_10, scored.narrative
+                    )
+                )
+            else:
+                lines.append(_bullet(goal.body))
 
         return self._cap_lines(lines)
 
