@@ -368,6 +368,107 @@ class GoalStore:
         await cursor.close()
         return wrote
 
+    # ------------------------------------------------------------------
+    # Goal mutations — update / archive (iter 2).
+    #
+    # The CLI in iter 4 layers parent-of-equal-or-lower-tier rejection
+    # over these primitives. ``archive_goal`` with ``cascade=True`` walks
+    # exactly one level — the design's
+    # ``cascade_archive_walks_one_level`` test pins "direct children, not
+    # grandchildren". Operators wanting deeper sweeps re-archive the
+    # children manually.
+    # ------------------------------------------------------------------
+
+    async def update_goal(
+        self,
+        goal_id: str,
+        *,
+        body: str | None = None,
+        target_date_ms: int | None = None,
+        parent_goal_id: str | None = ...,  # type: ignore[assignment]
+        status: str | None = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> bool:
+        """Update one or more mutable columns. Returns True iff a row
+        changed.
+
+        ``parent_goal_id`` uses an Ellipsis sentinel because ``None`` is a
+        valid target value (orphaning a goal). Passing the literal
+        ``None`` clears the parent; omitting the kwarg leaves it
+        untouched.
+
+        Validates the new ``status`` against the dataclass-level allow-set
+        before issuing the UPDATE; the CHECK constraint would reject it
+        too but the Python error names the field.
+        """
+        sets: list[str] = []
+        params: list[object] = []
+        if body is not None:
+            sets.append("body = ?")
+            params.append(body)
+        if target_date_ms is not None:
+            sets.append("target_date = ?")
+            params.append(int(target_date_ms))
+        if parent_goal_id is not ...:
+            sets.append("parent_goal_id = ?")
+            params.append(parent_goal_id)
+        if status is not None:
+            if status not in STATUS_VALUES:
+                raise ValueError(
+                    f"status={status!r} not in {sorted(STATUS_VALUES)}"
+                )
+            sets.append("status = ?")
+            params.append(status)
+        if not sets:
+            return False
+        params.extend([goal_id, tenant_id])
+        cursor = await self.conn.execute(
+            f"""UPDATE goals SET {', '.join(sets)}
+                WHERE id = ? AND tenant_id = ?""",
+            params,
+        )
+        await self.conn.commit()
+        changed = cursor.rowcount > 0
+        await cursor.close()
+        return changed
+
+    async def archive_goal(
+        self,
+        goal_id: str,
+        *,
+        cascade: bool = False,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> int:
+        """Set ``status='archived'`` on the goal (and, if ``cascade``,
+        on its direct children).
+
+        Returns the count of rows touched. ``cascade`` is single-level by
+        design — the operator escalates manually if grandchildren need to
+        go too. The descent is bounded by the schema's
+        ``parent_goal_id`` column, so we never recurse into a cycle (the
+        CLI rejects parent self-reference at write time).
+        """
+        archived = 0
+        # Parent first so callers can re-query and see the parent already
+        # archived even if the cascade fails later.
+        cursor = await self.conn.execute(
+            """UPDATE goals SET status = 'archived'
+               WHERE id = ? AND tenant_id = ?""",
+            (goal_id, tenant_id),
+        )
+        archived += cursor.rowcount
+        await cursor.close()
+        if cascade:
+            cursor = await self.conn.execute(
+                """UPDATE goals SET status = 'archived'
+                   WHERE parent_goal_id = ? AND tenant_id = ?""",
+                (goal_id, tenant_id),
+            )
+            archived += cursor.rowcount
+            await cursor.close()
+        await self.conn.commit()
+        return archived
+
     async def list_evaluations(
         self,
         goal_id: str,
