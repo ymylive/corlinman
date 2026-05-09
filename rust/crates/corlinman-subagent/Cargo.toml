@@ -1,0 +1,43 @@
+[package]
+name = "corlinman-subagent"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Subagent delegation runtime — Rust supervisor for the parent loop's `subagent.spawn` tool. Owns depth/concurrency/timeout caps + lifecycle. Re-enters the Python `corlinman-agent` loop via PyO3 (feature-gated) to actually drive child reasoning."
+
+[features]
+default = []
+# Compile-in PyO3 + the Python-bridge module. Off by default so the
+# workspace builds without a Python toolchain; enabled by the gateway
+# build profile (and CI's `python` matrix row).
+python = ["dep:pyo3"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+dashmap = { workspace = true }
+
+# Iter 9: hook-bus emit. The supervisor optionally holds an
+# `Arc<HookBus>` and fires `Subagent{Spawned,Completed,TimedOut,
+# DepthCapped}` events on the relevant lifecycle transitions, mirroring
+# the `EngineRunCompleted/Failed` pattern in `corlinman-scheduler`.
+corlinman-hooks = { path = "../corlinman-hooks" }
+
+# Optional Python bridge — see [features]. Pinned to a recent stable.
+pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+serde_json = { workspace = true }
