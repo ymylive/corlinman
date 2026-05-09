@@ -35,9 +35,15 @@ corlinman-skills = { path = "../corlinman-skills" }
 corlinman-memory-host = { path = "../corlinman-memory-host" }
 
 [dev-dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "process", "io-util"] }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 anyhow = { workspace = true }
 tempfile = "3"
+clap = { workspace = true, features = ["derive"] }
+
+[[example]]
+name = "mcp-cli-smoke"
+path = "examples/mcp_cli_smoke.rs"

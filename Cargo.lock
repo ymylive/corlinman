@@ -915,6 +915,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
+ "clap",
  "corlinman-core",
  "corlinman-memory-host",
  "corlinman-plugins",
