@@ -97,6 +97,11 @@ struct Inner {
     /// Owned background tasks; aborted on Drop of the last clone.
     reader: Mutex<Option<JoinHandle<()>>>,
     writer: Mutex<Option<JoinHandle<()>>>,
+    /// Notifier fired exactly once when the reader task observes EOF
+    /// or the writer task encounters a broken pipe — i.e. the child
+    /// is gone and no more responses will arrive. Iter 6's supervisor
+    /// awaits this to learn about crashes without polling.
+    disconnect: Arc<tokio::sync::Notify>,
 }
 
 impl std::fmt::Debug for McpStdioClient {
@@ -145,6 +150,9 @@ impl McpStdioClient {
         let (tx, mut rx) = mpsc::channel::<String>(64);
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let disconnect = Arc::new(tokio::sync::Notify::new());
+        let disconnect_for_writer = Arc::clone(&disconnect);
+        let disconnect_for_reader = Arc::clone(&disconnect);
 
         // Writer: drain mpsc, append \n, write to child stdin. We
         // append the newline here so misbehaving callers can't break
@@ -184,6 +192,10 @@ impl McpStdioClient {
                 );
                 let _ = waiter.send(resp);
             }
+            // Fire disconnect *after* the drain so any awaiter that
+            // wakes on the notify finds an empty pending map and a
+            // closed mpsc — i.e. observably dead.
+            disconnect_for_writer.notify_waiters();
             debug!("mcp client: writer task exiting");
         });
 
@@ -238,6 +250,7 @@ impl McpStdioClient {
                 );
                 let _ = waiter.send(resp);
             }
+            disconnect_for_reader.notify_waiters();
             // Drop the McpChild last — kill_on_drop catches stragglers.
             drop(child);
         });
@@ -249,8 +262,26 @@ impl McpStdioClient {
                 next_id: AtomicU64::new(0),
                 reader: Mutex::new(Some(reader)),
                 writer: Mutex::new(Some(writer)),
+                disconnect,
             }),
         }
+    }
+
+    /// Future that resolves once the client observes a disconnect
+    /// (writer mpsc broken, reader stdout EOF, or both). Used by the
+    /// supervisor (iter 6) to wake on child exits without polling.
+    pub async fn wait_disconnect(&self) {
+        // Tokio's `Notify::notified` only catches notifications that
+        // arrive *after* it has been registered. To avoid a race where
+        // the disconnect fired before `wait_disconnect` was called, we
+        // also do a fast-path probe: if the writer mpsc is already
+        // closed, return immediately.
+        let notified = self.inner.disconnect.notified();
+        tokio::pin!(notified);
+        if self.inner.tx.is_closed() {
+            return;
+        }
+        notified.await;
     }
 
     /// Generate the next request id (`req-N` shape).
@@ -349,6 +380,40 @@ impl McpStdioClient {
     /// the adapter uses to detect a child that has crashed.
     pub fn is_alive(&self) -> bool {
         !self.inner.tx.is_closed()
+    }
+
+    /// Explicitly tear down the client: abort the reader/writer tasks
+    /// and fire the disconnect notify so any waiter wakes up. Safe to
+    /// call multiple times (subsequent calls are no-ops because the
+    /// `Mutex<Option<JoinHandle>>` slots are emptied). Independent of
+    /// `Drop`'s "last clone" gate — the supervisor calls this when
+    /// the operator triggered a stop, so even with other clones in
+    /// flight the child dies.
+    ///
+    /// Reader/writer tasks own the `McpChild`; their cancellation
+    /// drops the child; `kill_on_drop` propagates SIGKILL to the
+    /// process.
+    pub async fn shutdown(&self) {
+        if let Some(h) = self.inner.reader.lock().await.take() {
+            h.abort();
+        }
+        if let Some(h) = self.inner.writer.lock().await.take() {
+            h.abort();
+        }
+        // Also drain pending so any in-flight call doesn't hang
+        // waiting for a response that's never coming.
+        let mut p = self.inner.pending.lock().await;
+        for (_id, waiter) in p.drain() {
+            let resp = JsonRpcResponse::err(
+                JsonValue::Null,
+                JsonRpcError::new(
+                    error_codes::INTERNAL_ERROR,
+                    format!("{}explicit shutdown", DISCONNECTED_MARKER),
+                ),
+            );
+            let _ = waiter.send(resp);
+        }
+        self.inner.disconnect.notify_waiters();
     }
 }
 

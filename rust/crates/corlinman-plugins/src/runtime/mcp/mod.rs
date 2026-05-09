@@ -1,18 +1,19 @@
 //! MCP runtime sub-modules.
 //!
-//! Iter 4 layers:
-//!   - `redact`  (env-passthrough filtering + log redaction; iter 3)
-//!   - `client`  (line-delimited JSON-RPC stdio client with response demux)
-//!   - `adapter` (spawn → initialize handshake → state machine)
-//!
-//! Iter 5 will add `tools/list` + `tools/call` to `adapter`; iter 6
-//! introduces a supervisor module that wraps `adapter::start_one`
-//! with crash-restart + backoff.
+//!   - `redact`     (env-passthrough filtering + log redaction; iter 3)
+//!   - `client`     (line-delimited JSON-RPC stdio client; iter 4)
+//!   - `adapter`    (spawn → initialize → tools/list + tools/call; iters 4-5)
+//!   - `supervisor` (crash-restart watcher; iter 6)
+//!   - `schema`     (vendored MCP wire types; see schema.rs preamble)
 
 pub mod adapter;
 pub mod client;
 pub mod redact;
 pub mod schema;
+pub mod supervisor;
 
 pub use adapter::{AdapterError, AdapterStatus, McpAdapter};
 pub use client::{ClientError as McpClientError, McpStdioClient};
+pub use supervisor::{
+    default_backoff, spawn_supervisor, SupervisorHandle, SupervisorPolicy, SupervisorStats,
+};

@@ -328,15 +328,33 @@ impl McpAdapter {
 
     /// Stop the child (if running) and mark the slot `Stopped`. Used
     /// by gateway shutdown and admin disable.
+    ///
+    /// Calls `McpStdioClient::shutdown` *before* dropping the slot's
+    /// clone so the underlying tasks exit and the disconnect notify
+    /// fires — the supervisor (iter 6) wakes from `wait_disconnect`
+    /// and either respawns or terminates per its policy.
+    /// Implementation note: the child kill goes through `shutdown`
+    /// rather than relying on `Drop`'s "last clone" gate because
+    /// concurrent clones (the supervisor's, an in-flight `call_tool`)
+    /// would otherwise keep the inner Arc alive and the process
+    /// would survive the slot transition.
     pub async fn stop_one(&self, name: &str) -> Result<(), AdapterError> {
-        let mut g = self.slots.write().await;
-        let slot = g
-            .get_mut(name)
-            .ok_or_else(|| AdapterError::UnknownPlugin(name.to_string()))?;
-        // Dropping the client triggers worker abort + kill_on_drop.
-        slot.client = None;
-        slot.server_info = None;
-        slot.status = AdapterStatus::Stopped;
+        // Take the client out under the lock, then drop the lock
+        // before awaiting `shutdown()` (no need to serialise the
+        // adapter behind a teardown).
+        let client = {
+            let mut g = self.slots.write().await;
+            let slot = g
+                .get_mut(name)
+                .ok_or_else(|| AdapterError::UnknownPlugin(name.to_string()))?;
+            slot.server_info = None;
+            slot.resolved_tools.clear();
+            slot.status = AdapterStatus::Stopped;
+            slot.client.take()
+        };
+        if let Some(c) = client {
+            c.shutdown().await;
+        }
         Ok(())
     }
 
@@ -457,6 +475,27 @@ impl McpAdapter {
         );
 
         Ok((client, init_result, resolved))
+    }
+
+    /// Internal: fetch the live MCP client for `name`, returning
+    /// `Disconnected` semantics when the slot has none. Used by the
+    /// crash-restart supervisor (iter 6) to park on the client's
+    /// `wait_disconnect` future.
+    pub(crate) async fn live_client_for_supervisor(
+        &self,
+        name: &str,
+    ) -> Result<McpStdioClient, AdapterError> {
+        let g = self.slots.read().await;
+        let slot = g
+            .get(name)
+            .ok_or_else(|| AdapterError::UnknownPlugin(name.to_string()))?;
+        slot.client.clone().ok_or_else(|| AdapterError::Handshake {
+            plugin: name.to_string(),
+            source: ClientError::Disconnected(format!(
+                "no live client (status={})",
+                slot.status.as_str()
+            )),
+        })
     }
 
     /// Snapshot of the resolved tool set for `name`. Empty if the
