@@ -13,6 +13,7 @@ pub mod log_broadcast;
 pub mod log_retention;
 pub mod metrics;
 pub mod middleware;
+pub mod placeholder;
 pub mod py_config;
 pub mod routes;
 pub mod server;

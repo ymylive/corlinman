@@ -45,8 +45,14 @@ pub const DEFAULT_MAX_DEPTH: u32 = 4;
 /// Namespace prefixes reserved by the corlinman runtime. Listed here so
 /// subsystems (config loader, lint tooling, docs) can share the authoritative
 /// set even before a resolver is wired.
+///
+/// `episodes` is the Phase 4 W4 D1 read surface: tokens like
+/// `{{episodes.last_week}}`, `{{episodes.kind(incident)}}`,
+/// `{{episodes.about_id(<ulid>)}}` resolve via the
+/// `corlinman-gateway::placeholder::episodes` resolver against the
+/// per-tenant `episodes.sqlite` written by `corlinman-episodes`.
 pub const RESERVED_NAMESPACES: &[&str] = &[
-    "var", "sar", "tar", "agent", "session", "tool", "vector", "skill",
+    "var", "sar", "tar", "agent", "session", "tool", "vector", "skill", "episodes",
 ];
 
 /// Errors unique to the placeholder engine. Converts into [`CorlinmanError`]
@@ -562,7 +568,7 @@ mod tests {
     #[tokio::test]
     async fn reserved_namespaces_listed() {
         for ns in [
-            "var", "sar", "tar", "agent", "session", "tool", "vector", "skill",
+            "var", "sar", "tar", "agent", "session", "tool", "vector", "skill", "episodes",
         ] {
             assert!(
                 PlaceholderEngine::is_reserved_namespace(ns),
