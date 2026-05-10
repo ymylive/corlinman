@@ -1,0 +1,96 @@
+# corlinman runtime config — drop into ~/.corlinman/config.toml on the
+# server. The container mounts ~/.corlinman:/data, and start.sh defaults
+# CORLINMAN_CONFIG=/data/config.toml.
+#
+# Per-section docs at /Users/cornna/project/corlinman/docs/config.example.toml
+# (the canonical reference). This template is the minimal "QQ + OpenAI/Gemini
+# + evolution proposer" verification deploy.
+
+[server]
+bind = "0.0.0.0:6005"
+data_dir = "/data"
+
+[admin]
+# meta_approver_users gates Phase 4 W2 B1 self-improvement proposals.
+# Add operator QQ ids that should be able to apply engine-prompt mutations.
+meta_approver_users = []
+# Bootstrap-token check for the very first /admin login. After that,
+# rotate via the admin UI.
+bootstrap_token = { env = "ADMIN_BOOTSTRAP_TOKEN" }
+
+# === Providers ==============================================================
+# OpenAI placeholder. The api_key resolves from .env at start.sh time.
+# Empty key = provider stays disabled; gateway logs a warn instead of
+# erroring so other providers still work.
+[providers.openai]
+kind = "openai"
+api_key = { env = "OPENAI_API_KEY" }
+# base_url = ...   # uncomment to point at an OpenAI-compatible proxy
+
+[providers.gemini]
+kind = "gemini"
+api_key = { env = "GEMINI_API_KEY" }
+
+# === Models =================================================================
+# Aliases let chat callers ask for `gpt-4o-mini` / `gemini-2.0-flash` etc.
+# without binding to a specific provider. The first non-empty provider
+# becomes the default.
+[models]
+default = "gpt-4o-mini"
+
+[models.aliases]
+# Free-form alias → (provider, model) lookup
+"gpt-4o-mini" = { provider = "openai", model = "gpt-4o-mini" }
+"gpt-4o" = { provider = "openai", model = "gpt-4o" }
+"gemini-2.0-flash" = { provider = "gemini", model = "gemini-2.0-flash-exp" }
+"gemini-2.5-pro" = { provider = "gemini", model = "gemini-2.5-pro-exp-03-25" }
+
+# === QQ channel via NapCat ===================================================
+# OneBot v11 forward-WS bridge. NapCat container exposes:
+#   :3001 — OneBot WS (this gateway dials it via QQ_WS_URL env)
+#   :6099 — webui + scan-login HTTP (admin route dials via CORLINMAN_NAPCAT_URL)
+[channels.qq]
+enabled = true
+# self_ids: this gateway's QQ accounts — populated automatically after
+# you scan in via /admin/channels/qq. Listed here for visibility; can
+# stay empty until first scan.
+self_ids = []
+# OneBot v11 endpoint on the in-network napcat container (overridden
+# by QQ_WS_URL set in docker-compose.qq.yml).
+
+# Reply rules: respond when @-mentioned in a group, and to all DMs.
+[channels.qq.reply]
+on_at_mention = true
+on_direct_message = true
+
+# === Evolution proposer ======================================================
+# Wave 2 self-improvement loop. Default conservative window so the operator
+# manually approves every proposal until trust is established.
+[evolution]
+enabled = true
+
+[evolution.proposer]
+# Cron-like; daily at 03:00 server time. Manual trigger via admin UI also OK.
+schedule = "0 0 3 * * *"
+
+[evolution.applier]
+# auto_apply = false ⇒ every proposal needs operator approval at /admin/evolution
+auto_apply = false
+# 24h grace window for meta proposals (B1) before auto-rollback gives up
+meta_grace_window_hours = 24
+
+[evolution.rollback]
+auto_rollback_window_hours = 72
+
+# === Logs ===================================================================
+[logs]
+level = { env = "RUST_LOG", default = "info" }
+file_rotation = "daily"
+retention_days = 14
+
+# === Tenants ================================================================
+# Single-tenant `default` mode for first-deploy verification. Multi-tenant
+# scoping (Phase 3 4-1A) is wired through but stays a single-row config
+# until you decide otherwise.
+[tenants]
+default = "default"
