@@ -76,7 +76,10 @@ WORKDIR /build
 
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
-    UV_PROJECT_ENVIRONMENT=/opt/venv
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+    UV_HTTP_TIMEOUT=180
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -86,9 +89,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && pip install --no-cache-dir \
       --retries 5 \
-      --timeout 120 \
+      --timeout 180 \
       --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
-      --extra-index-url https://pypi.org/simple \
       uv
 
 COPY pyproject.toml uv.lock* ./
