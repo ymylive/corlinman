@@ -218,6 +218,14 @@ function LoginForm() {
           {submitting ? t("auth.submitting") : t("auth.submit")}
         </Button>
       </form>
+      <details className="text-xs text-tp-ink-3">
+        <summary className="cursor-pointer select-none hover:text-tp-ink-2">
+          {t("auth.forgotPassword")}
+        </summary>
+        <p className="mt-2 whitespace-pre-line rounded border border-tp-glass-edge bg-tp-glass-inner p-3 leading-relaxed">
+          {t("auth.forgotPasswordBody")}
+        </p>
+      </details>
       <p className="text-center text-xs text-tp-ink-3">
         {t("auth.sessionHint")}
       </p>

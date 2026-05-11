@@ -265,6 +265,11 @@ flagged what intentionally got punted. Pick up these in Phase 5 planning.
 - **C3** — Mermaid feature-build E2E (V8 link cost too high for default CI); `/canvas/render` retirement (waits for Swift consumers); producer auto-detection
 - **C4** — gateway `[channels.dev_push]` writer; `swift-snapshot-testing` committed to `Package.swift`; `POST /v1/devices` token-registration endpoint
 
+### Admin UX (discovered post-deploy 2026-05-11)
+
+- **Password-reset flow** — login page now shows a "Forgot password?" disclosure pointing at `config.toml` + `python argon2` recipe, but there's no in-app reset. Long-term: `[admin] reset_token = { env = … }` + `POST /admin/password-reset` taking the bootstrap token, writing a one-shot rotation row to `~/.corlinman/reset_tokens.sqlite`, UI consumes it via a `/password-reset?token=…` page. ~150 LOC + 1 sqlite table + 1 UI page.
+- **Provider `kind` enum exposure** — admin UI's provider-edit form lets you type any string for `kind`. Unknown kinds parse-fail on Rust side (`siliconflow` → `openai_compatible`). UI should validate against the closed enum surfaced via `/admin/config/schema` (which doesn't exist yet) and offer a dropdown.
+
 ### From Wave 4
 
 - **D1** — Rust-side transparent rehydrate of cold episodes (today only Python `rehydrate-all` CLI escape hatch); `{{episodes.about(<tag>)}}` cosine rerank

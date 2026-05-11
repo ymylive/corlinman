@@ -60,6 +60,9 @@ export const en = {
     invalidCredentials: "Invalid username or password",
     adminNotConfigured: "Admin credentials not configured (config.toml [admin])",
     sessionHint: "Session backed by argon2 · HttpOnly cookie.",
+    forgotPassword: "Forgot password?",
+    forgotPasswordBody:
+      "No in-app reset yet. SSH into the gateway host and replace the argon2 hash in ~/.corlinman/config.toml [admin] password_hash, then restart the container. Generate a new hash with `python -c \"from argon2 import PasswordHasher; print(PasswordHasher().hash('NEW_PASS'))\"`.",
     heroTitle: "Run agents, route tools, keep the edge boring.",
     heroBody:
       "Rust gateway, Python AI layer, static admin UI. All in one control plane.",

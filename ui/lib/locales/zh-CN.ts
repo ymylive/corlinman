@@ -62,6 +62,9 @@ export const zhCN = {
     invalidCredentials: "用户名或密码错误",
     adminNotConfigured: "管理员凭据未配置 (config.toml [admin])",
     sessionHint: "Session backed by argon2 · HttpOnly cookie.",
+    forgotPassword: "忘记密码？",
+    forgotPasswordBody:
+      "暂无站内重置流程。请 SSH 登录网关主机，编辑 ~/.corlinman/config.toml 的 [admin].password_hash 字段，替换为新的 argon2 哈希，然后重启容器。生成新哈希：`python -c \"from argon2 import PasswordHasher; print(PasswordHasher().hash('新密码'))\"`。",
     heroTitle: "Run agents, route tools, keep the edge boring.",
     heroBody:
       "Rust gateway, Python AI layer, static admin UI. All in one control plane.",
