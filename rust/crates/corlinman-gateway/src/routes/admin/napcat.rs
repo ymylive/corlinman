@@ -215,8 +215,10 @@ impl NapcatContext {
             .post("/api/QQLogin/RefreshQRcode", json!({}))
             .await
         {
+            // `NapcatError` only derives `Debug` (no `Display`) so use `?`
+            // not `%` in the tracing macro.
             tracing::warn!(
-                error = %err,
+                error = ?err,
                 "napcat RefreshQRcode failed; QR may be stale (napcat <2.x?)",
             );
         }
