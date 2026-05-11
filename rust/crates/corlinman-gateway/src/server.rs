@@ -583,15 +583,28 @@ async fn build_admin_state_with_config(
     // this open the UI sees `503 identity_disabled` on the identity
     // page and the chat path silently falls back to per-channel ids.
     //
-    // The path follows the same convention as every other per-tenant
-    // store (`identity_db_path` collapses to `<data_dir>/user_identity.sqlite`
-    // for the legacy default tenant and the per-tenant tree otherwise).
-    // Open failure is logged at WARN and leaves `identity_store = None`
-    // so the rest of the gateway stays up — identical to the
-    // `tenants.sqlite` handling below.
+    // `identity_db_path` returns a per-tenant path
+    // (`<data_dir>/tenants/<tenant>/user_identity.sqlite`) even for the
+    // legacy default tenant — that subtree may not exist yet on a
+    // fresh deploy (legacy single-tenant deploys never created
+    // `tenants/default/`), so SQLite would return error code 14
+    // ("unable to open database file") on `open()`. Pre-create the
+    // parent with `create_dir_all`; failure here is also non-fatal —
+    // we let the subsequent `open()` produce the WARN. Open failure
+    // leaves `identity_store = None` and the rest of the gateway
+    // stays up, identical to the `tenants.sqlite` handling below.
     {
         let data_dir = resolve_data_dir();
         let identity_path = identity_db_path(&data_dir, &TenantId::legacy_default());
+        if let Some(parent) = identity_path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    path = %parent.display(),
+                    error = %err,
+                    "could not create identity store parent dir; open will likely fail",
+                );
+            }
+        }
         match SqliteIdentityStore::open(&identity_path).await {
             Ok(store) => {
                 tracing::info!(
