@@ -4,6 +4,7 @@ import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { QRCodeSVG } from "qrcode.react";
 
 import { cn } from "@/lib/utils";
 import { CountdownRing } from "@/components/ui/countdown-ring";
@@ -210,11 +211,11 @@ export function ScanLoginDialog({
 }
 
 function QrImage({ qr, expired }: { qr: QqQrcode; expired: boolean }) {
-  // Two cases: NapCat returned a base64 PNG (preferred) or a URL. For the
-  // URL case we don't bundle a client-side QR generator (no new deps), so
-  // we render a short instruction block — the user can still copy/paste the
-  // URL into their phone's QQ app. When NapCat ships base64 (v2.x default)
-  // the image works directly.
+  // Two cases: NapCat returned a base64 PNG (preferred) or a URL. When the
+  // upstream gives us a URL only (NapCat v1.x and some forks) we render
+  // it client-side via qrcode.react's `QRCodeSVG` — pure SVG, no canvas,
+  // no network round-trip. The URL fallback used to print the raw string
+  // and tell operators to copy-paste; that worked but is friction.
   if (qr.image_base64) {
     return (
       <div
@@ -245,15 +246,27 @@ function QrImage({ qr, expired }: { qr: QqQrcode; expired: boolean }) {
   if (qr.qrcode_url) {
     return (
       <div
+        className={cn(
+          "relative h-56 w-56 overflow-hidden rounded-xl border bg-white p-3",
+          "border-tp-amber/35",
+          "shadow-[0_0_24px_-6px_var(--tp-amber-glow)]",
+        )}
         data-testid="qq-qrcode"
-        className="flex h-56 w-56 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-tp-glass-edge bg-tp-glass-inner p-3 text-center text-[11.5px]"
       >
-        <span className="text-tp-ink-3">
-          QR URL (copy into QQ mobile):
-        </span>
-        <code className="break-all px-2 font-mono text-[10px] text-tp-ink-2">
-          {qr.qrcode_url}
-        </code>
+        {/* `level="M"` matches what napcat-base64 mode ships; `includeMargin`
+            keeps a quiet zone so phone scanners can lock on. */}
+        <QRCodeSVG
+          value={qr.qrcode_url}
+          size={208}
+          level="M"
+          marginSize={2}
+          className="h-full w-full"
+        />
+        {expired ? (
+          <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/60 font-mono text-[11px] uppercase tracking-[0.1em] text-white">
+            expired
+          </div>
+        ) : null}
       </div>
     );
   }

@@ -14,6 +14,7 @@ use corlinman_agent_client::client::{connect_channel, resolve_endpoint, AgentCli
 use corlinman_core::config::Config;
 use corlinman_core::{SessionStore, SqliteSessionStore};
 use corlinman_evolution::{EvolutionStore, HistoryRepo, ProposalsRepo};
+use corlinman_identity::{identity_db_path, SqliteIdentityStore};
 use corlinman_plugins::{roots_from_env_var, Origin, PluginRegistry, SearchRoot};
 use corlinman_tenant::{AdminDb, TenantId, TenantPool};
 use corlinman_vector::SqliteStore;
@@ -574,6 +575,39 @@ async fn build_admin_state_with_config(
     }
     if let Some(path) = py_config_path {
         admin = admin.with_py_config_path(path);
+    }
+
+    // Phase 4 W2 B2 — cross-channel identity store wiring. The admin
+    // routes at `/admin/identity*` and the chat-path resolver both
+    // gate on `AdminState::identity_store` being `Some(...)`; without
+    // this open the UI sees `503 identity_disabled` on the identity
+    // page and the chat path silently falls back to per-channel ids.
+    //
+    // The path follows the same convention as every other per-tenant
+    // store (`identity_db_path` collapses to `<data_dir>/user_identity.sqlite`
+    // for the legacy default tenant and the per-tenant tree otherwise).
+    // Open failure is logged at WARN and leaves `identity_store = None`
+    // so the rest of the gateway stays up — identical to the
+    // `tenants.sqlite` handling below.
+    {
+        let data_dir = resolve_data_dir();
+        let identity_path = identity_db_path(&data_dir, &TenantId::legacy_default());
+        match SqliteIdentityStore::open(&identity_path).await {
+            Ok(store) => {
+                tracing::info!(
+                    path = %identity_path.display(),
+                    "identity store opened",
+                );
+                admin = admin.with_identity_store(Arc::new(store));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %identity_path.display(),
+                    error = %err,
+                    "could not open identity store; /admin/identity* will return 503",
+                );
+            }
+        }
     }
 
     // Phase 4 W1 4-1A: when `[tenants].enabled = true`, construct the
