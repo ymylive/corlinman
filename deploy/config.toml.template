@@ -45,6 +45,29 @@ default = "gpt-4o-mini"
 "gemini-2.0-flash" = { provider = "gemini", model = "gemini-2.0-flash-exp" }
 "gemini-2.5-pro" = { provider = "gemini", model = "gemini-2.5-pro-exp-03-25" }
 
+# === Telegram channel (long-poll) ============================================
+# Long-poll adapter — no public URL required. Fill TELEGRAM_BOT_TOKEN in .env
+# and flip enabled=true to activate. Switch to webhook mode by setting
+# `[telegram.webhook].public_url` to your gateway's public HTTPS URL and
+# the long-poll adapter steps aside automatically.
+[channels.telegram]
+enabled = false
+bot_token = { env = "TELEGRAM_BOT_TOKEN" }
+# Whitelist of chat ids (group or private). Empty = all chats allowed.
+allowed_chat_ids = []
+# Case-insensitive substring filter for non-mention group messages.
+keyword_filter = []
+# When true, group messages forwarded only if bot is @-mentioned.
+require_mention_in_groups = false
+
+# Webhook mode — set public_url to your gateway's HTTPS URL to switch off
+# long-poll. secret_token guards against forged hits via the
+# X-Telegram-Bot-Api-Secret-Token header.
+[telegram.webhook]
+public_url = ""
+secret_token = { env = "TELEGRAM_WEBHOOK_SECRET" }
+drop_updates_on_reconnect = false
+
 # === QQ channel via NapCat ===================================================
 # OneBot v11 forward-WS bridge. NapCat container exposes:
 #   :3001 — OneBot WS (this gateway dials it via QQ_WS_URL env)
