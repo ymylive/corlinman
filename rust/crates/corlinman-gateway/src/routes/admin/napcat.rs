@@ -204,6 +204,22 @@ impl NapcatContext {
     }
 
     async fn request_qrcode(&self) -> Result<QrcodeOut, NapcatError> {
+        // First force napcat to fetch a brand-new QR token from QQ.
+        // Without this, repeat calls to `GetQQLoginQrcode` return the SAME
+        // cached token that QQ-side expires ~120s after first issuance —
+        // every subsequent dialog open then renders a token that's
+        // already dead at QQ, so scanning shows "expired". Best-effort;
+        // older napcat builds without this route just log a warn and we
+        // fall through to whatever `GetQQLoginQrcode` returns.
+        if let Err(err) = self
+            .post("/api/QQLogin/RefreshQRcode", json!({}))
+            .await
+        {
+            tracing::warn!(
+                error = %err,
+                "napcat RefreshQRcode failed; QR may be stale (napcat <2.x?)",
+            );
+        }
         let body = self
             .post("/api/QQLogin/GetQQLoginQrcode", json!({}))
             .await?;
