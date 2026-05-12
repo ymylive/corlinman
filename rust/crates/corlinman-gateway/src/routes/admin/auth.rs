@@ -268,19 +268,17 @@ pub(crate) fn hash_password(password: &str) -> Result<String, argon2::password_h
 /// On success we hash the password, write the `[admin]` block to
 /// `config.toml`, and hot-swap the in-memory snapshot. The operator can
 /// then `/admin/login` immediately — no restart required.
+///
+/// PR-#2 review issue #2: the `is_some()` precondition and the
+/// `persist_admin_credentials` write are guarded by
+/// `AdminState::admin_write_lock` so two concurrent onboard requests
+/// can't both pass the check and clobber each other. The lock is
+/// held for the entire critical section, including the atomic file
+/// write — cheap because onboard is a once-per-deploy event.
 async fn onboard(State(state): State<AdminState>, Json(body): Json<OnboardRequest>) -> Response {
-    let cfg = state.config.load_full();
-    if cfg.admin.username.is_some() || cfg.admin.password_hash.is_some() {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": "already_onboarded",
-                "message": "admin credentials are already configured; use POST /admin/password to rotate",
-            })),
-        )
-            .into_response();
-    }
-
+    // Validate the payload *before* taking the serialising lock so
+    // ill-formed requests fail fast without blocking a legitimate
+    // sibling onboard attempt.
     if body.username.trim().is_empty() {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -297,6 +295,23 @@ async fn onboard(State(state): State<AdminState>, Json(body): Json<OnboardReques
             Json(json!({
                 "error": "weak_password",
                 "message": format!("password must be at least {MIN_PASSWORD_LEN} characters"),
+            })),
+        )
+            .into_response();
+    }
+
+    // Hold the admin-write lock across the precondition check + the
+    // persist so a concurrent caller sees `already_onboarded` (or
+    // serialises behind us) instead of also winning the race.
+    let _guard = state.admin_write_lock.lock().await;
+
+    let cfg = state.config.load_full();
+    if cfg.admin.username.is_some() || cfg.admin.password_hash.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "already_onboarded",
+                "message": "admin credentials are already configured; use POST /admin/password to rotate",
             })),
         )
             .into_response();
@@ -348,6 +363,14 @@ async fn change_password(
         )
             .into_response();
     };
+
+    // PR-#2 review issue #2: serialise the verify+write critical
+    // section against the shared admin-write lock so a concurrent
+    // password rotation (or a racing /admin/onboard, which shares
+    // the same lock) can't observe a stale snapshot. Held until the
+    // response returns; the contention window is small (single
+    // argon2 hash + atomic file rename).
+    let _guard = state.admin_write_lock.lock().await;
 
     let cfg = state.config.load_full();
     let Some(username) = cfg.admin.username.clone() else {
@@ -884,6 +907,83 @@ mod tests {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
         let body = body_json(res).await;
         assert_eq!(body["error"], "unauthenticated");
+    }
+
+    /// PR-#2 review issue #2: two concurrent `/admin/onboard` calls
+    /// against an empty state used to both pass the `is_none()`
+    /// precondition and race each other's persists. The shared
+    /// `admin_write_lock` now serialises the verify+write critical
+    /// section, so the second caller observes the first caller's
+    /// credentials and gets `409 already_onboarded` instead of a
+    /// silent overwrite.
+    #[tokio::test]
+    async fn onboard_concurrent_calls_serialise_via_admin_write_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let state = empty_admin_state(path.clone());
+        let app1 = router(state.clone());
+        let app2 = router(state.clone());
+
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/admin/onboard")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"username":"alice","password":"goodpassphrase"}"#,
+            ))
+            .unwrap();
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/admin/onboard")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"username":"mallory","password":"otherpassphrase"}"#,
+            ))
+            .unwrap();
+
+        // Fire both calls in parallel — the tokio mutex must serialise
+        // their critical sections so exactly one wins.
+        let (r1, r2) = tokio::join!(app1.oneshot(req1), app2.oneshot(req2));
+        let r1 = r1.unwrap();
+        let r2 = r2.unwrap();
+
+        // Exactly one OK + one CONFLICT, in either order. Anything
+        // else (two 200s, two 409s, or any other status) means the
+        // lock isn't actually serialising the critical section.
+        let codes = [r1.status(), r2.status()];
+        let oks = codes.iter().filter(|s| **s == StatusCode::OK).count();
+        let conflicts = codes
+            .iter()
+            .filter(|s| **s == StatusCode::CONFLICT)
+            .count();
+        assert_eq!(
+            oks, 1,
+            "expected exactly one OK across concurrent onboard calls; got {codes:?}",
+        );
+        assert_eq!(
+            conflicts, 1,
+            "expected exactly one CONFLICT across concurrent onboard calls; got {codes:?}",
+        );
+
+        // The winner's credentials landed; the loser's didn't clobber
+        // them. We can't predict which is which, but the snapshot has
+        // to match one of the two payloads exactly.
+        let cfg = state.config.load_full();
+        let user = cfg.admin.username.clone().expect("a winner persisted");
+        assert!(
+            user == "alice" || user == "mallory",
+            "expected one of the two posted usernames, got {user:?}",
+        );
+        let hash = cfg.admin.password_hash.clone().expect("hash present");
+        let winning_password = if user == "alice" {
+            "goodpassphrase"
+        } else {
+            "otherpassphrase"
+        };
+        assert!(
+            argon2_verify(winning_password, &hash),
+            "stored hash should verify the winning password",
+        );
     }
 
     #[tokio::test]
