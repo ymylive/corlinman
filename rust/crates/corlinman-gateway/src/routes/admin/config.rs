@@ -177,7 +177,7 @@ async fn post_config(
     Json(body): Json<PostConfigBody>,
 ) -> Response {
     // Stage 1: TOML decode.
-    let new_config: Config = match toml::from_str::<Config>(&body.toml) {
+    let mut new_config: Config = match toml::from_str::<Config>(&body.toml) {
         Ok(c) => c,
         Err(err) => {
             return (
@@ -217,6 +217,14 @@ async fn post_config(
     let current = state.config.load_full();
     let requires_restart = detect_restart_fields(&current, &new_config);
 
+    // Bugfix: merge real secrets back from the in-memory snapshot wherever
+    // the posted payload still carries the literal `REDACTED_SENTINEL`
+    // (the operator round-tripped the redacted GET echo unchanged).
+    // Without this step the save path would clobber `admin.password_hash`
+    // and every literal provider API key with `"***REDACTED***"` —
+    // permanently locking the operator out.
+    new_config.merge_redacted_secrets_from(&current);
+
     if body.dry_run {
         return Json(PostConfigResponse {
             status: "ok",
@@ -241,6 +249,27 @@ async fn post_config(
         )
             .into_response();
     };
+
+    // Belt-and-braces: even after `merge_redacted_secrets_from` we double
+    // check the payload doesn't still carry the redaction sentinel. The
+    // only way this could happen is if the in-memory snapshot didn't have
+    // the secret either (e.g. provider added in the POST body, with a
+    // literal value of `"***REDACTED***"`) — refusing to write avoids
+    // pinning the placeholder string on disk.
+    if new_config.has_redacted_sentinel() {
+        tracing::error!(
+            "admin/config: refusing to write config containing redaction sentinel",
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "redacted_sentinel_in_payload",
+                "message": "POST payload contains the literal `***REDACTED***` placeholder for at least one secret. \
+                            Replace it with a real value (or omit the field to keep the current secret) before retrying.",
+            })),
+        )
+            .into_response();
+    }
 
     let serialised = match toml::to_string_pretty(&new_config) {
         Ok(s) => s,
@@ -812,6 +841,129 @@ mode = "prompt"
         assert!(props.get("server").is_some());
         assert!(props.get("models").is_some());
         assert!(props.get("providers").is_some());
+    }
+
+    /// Regression: posting back the redacted echo (the exact shape GET
+    /// `/admin/config` returns) must NOT destroy the live
+    /// `admin.password_hash` on disk. The route merges the real hash
+    /// from the in-memory snapshot before serialising.
+    #[tokio::test]
+    async fn post_config_preserves_password_hash_on_redacted_round_trip() {
+        use corlinman_core::config::REDACTED_SENTINEL;
+
+        let real_hash = "$argon2id$v=19$m=19456,t=2,p=1$realsaltbytes$realhashbytes";
+        let mut cfg = base_config();
+        cfg.admin.username = Some("admin".into());
+        cfg.admin.password_hash = Some(real_hash.into());
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let state = AdminState::new(
+            Arc::new(PluginRegistry::default()),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+        )
+        .with_config_path(path.clone());
+
+        // Build the payload the way the UI does: GET, then POST the same
+        // string straight back. The GET handler renders the redacted
+        // form, so the wire payload has password_hash = REDACTED.
+        let redacted = state.config.load_full().redacted();
+        let wire = toml::to_string_pretty(&redacted).unwrap();
+        assert!(wire.contains(REDACTED_SENTINEL));
+
+        let body = serde_json::to_string(&serde_json::json!({
+            "toml": wire,
+            "dry_run": false,
+        }))
+        .unwrap();
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // On-disk file: real hash present, sentinel absent.
+        let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            !on_disk.contains(REDACTED_SENTINEL),
+            "on-disk TOML must NOT contain `{REDACTED_SENTINEL}`; got:\n{on_disk}"
+        );
+        assert!(
+            on_disk.contains(real_hash),
+            "on-disk TOML must carry the real argon2 hash; got:\n{on_disk}"
+        );
+        // In-memory snapshot also restored.
+        assert_eq!(
+            state.config.load().admin.password_hash.as_deref(),
+            Some(real_hash)
+        );
+    }
+
+    /// If the POST payload's literal provider `api_key` is the sentinel
+    /// and the in-memory snapshot has no matching provider entry (so the
+    /// merge can't restore the original secret), the belt-and-braces
+    /// guard returns 400 rather than pinning the placeholder on disk.
+    #[tokio::test]
+    async fn post_config_refuses_unmergable_sentinel_payload() {
+        // Snapshot only carries `anthropic`. Posting a `glm` provider
+        // with a literal `***REDACTED***` api_key has nothing to merge
+        // from → must be rejected.
+        let cfg = base_config();
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let state = AdminState::new(
+            Arc::new(PluginRegistry::default()),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+        )
+        .with_config_path(path.clone());
+        let app = router(state);
+
+        let toml = r#"
+[server]
+port = 6005
+bind = "0.0.0.0"
+data_dir = "/tmp/corlinman-test"
+
+[providers.anthropic]
+api_key = { env = "ANTHROPIC_API_KEY" }
+enabled = true
+
+[providers.glm]
+api_key = { value = "***REDACTED***" }
+enabled = true
+
+[models]
+default = "claude-sonnet-4-5"
+"#;
+        let body = serde_json::to_string(&serde_json::json!({
+            "toml": toml,
+            "dry_run": false,
+        }))
+        .unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "redacted_sentinel_in_payload");
+        // File never touched.
+        assert!(!path.exists());
     }
 
     #[tokio::test]
