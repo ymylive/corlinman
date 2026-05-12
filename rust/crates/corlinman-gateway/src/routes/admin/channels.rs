@@ -190,6 +190,30 @@ async fn update_keywords(
         }
     };
     qq.group_keywords = body.group_keywords.clone();
+
+    // PR-#2 review issue #1: belt-and-braces sentinel guard. The
+    // keywords payload itself doesn't carry secrets, but the cloned
+    // snapshot could carry `"***REDACTED***"` from a botched earlier
+    // round-trip — restore from the live snapshot first, then refuse
+    // to persist anything that still pins the placeholder string on
+    // disk.
+    let current = state.config.load_full();
+    new_cfg.merge_redacted_secrets_from(&current);
+    if new_cfg.has_redacted_sentinel() {
+        tracing::error!(
+            "admin/channels: refusing to write config containing redaction sentinel",
+        );
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "redacted_payload",
+                "message": "payload contains the literal `***REDACTED***` placeholder for at least one secret. \
+                            Replace it with a real value (or omit the field to keep the current secret) before retrying.",
+            })),
+        )
+            .into_response();
+    }
+
     // PR-#2 review fix: refresh `[meta]` audit stamps before serialise.
     new_cfg.stamp_meta();
 
@@ -379,6 +403,47 @@ mod tests {
             &vec!["hello".to_string(), "hi".to_string()]
         );
         assert!(path.exists());
+    }
+
+    /// PR-#2 review issue #1: refusal path when the live snapshot
+    /// carries the redaction sentinel — e.g. the QQ access_token was
+    /// somehow left as `"***REDACTED***"` in memory. The merge has
+    /// nothing real to restore from, so the keywords write must 422
+    /// rather than pin the placeholder on disk.
+    #[tokio::test]
+    async fn update_keywords_refuses_when_snapshot_carries_sentinel() {
+        use corlinman_core::config::{SecretRef, REDACTED_SENTINEL};
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut cfg = cfg_with_qq();
+        // Set the QQ access_token to the literal sentinel — simulates a
+        // botched earlier round-trip that landed the redacted echo in
+        // live state.
+        cfg.channels.qq.as_mut().unwrap().access_token = Some(SecretRef::Literal {
+            value: REDACTED_SENTINEL.into(),
+        });
+        let state = state_with(cfg, Some(path.clone()));
+        let app = router(state);
+        let body = serde_json::to_string(&serde_json::json!({
+            "group_keywords": {"1001": ["hello"]},
+        }))
+        .unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/channels/qq/keywords")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "redacted_payload");
+        assert!(!path.exists());
     }
 
     #[tokio::test]

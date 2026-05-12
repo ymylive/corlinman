@@ -296,6 +296,30 @@ where
             .into_response();
     };
 
+    // PR-#2 review issue #1: belt-and-braces sentinel guard. The
+    // embedding payload itself doesn't carry secrets, but the route
+    // clones the live snapshot before mutating — if any sibling
+    // section (provider api_key, channel access_token) has somehow
+    // landed `"***REDACTED***"` in memory, restore it from the
+    // current snapshot and refuse to persist anything that still
+    // pins the placeholder on disk.
+    let current = state.config.load_full();
+    new_cfg.merge_redacted_secrets_from(&current);
+    if new_cfg.has_redacted_sentinel() {
+        tracing::error!(
+            "admin/embedding: refusing to write config containing redaction sentinel",
+        );
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "redacted_payload",
+                "message": "payload contains the literal `***REDACTED***` placeholder for at least one secret. \
+                            Replace it with a real value (or omit the field to keep the current secret) before retrying.",
+            })),
+        )
+            .into_response();
+    }
+
     // PR-#2 review fix: refresh `[meta]` before serialising so the
     // audit stamps survive every admin write, not just the boot-time
     // `Config::save_to_path` callers.
@@ -561,6 +585,68 @@ mod tests {
             v["error"], "python_sidecar_unavailable",
             "expected python_sidecar_unavailable body, got {v}"
         );
+    }
+
+    /// PR-#2 review issue #1: if the in-memory snapshot somehow carries
+    /// a sentinel value (e.g. a botched earlier hot-reload), the
+    /// embedding POST handler must refuse to persist anything that
+    /// still pins `"***REDACTED***"` on disk — the merge step has
+    /// nothing real to fall back to, so the belt-and-braces
+    /// `has_redacted_sentinel` guard returns 422.
+    #[tokio::test]
+    async fn post_refuses_when_snapshot_carries_sentinel() {
+        use corlinman_core::config::REDACTED_SENTINEL;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        // Seed a snapshot whose admin.password_hash has been left in
+        // sentinel state (simulates a buggy upstream that injected the
+        // redacted echo into live state). The merge has nothing to
+        // restore from because both sides hold the sentinel.
+        let mut cfg = Config::default();
+        cfg.admin.password_hash = Some(REDACTED_SENTINEL.into());
+        cfg.providers.insert(
+            "openai",
+            ProviderEntry {
+                kind: None,
+                api_key: Some(SecretRef::EnvVar {
+                    env: "OPENAI_API_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                params: ParamsMap::new(),
+            },
+        );
+        let state = AdminState::new(
+            Arc::new(PluginRegistry::default()),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+        )
+        .with_config_path(path.clone());
+        let app = router(state.clone());
+
+        let body = json!({
+            "provider": "openai",
+            "model": "text-embedding-3-small",
+            "dimension": 1536,
+            "enabled": true,
+            "params": {}
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/embedding")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "redacted_payload");
+        // No file on disk — the guard ran before the atomic write.
+        assert!(!path.exists());
     }
 
     #[tokio::test]
