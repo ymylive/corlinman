@@ -68,6 +68,20 @@ export const en = {
       "Rust gateway, Python AI layer, static admin UI. All in one control plane.",
     logoutSuccess: "Signed out",
     logoutLabel: "Log out",
+    onboardTitle: "Set up the admin account",
+    onboardSubtitle:
+      "First-run setup — pick a username and password. Both are written to config.toml as argon2id.",
+    onboardConfirmPassword: "Confirm password",
+    onboardSubmit: "Create admin",
+    onboardHint:
+      "Onboarding is one-shot. After this you can rotate via the user menu.",
+    onboardHeroTitle: "Welcome to corlinman.",
+    onboardHeroBody:
+      "No admin is configured yet. Set credentials below to unlock the console.",
+    onboardWeakPassword: "Password must be at least {{min}} characters",
+    onboardPasswordMismatch: "Passwords do not match",
+    onboardAlreadyConfigured:
+      "Admin already configured. Redirecting to login...",
   },
 
   nav: {

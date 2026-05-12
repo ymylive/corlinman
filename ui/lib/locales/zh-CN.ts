@@ -70,6 +70,17 @@ export const zhCN = {
       "Rust gateway, Python AI layer, static admin UI. All in one control plane.",
     logoutSuccess: "已退出登录",
     logoutLabel: "退出登录",
+    onboardTitle: "初始化管理员账号",
+    onboardSubtitle:
+      "首次启动设置 —— 请设置用户名与密码，将以 argon2id 写入 config.toml。",
+    onboardConfirmPassword: "确认密码",
+    onboardSubmit: "创建管理员",
+    onboardHint: "初始化仅一次。之后可以在右上角用户菜单中修改密码。",
+    onboardHeroTitle: "欢迎使用 corlinman。",
+    onboardHeroBody: "尚未配置管理员。请在右侧设置凭据以解锁控制台。",
+    onboardWeakPassword: "密码至少需要 {{min}} 位",
+    onboardPasswordMismatch: "两次密码不一致",
+    onboardAlreadyConfigured: "管理员已配置，正在跳转到登录页...",
   },
 
   nav: {

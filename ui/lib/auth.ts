@@ -54,3 +54,21 @@ export async function getSession(): Promise<AdminSession | null> {
     throw err;
   }
 }
+
+export interface OnboardRequest {
+  username: string;
+  password: string;
+}
+
+/**
+ * `POST /admin/onboard` — first-run admin bootstrap. The gateway only
+ * accepts this while the `[admin]` block is empty; afterwards it returns
+ * 409 `already_onboarded`. UI flow: probe `/admin/login` and redirect
+ * here when it returns 503 `admin_not_configured`.
+ */
+export function onboard(req: OnboardRequest): Promise<void> {
+  return apiFetch<void>("/admin/onboard", {
+    method: "POST",
+    body: req,
+  });
+}

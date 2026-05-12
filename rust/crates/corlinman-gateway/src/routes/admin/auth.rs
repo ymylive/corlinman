@@ -18,6 +18,10 @@
 //!     the caller had no cookie — idempotent).
 //!   - `GET /admin/me` → 200 with session info, 401 otherwise.
 
+use std::path::Path;
+
+use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+use argon2::Argon2;
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
@@ -32,6 +36,12 @@ use time::OffsetDateTime;
 
 use super::AdminState;
 use crate::middleware::admin_auth::{argon2_verify, extract_cookie, SESSION_COOKIE_NAME};
+
+/// Minimum length operators must use when picking the admin password.
+/// Picked deliberately low (8) so first-run onboarding doesn't bounce
+/// reasonable passphrases — argon2id absorbs the entropy hit. Tune up
+/// later if [audit] complaints land.
+pub(crate) const MIN_PASSWORD_LEN: usize = 8;
 
 /// Cookie attributes we stamp on every Set-Cookie for the session:
 ///   - `HttpOnly` — JS can't read it (mitigates token theft via XSS).
@@ -62,13 +72,17 @@ fn clear_cookie_header() -> String {
     )
 }
 
-/// Router for the three session routes. These mount *without* the
-/// `require_admin` middleware — see the module doc.
+/// Router for the session routes. `/admin/login`, `/admin/logout`,
+/// `/admin/me`, and `/admin/onboard` mount *without* the `require_admin`
+/// middleware — see the module doc. The first-run onboarding route is
+/// session-less by necessity (no admin exists yet) but self-gates by
+/// inspecting `cfg.admin` on every call so it's safe to live here.
 pub fn router(state: AdminState) -> Router {
     Router::new()
         .route("/admin/login", post(login))
         .route("/admin/logout", post(logout))
         .route("/admin/me", get(me))
+        .route("/admin/onboard", post(onboard))
         .with_state(state)
 }
 
@@ -215,6 +229,148 @@ async fn me(State(state): State<AdminState>, headers: HeaderMap) -> Response {
 /// Default idle TTL for admin sessions (24 hours). `server.rs` uses this
 /// when it wires the store into `AdminState`.
 pub const DEFAULT_SESSION_TTL_SECS: u64 = 86_400;
+
+// ---------------------------------------------------------------------------
+// Onboarding + password change
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct OnboardRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Hash a plaintext password with argon2id + random salt. Matches the
+/// scheme `argon2_verify` consumes.
+pub(crate) fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+    let salt = SaltString::generate(&mut OsRng);
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes(), &salt)?
+        .to_string())
+}
+
+/// `POST /admin/onboard` — first-run admin bootstrap.
+///
+/// Only accepted when the gateway is in "onboarding mode": the active
+/// `[admin]` block in config has neither a username nor a password_hash.
+/// In every other state we return 409 `already_onboarded` so a
+/// compromised network surface can't blow away the existing credentials.
+///
+/// On success we hash the password, write the `[admin]` block to
+/// `config.toml`, and hot-swap the in-memory snapshot. The operator can
+/// then `/admin/login` immediately — no restart required.
+async fn onboard(State(state): State<AdminState>, Json(body): Json<OnboardRequest>) -> Response {
+    let cfg = state.config.load_full();
+    if cfg.admin.username.is_some() || cfg.admin.password_hash.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "already_onboarded",
+                "message": "admin credentials are already configured; use POST /admin/password to rotate",
+            })),
+        )
+            .into_response();
+    }
+
+    if body.username.trim().is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "invalid_username",
+                "message": "username must be non-empty",
+            })),
+        )
+            .into_response();
+    }
+    if body.password.len() < MIN_PASSWORD_LEN {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "weak_password",
+                "message": format!("password must be at least {MIN_PASSWORD_LEN} characters"),
+            })),
+        )
+            .into_response();
+    }
+
+    persist_admin_credentials(&state, body.username.trim().to_string(), &body.password).await
+}
+
+/// Shared write path used by `onboard`. Hashes
+/// the password, mutates the config in-place, writes the TOML
+/// atomically, and hot-swaps the in-memory snapshot. Identical contract
+/// to `POST /admin/config` so operators only have to remember one
+/// failure mode.
+async fn persist_admin_credentials(
+    state: &AdminState,
+    username: String,
+    plaintext_password: &str,
+) -> Response {
+    let Some(path) = state.config_path.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "config_path_unset",
+                "message": "gateway booted without a config file path",
+            })),
+        )
+            .into_response();
+    };
+
+    let hashed = match hash_password(plaintext_password) {
+        Ok(h) => h,
+        Err(err) => {
+            tracing::error!(error = %err, "admin/auth: argon2 hashing failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "hash_failed", "message": err.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut new_cfg = (*state.config.load_full()).clone();
+    new_cfg.admin.username = Some(username);
+    new_cfg.admin.password_hash = Some(hashed);
+
+    let serialised = match toml::to_string_pretty(&new_cfg) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::error!(error = %err, "admin/auth: serialise config failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "serialise_failed", "message": err.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    if let Err(err) = atomic_write(path, &serialised).await {
+        tracing::error!(error = %err, path = %path.display(), "admin/auth: write config failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "write_failed", "message": err.to_string()})),
+        )
+            .into_response();
+    }
+
+    state.config.store(std::sync::Arc::new(new_cfg));
+    // Mirror to the Python config drop so the sidecar sees the new
+    // identity on its next resolve.
+    state.rewrite_py_config().await;
+
+    (StatusCode::OK, Json(json!({"status": "ok"}))).into_response()
+}
+
+async fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut tmp = path.to_path_buf();
+    tmp.as_mut_os_string().push(".new");
+    tokio::fs::write(&tmp, contents).await?;
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -392,5 +548,110 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ---- Onboarding ----------------------------------------------------
+
+    fn empty_admin_state(path: std::path::PathBuf) -> AdminState {
+        let cfg = Config::default();
+        AdminState::new(
+            Arc::new(PluginRegistry::default()),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+        )
+        .with_session_store(Arc::new(AdminSessionStore::new(StdDuration::from_secs(
+            300,
+        ))))
+        .with_config_path(path)
+    }
+
+    #[tokio::test]
+    async fn onboard_first_run_writes_admin_block_and_swaps_snapshot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let state = empty_admin_state(path.clone());
+        assert!(state.config.load().admin.username.is_none());
+
+        let app = router(state.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/onboard")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"alice","password":"goodpassphrase"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // In-memory snapshot updated, hash is real argon2id.
+        let cfg = state.config.load_full();
+        assert_eq!(cfg.admin.username.as_deref(), Some("alice"));
+        let hash = cfg.admin.password_hash.clone().expect("hash present");
+        assert!(hash.starts_with("$argon2id$"));
+        assert!(argon2_verify("goodpassphrase", &hash));
+
+        // File on disk: round-trips, no sentinel.
+        let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(on_disk.contains("username = \"alice\""));
+        assert!(!on_disk.contains("***REDACTED***"));
+    }
+
+    #[tokio::test]
+    async fn onboard_when_already_configured_returns_409() {
+        let mut cfg = Config::default();
+        cfg.admin.username = Some("admin".into());
+        cfg.admin.password_hash = Some(hash_password("secret"));
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = AdminState::new(
+            Arc::new(PluginRegistry::default()),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+        )
+        .with_session_store(Arc::new(AdminSessionStore::new(StdDuration::from_secs(
+            300,
+        ))))
+        .with_config_path(tmp.path().join("config.toml"));
+
+        let app = router(state);
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/onboard")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"hacker","password":"newpassphrase"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let body = body_json(res).await;
+        assert_eq!(body["error"], "already_onboarded");
+    }
+
+    #[tokio::test]
+    async fn onboard_rejects_weak_password() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = empty_admin_state(tmp.path().join("config.toml"));
+        let app = router(state);
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/onboard")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"username":"alice","password":"short"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = body_json(res).await;
+        assert_eq!(body["error"], "weak_password");
     }
 }
