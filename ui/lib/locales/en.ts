@@ -82,6 +82,20 @@ export const en = {
     onboardPasswordMismatch: "Passwords do not match",
     onboardAlreadyConfigured:
       "Admin already configured. Redirecting to login...",
+    changePasswordTitle: "Change password",
+    changePasswordDescription:
+      "Rotate the admin password. You'll stay signed in on this device.",
+    changePasswordOldLabel: "Current password",
+    changePasswordNewLabel: "New password",
+    changePasswordConfirmLabel: "Confirm new password",
+    changePasswordSubmit: "Update password",
+    changePasswordSubmitting: "Updating...",
+    changePasswordSuccess: "Password updated",
+    changePasswordInvalidOld: "Current password is incorrect",
+    changePasswordMismatch: "New passwords do not match",
+    changePasswordWeak: "New password must be at least {{min}} characters",
+    changePasswordCancel: "Cancel",
+    changePasswordMenuItem: "Change password",
   },
 
   nav: {

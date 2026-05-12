@@ -20,6 +20,7 @@ import {
   FileTerminal,
   Fingerprint,
   Frame,
+  KeyRound,
   Leaf,
   LogOut,
   MessageCircle,
@@ -44,6 +45,7 @@ import { logout } from "@/lib/auth";
 import { useMotion } from "@/components/ui/motion-safe";
 import { useMobileDrawer } from "./mobile-drawer-context";
 import { BrandMark } from "./brand-mark";
+import { ChangePasswordDialog } from "./change-password-dialog";
 
 interface NavItem {
   kind?: "item";
@@ -143,6 +145,7 @@ export function Sidebar({ user }: SidebarProps) {
   const [collapsed, setCollapsed] = React.useState(false);
   const [hydrated, setHydrated] = React.useState(false);
   const [loggingOut, setLoggingOut] = React.useState(false);
+  const [changePasswordOpen, setChangePasswordOpen] = React.useState(false);
   const { open: drawerOpen } = useMobileDrawer();
 
   React.useEffect(() => {
@@ -256,16 +259,27 @@ export function Sidebar({ user }: SidebarProps) {
       {/* user chip + footer */}
       <div className="border-t border-tp-glass-edge p-3">
         {collapsed && hydrated ? (
-          <button
-            type="button"
-            onClick={onLogout}
-            aria-label={t("auth.logoutLabel")}
-            disabled={loggingOut}
-            className="flex h-8 w-full items-center justify-center rounded-md text-tp-ink-3 transition-colors hover:bg-tp-glass-inner hover:text-tp-ink disabled:opacity-50"
-            data-testid="logout-button"
-          >
-            <LogOut className="h-4 w-4" />
-          </button>
+          <div className="flex flex-col items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setChangePasswordOpen(true)}
+              aria-label={t("auth.changePasswordMenuItem")}
+              className="flex h-8 w-full items-center justify-center rounded-md text-tp-ink-3 transition-colors hover:bg-tp-glass-inner hover:text-tp-ink"
+              data-testid="change-password-button"
+            >
+              <KeyRound className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={onLogout}
+              aria-label={t("auth.logoutLabel")}
+              disabled={loggingOut}
+              className="flex h-8 w-full items-center justify-center rounded-md text-tp-ink-3 transition-colors hover:bg-tp-glass-inner hover:text-tp-ink disabled:opacity-50"
+              data-testid="logout-button"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
+          </div>
         ) : (
           <div className="flex items-center gap-2">
             <div
@@ -290,6 +304,16 @@ export function Sidebar({ user }: SidebarProps) {
             </div>
             <button
               type="button"
+              onClick={() => setChangePasswordOpen(true)}
+              aria-label={t("auth.changePasswordMenuItem")}
+              title={t("auth.changePasswordMenuItem")}
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-tp-ink-3 transition-colors hover:bg-tp-glass-inner hover:text-tp-ink"
+              data-testid="change-password-button"
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
               onClick={onLogout}
               disabled={loggingOut}
               aria-label={t("auth.logoutLabel")}
@@ -301,6 +325,10 @@ export function Sidebar({ user }: SidebarProps) {
           </div>
         )}
       </div>
+      <ChangePasswordDialog
+        open={changePasswordOpen}
+        onOpenChange={setChangePasswordOpen}
+      />
     </aside>
   );
 }

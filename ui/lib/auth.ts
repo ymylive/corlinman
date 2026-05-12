@@ -72,3 +72,22 @@ export function onboard(req: OnboardRequest): Promise<void> {
     body: req,
   });
 }
+
+export interface ChangePasswordRequest {
+  old_password: string;
+  new_password: string;
+}
+
+/**
+ * `POST /admin/password` — rotate the logged-in admin's password.
+ * Requires a valid session cookie + correct `old_password`. The gateway
+ * argon2-verifies the old hash and rewrites `config.toml` atomically on
+ * success. 401 on bad old password, 422 on a new password shorter than
+ * the gateway-side minimum.
+ */
+export function changePassword(req: ChangePasswordRequest): Promise<void> {
+  return apiFetch<void>("/admin/password", {
+    method: "POST",
+    body: req,
+  });
+}
