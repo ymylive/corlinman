@@ -50,6 +50,11 @@ class ProviderKind(StrEnum):
     REPLICATE = "replicate"
     BEDROCK = "bedrock"
     AZURE = "azure"
+    # sub2api (Wei-Shaw/sub2api) sidecar — OAuth-subscription pooling
+    # exposed over OpenAI-compat. Wire shape is identical to
+    # ``openai_compatible``; the named kind exists so admin UIs / configs
+    # document operator intent. See ``docs/design/sub2api-integration.md``.
+    SUB2API = "sub2api"
 
 
 class ProviderSpec(BaseModel):
