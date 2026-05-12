@@ -22,6 +22,7 @@ dependencies = [
     "corlinman-persona",
     "corlinman-episodes",
     "corlinman-goals",
+    "corlinman-agent-brain",
 ]
 
 [tool.uv.sources]
@@ -36,6 +37,7 @@ corlinman-user-model = { workspace = true }
 corlinman-persona = { workspace = true }
 corlinman-episodes = { workspace = true }
 corlinman-goals = { workspace = true }
+corlinman-agent-brain = { workspace = true }
 
 [tool.uv.workspace]
 members = ["python/packages/*"]
