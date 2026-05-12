@@ -2196,12 +2196,23 @@ impl Config {
         Self::load_from_path(&Self::default_path())
     }
 
+    /// Refresh `meta.last_touched_*` in-place to the current crate version
+    /// and an ISO-8601 UTC timestamp. Call this immediately before any
+    /// admin-write code path serialises the config to disk so the audit
+    /// stamps stay accurate — [`Self::save_to_path`] does this for its
+    /// callers, but admin handlers that bypass it (e.g. the gateway's
+    /// `tokio::fs::write` atomic-rename helpers) must invoke this method
+    /// directly before `toml::to_string_pretty`.
+    pub fn stamp_meta(&mut self) {
+        self.meta.last_touched_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        self.meta.last_touched_at = Some(current_timestamp());
+    }
+
     /// Serialise to TOML at `path`, creating parent directories as needed and
     /// refreshing `meta.last_touched_*` to the current version / UTC time.
     pub fn save_to_path(&self, path: &Path) -> Result<(), CorlinmanError> {
         let mut to_write = self.clone();
-        to_write.meta.last_touched_version = Some(env!("CARGO_PKG_VERSION").to_string());
-        to_write.meta.last_touched_at = Some(current_timestamp());
+        to_write.stamp_meta();
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -3045,6 +3056,39 @@ bogus = "field"
             },
         );
         assert!(cfg.has_redacted_sentinel());
+    }
+
+    #[test]
+    fn stamp_meta_sets_version_and_iso_timestamp() {
+        // Sprint PR-#2 review: every admin-write path must call
+        // `stamp_meta()` before serialise so the audit trail in
+        // `[meta]` stays accurate. Pre-stamp the fields with junk so
+        // we can assert the helper *replaces* them rather than only
+        // filling in the `None` case.
+        let mut cfg = Config::default();
+        cfg.meta.last_touched_version = Some("stale".into());
+        cfg.meta.last_touched_at = Some("yesterday".into());
+        cfg.stamp_meta();
+        assert_eq!(
+            cfg.meta.last_touched_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "stamp_meta must overwrite stale version",
+        );
+        let ts = cfg
+            .meta
+            .last_touched_at
+            .as_deref()
+            .expect("stamp_meta sets last_touched_at");
+        // RFC 3339 / ISO 8601 — crude shape check: starts with a 4-digit
+        // year and contains a `T` separator. `current_timestamp` already
+        // round-trips through `time::OffsetDateTime`; this just guards
+        // against the helper returning the `"unknown"` fallback.
+        assert_ne!(ts, "unknown", "stamp_meta must format a real timestamp");
+        assert!(ts.contains('T'), "expected ISO 8601 timestamp, got {ts}");
+        assert!(
+            ts.starts_with(|c: char| c.is_ascii_digit()),
+            "expected ISO 8601 timestamp, got {ts}",
+        );
     }
 
     #[test]

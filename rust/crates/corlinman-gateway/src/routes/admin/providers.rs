@@ -596,7 +596,7 @@ fn google_schema() -> JsonValue {
 // Persist + swap shared helper
 // ---------------------------------------------------------------------------
 
-async fn persist_and_swap<F>(state: AdminState, new_cfg: Config, render: F) -> Response
+async fn persist_and_swap<F>(state: AdminState, mut new_cfg: Config, render: F) -> Response
 where
     F: FnOnce(&Config) -> Response,
 {
@@ -610,6 +610,10 @@ where
         )
             .into_response();
     };
+
+    // PR-#2 review fix: every admin-write path must refresh `[meta]` so
+    // the audit stamps reflect the actual write time / crate version.
+    new_cfg.stamp_meta();
 
     let serialised = match toml::to_string_pretty(&new_cfg) {
         Ok(s) => s,

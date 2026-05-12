@@ -285,7 +285,7 @@ async fn delete_alias(State(state): State<AdminState>, Path(name): Path<String>)
 // Shared persist helper
 // ---------------------------------------------------------------------------
 
-async fn persist_and_swap<F>(state: AdminState, new_cfg: Config, render: F) -> Response
+async fn persist_and_swap<F>(state: AdminState, mut new_cfg: Config, render: F) -> Response
 where
     F: FnOnce(&Config) -> Response,
 {
@@ -299,6 +299,10 @@ where
         )
             .into_response();
     };
+
+    // PR-#2 review fix: refresh `[meta]` before serialising so every
+    // admin-write code path leaves an accurate audit trail on disk.
+    new_cfg.stamp_meta();
 
     let serialised = match toml::to_string_pretty(&new_cfg) {
         Ok(s) => s,

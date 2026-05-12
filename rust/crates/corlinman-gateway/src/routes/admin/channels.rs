@@ -190,6 +190,8 @@ async fn update_keywords(
         }
     };
     qq.group_keywords = body.group_keywords.clone();
+    // PR-#2 review fix: refresh `[meta]` audit stamps before serialise.
+    new_cfg.stamp_meta();
 
     let Some(path) = state.config_path.as_ref() else {
         return (

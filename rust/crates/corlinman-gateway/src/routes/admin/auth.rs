@@ -432,6 +432,11 @@ async fn persist_admin_credentials(
     let mut new_cfg = (*state.config.load_full()).clone();
     new_cfg.admin.username = Some(username);
     new_cfg.admin.password_hash = Some(hashed);
+    // Refresh the [meta] stamps before serialising so the audit trail
+    // matches the on-disk write. `save_to_path` does this for the
+    // boot-time loader, but the gateway's atomic-rename path bypasses
+    // that helper — call the same factored-out method directly.
+    new_cfg.stamp_meta();
 
     let serialised = match toml::to_string_pretty(&new_cfg) {
         Ok(s) => s,
@@ -693,11 +698,28 @@ mod tests {
         let hash = cfg.admin.password_hash.clone().expect("hash present");
         assert!(hash.starts_with("$argon2id$"));
         assert!(argon2_verify("goodpassphrase", &hash));
+        // PR-#2 review fix: persist_admin_credentials must stamp the
+        // [meta] block before serialise so the audit trail matches.
+        assert_eq!(
+            cfg.meta.last_touched_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+        );
+        let ts = cfg
+            .meta
+            .last_touched_at
+            .as_deref()
+            .expect("stamp_meta sets last_touched_at on onboard");
+        assert_ne!(ts, "unknown");
 
         // File on disk: round-trips, no sentinel.
         let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(on_disk.contains("username = \"alice\""));
         assert!(!on_disk.contains("***REDACTED***"));
+        // [meta] block landed on disk too, not just in memory.
+        assert!(
+            on_disk.contains("last_touched_version"),
+            "[meta] stamps must persist; got:\n{on_disk}"
+        );
     }
 
     #[tokio::test]

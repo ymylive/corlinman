@@ -281,7 +281,7 @@ async fn post_benchmark(
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-async fn persist_and_swap<F>(state: AdminState, new_cfg: Config, render: F) -> Response
+async fn persist_and_swap<F>(state: AdminState, mut new_cfg: Config, render: F) -> Response
 where
     F: FnOnce(&Config) -> Response,
 {
@@ -295,6 +295,11 @@ where
         )
             .into_response();
     };
+
+    // PR-#2 review fix: refresh `[meta]` before serialising so the
+    // audit stamps survive every admin write, not just the boot-time
+    // `Config::save_to_path` callers.
+    new_cfg.stamp_meta();
 
     let serialised = match toml::to_string_pretty(&new_cfg) {
         Ok(s) => s,

@@ -271,6 +271,11 @@ async fn post_config(
             .into_response();
     }
 
+    // PR-#2 review fix: refresh `[meta]` so the `POST /admin/config`
+    // save path stamps the audit trail too — same belt-and-braces
+    // contract every other admin-write route now follows.
+    new_config.stamp_meta();
+
     let serialised = match toml::to_string_pretty(&new_config) {
         Ok(s) => s,
         Err(err) => {
