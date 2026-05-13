@@ -205,20 +205,20 @@ async fn upsert_provider(
     if body.name.trim().is_empty() {
         return bad_request("invalid_name", "provider name must be non-empty");
     }
-    // openai_compatible and sub2api both require base_url — they have no
-    // sensible default upstream URL (sub2api is operator-hosted, the other
-    // is a free-form OpenAI-shape endpoint).
+    // openai_compatible + sub2api both require base_url. openai_compatible
+    // has no canonical endpoint by design; sub2api is operator-hosted.
     if matches!(
         body.kind,
         ProviderKind::OpenaiCompatible | ProviderKind::Sub2api
     ) && body.base_url.as_deref().unwrap_or("").is_empty()
     {
+        let kind_str = match body.kind {
+            ProviderKind::Sub2api => "sub2api",
+            _ => "openai_compatible",
+        };
         return bad_request(
             "base_url_required",
-            &format!(
-                "providers of kind '{}' must supply a base_url",
-                body.kind.as_str()
-            ),
+            &format!("providers of kind '{kind_str}' must supply a base_url"),
         );
     }
     // First-party slot names are reserved for their matching kind — keeps
@@ -341,20 +341,20 @@ async fn patch_provider(
         }
         merged.params = params;
     }
-    // openai_compatible / sub2api still require base_url after the patch is
-    // applied. (Same constraint as in upsert.)
+    // openai_compatible + sub2api still require base_url after the patch is applied.
     let resolved_kind = merged.kind.or_else(|| ProviderKind::from_slot_name(&name));
     if matches!(
         resolved_kind,
         Some(ProviderKind::OpenaiCompatible) | Some(ProviderKind::Sub2api)
     ) && merged.base_url.as_deref().unwrap_or("").is_empty()
     {
+        let kind_str = match resolved_kind {
+            Some(ProviderKind::Sub2api) => "sub2api",
+            _ => "openai_compatible",
+        };
         return bad_request(
             "base_url_required",
-            &format!(
-                "providers of kind '{}' must supply a base_url",
-                resolved_kind.unwrap().as_str()
-            ),
+            &format!("providers of kind '{kind_str}' must supply a base_url"),
         );
     }
 
@@ -610,7 +610,7 @@ fn google_schema() -> JsonValue {
 // Persist + swap shared helper
 // ---------------------------------------------------------------------------
 
-async fn persist_and_swap<F>(state: AdminState, new_cfg: Config, render: F) -> Response
+async fn persist_and_swap<F>(state: AdminState, mut new_cfg: Config, render: F) -> Response
 where
     F: FnOnce(&Config) -> Response,
 {
@@ -624,6 +624,33 @@ where
         )
             .into_response();
     };
+
+    // PR-#2 review issue #1: belt-and-braces sentinel handling. A
+    // round-trip POST (e.g. the operator pastes the redacted GET echo
+    // as a literal `api_key.value`) is restored from the live snapshot
+    // first; anything that still carries `"***REDACTED***"` after that
+    // merge has no real secret to fall back on, so we refuse with 422
+    // rather than pin the placeholder string on disk.
+    let current = state.config.load_full();
+    new_cfg.merge_redacted_secrets_from(&current);
+    if new_cfg.has_redacted_sentinel() {
+        tracing::error!(
+            "admin/providers: refusing to write config containing redaction sentinel",
+        );
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "redacted_payload",
+                "message": "payload contains the literal `***REDACTED***` placeholder for at least one secret. \
+                            Replace it with a real value (or omit the field to keep the current secret) before retrying.",
+            })),
+        )
+            .into_response();
+    }
+
+    // PR-#2 review fix: every admin-write path must refresh `[meta]` so
+    // the audit stamps reflect the actual write time / crate version.
+    new_cfg.stamp_meta();
 
     let serialised = match toml::to_string_pretty(&new_cfg) {
         Ok(s) => s,
@@ -1083,6 +1110,8 @@ mod tests {
         );
     }
 
+
+
     #[tokio::test]
     async fn upsert_rejects_sub2api_without_base_url() {
         // sub2api shares OpenAI wire shape but is operator-hosted — there is
@@ -1179,6 +1208,110 @@ mod tests {
         assert_eq!(subhub["kind"], "sub2api");
         assert_eq!(subhub["base_url"], "http://127.0.0.1:7980");
         assert_eq!(subhub["enabled"], true);
+    }
+
+
+    /// PR-#2 review issue #1: posting a literal `api_key.value` of
+    /// `"***REDACTED***"` for a slot that has *no* matching entry in the
+    /// in-memory snapshot must 422 rather than pin the sentinel string on
+    /// disk. The merge step has nothing to restore from for a brand-new
+    /// `glm` provider slot, so the belt-and-braces `has_redacted_sentinel`
+    /// guard kicks in.
+    #[tokio::test]
+    async fn upsert_refuses_redacted_payload_when_unmergable() {
+        use corlinman_core::config::REDACTED_SENTINEL;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let state = base_state(Some(path.clone()));
+        let app = router(state.clone());
+
+        let body = json!({
+            "name": "glm",
+            "kind": "glm",
+            "enabled": true,
+            "api_key": { "value": REDACTED_SENTINEL },
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "redacted_payload");
+        // File never created — the guard fires before atomic_write.
+        assert!(!path.exists());
+    }
+
+    /// Patching an existing provider with `api_key.value =
+    /// "***REDACTED***"` is benign — the merge restores the real secret
+    /// from the snapshot, so the write succeeds and the on-disk secret
+    /// is preserved.
+    #[tokio::test]
+    async fn patch_with_redacted_sentinel_restores_live_secret() {
+        use corlinman_core::config::REDACTED_SENTINEL;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        // Seed the snapshot with a real literal secret so the merge has
+        // something to restore.
+        let mut cfg = Config::default();
+        cfg.providers.remove("openai");
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                kind: None,
+                api_key: Some(SecretRef::Literal {
+                    value: "sk-real-secret".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                params: ParamsMap::new(),
+            },
+        );
+        let state = AdminState::new(
+            Arc::new(PluginRegistry::default()),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+        )
+        .with_config_path(path.clone());
+        let app = router(state.clone());
+
+        // Operator round-trips the redacted echo unchanged.
+        let body = json!({
+            "api_key": { "value": REDACTED_SENTINEL },
+            "enabled": true,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/admin/providers/anthropic")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // In-memory snapshot still carries the real secret, not the
+        // sentinel.
+        let live = state.config.load();
+        let entry = live.providers.get("anthropic").expect("entry persists");
+        match entry.api_key.as_ref().expect("api_key persists") {
+            SecretRef::Literal { value } => assert_eq!(value, "sk-real-secret"),
+            other => panic!("expected Literal, got {other:?}"),
+        }
+        // On-disk file: the literal lands, sentinel absent.
+        let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(on_disk.contains("sk-real-secret"));
+        assert!(!on_disk.contains(REDACTED_SENTINEL));
     }
 
     #[test]

@@ -186,6 +186,14 @@ pub struct AdminState {
     /// Transcript replay remains available without it; rerun returns
     /// `rerun_disabled` when no agent backend is wired.
     pub replay_chat_service: Option<Arc<dyn ReplayChatService>>,
+    /// PR-#2 review issue #2: serialises admin-credential writes
+    /// (`POST /admin/onboard`, `POST /admin/password`) so two
+    /// concurrent onboard requests can't both pass their
+    /// `is_none()` precondition and clobber each other. Always
+    /// present (default `Arc::new(Mutex::new(()))`); cloned with the
+    /// rest of `AdminState` so every router clone observes the same
+    /// per-process lock.
+    pub admin_write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AdminState {
@@ -212,6 +220,7 @@ impl AdminState {
             data_dir: None,
             identity_store: None,
             replay_chat_service: None,
+            admin_write_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 

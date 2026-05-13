@@ -285,7 +285,7 @@ async fn delete_alias(State(state): State<AdminState>, Path(name): Path<String>)
 // Shared persist helper
 // ---------------------------------------------------------------------------
 
-async fn persist_and_swap<F>(state: AdminState, new_cfg: Config, render: F) -> Response
+async fn persist_and_swap<F>(state: AdminState, mut new_cfg: Config, render: F) -> Response
 where
     F: FnOnce(&Config) -> Response,
 {
@@ -299,6 +299,32 @@ where
         )
             .into_response();
     };
+
+    // PR-#2 review issue #1: belt-and-braces sentinel guard. Alias
+    // payloads don't carry secrets, but the route clones the live
+    // snapshot — restore any redacted sibling section first, then
+    // refuse to persist anything that still pins
+    // `"***REDACTED***"` on disk.
+    let current = state.config.load_full();
+    new_cfg.merge_redacted_secrets_from(&current);
+    if new_cfg.has_redacted_sentinel() {
+        tracing::error!(
+            "admin/models: refusing to write config containing redaction sentinel",
+        );
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "redacted_payload",
+                "message": "payload contains the literal `***REDACTED***` placeholder for at least one secret. \
+                            Replace it with a real value (or omit the field to keep the current secret) before retrying.",
+            })),
+        )
+            .into_response();
+    }
+
+    // PR-#2 review fix: refresh `[meta]` before serialising so every
+    // admin-write code path leaves an accurate audit trail on disk.
+    new_cfg.stamp_meta();
 
     let serialised = match toml::to_string_pretty(&new_cfg) {
         Ok(s) => s,
@@ -576,6 +602,58 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert!(!state.config.load().models.aliases.contains_key("smart"));
+    }
+
+    /// PR-#2 review issue #1: if the in-memory snapshot carries the
+    /// redaction sentinel anywhere a real secret should live (a buggy
+    /// hot-reload that left `admin.password_hash = "***REDACTED***"`
+    /// is the worst case), the models route must refuse to persist —
+    /// the merge has nothing to restore from, and writing the
+    /// placeholder would lock the operator out.
+    #[tokio::test]
+    async fn upsert_refuses_when_snapshot_carries_sentinel() {
+        use corlinman_core::config::REDACTED_SENTINEL;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.admin.password_hash = Some(REDACTED_SENTINEL.into());
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                api_key: Some(SecretRef::EnvVar {
+                    env: "ANTHROPIC_API_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        let state = AdminState::new(
+            Arc::new(PluginRegistry::default()),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+        )
+        .with_config_path(path.clone());
+        let app = router(state);
+        let body = serde_json::json!({
+            "name": "creative",
+            "model": "claude-opus-4-7",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/models/aliases")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "redacted_payload");
+        assert!(!path.exists());
     }
 
     #[tokio::test]

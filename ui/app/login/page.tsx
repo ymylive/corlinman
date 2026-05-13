@@ -146,12 +146,15 @@ function LoginForm() {
       router.replace(redirect);
     } catch (err) {
       if (err instanceof CorlinmanApiError) {
+        if (err.status === 503) {
+          // Gateway is in onboarding mode — bounce the operator to the
+          // first-run wizard rather than asking them to ssh into the
+          // host and seed `[admin]` manually.
+          router.replace("/onboard");
+          return;
+        }
         setError(
-          err.status === 401
-            ? t("auth.invalidCredentials")
-            : err.status === 503
-              ? t("auth.adminNotConfigured")
-              : err.message,
+          err.status === 401 ? t("auth.invalidCredentials") : err.message,
         );
       } else {
         setError(String(err));
