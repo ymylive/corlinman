@@ -108,7 +108,13 @@ Deep dive: [`docs/architecture.md`](docs/architecture.md).
 ```bash
 # Prebuilt binary + docker compose for newapi sidecar. Detects arch,
 # verifies checksums, runs as systemd unit (native mode) or compose
-# stack (docker mode). Linux x86_64 / aarch64, macOS aarch64.
+# stack (docker mode).
+#
+# Supported prebuilt platforms: Linux x86_64, macOS aarch64.
+# Linux aarch64 (Graviton/Ampere) is source-build only for now —
+# upstream numkong NEON SDOT cross-compile blocker; the installer
+# exits cleanly with a `cargo build --release` instruction on that
+# arch.
 curl -fsSL https://raw.githubusercontent.com/ymylive/corlinman/main/deploy/install.sh \
   | bash -s -- --mode docker
 ```

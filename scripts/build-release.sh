@@ -6,20 +6,31 @@
 # Usage:
 #   ./scripts/build-release.sh                       # all targets sequential
 #   ./scripts/build-release.sh linux-x86_64          # one target
-#   ./scripts/build-release.sh --parallel linux      # both Linux musl targets at once
+#   ./scripts/build-release.sh --parallel linux      # both Linux targets at once
 #   ./scripts/build-release.sh --profile release-thin macos-aarch64
 #
 # Aliases:
-#   linux-x86_64   → x86_64-unknown-linux-musl   (Linux servers, Intel/AMD)
-#   linux-aarch64  → aarch64-unknown-linux-musl  (Linux servers, ARM / Pi / Graviton)
+#   linux-x86_64   → x86_64-unknown-linux-gnu    (Linux servers, Intel/AMD)
+#   linux-aarch64  → aarch64-unknown-linux-gnu   (Linux servers, ARM / Graviton — see caveat)
 #   macos-aarch64  → aarch64-apple-darwin        (Apple Silicon Macs)
 #   linux          → both linux-* aliases above
 #
 # Build tooling:
-#   - Linux targets run through `cross` (Docker required). On macOS hosts
-#     this means QEMU emulation under colima — slow but reproducible.
-#     cross-rs images include a glibc base; Cross.toml adds protoc.
+#   - Linux targets run through `cross` (Docker required). cross-rs
+#     images are amd64-host, so on Apple Silicon they go through QEMU
+#     emulation — unstable for linking large workspaces. Prefer the
+#     GHA `.github/workflows/release.yml` for Linux prebuilts.
 #   - macOS target runs cargo directly (native).
+#
+# Current platform support matrix (see release notes):
+#   - macOS aarch64: locally via this script.
+#   - Linux x86_64:  GHA build on native amd64 runners.
+#   - Linux aarch64: NOT YET — upstream numkong (usearch SIMD lib)
+#     emits NEON SDOT intrinsics under always_inline + target("dotprod")
+#     attributes that the aarch64-linux-gnu cross compiler cannot
+#     satisfy at -march=armv8-a baseline, regardless of GCC version
+#     (verified on 9 / 11 / 13). Run `cargo build --release` natively
+#     on a Graviton / Ampere host until upstream fix lands.
 #
 # Optimisations baked in:
 #   - Per-target CARGO_TARGET_DIR (target-<alias>/) so parallel builds
