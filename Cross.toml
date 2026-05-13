@@ -33,13 +33,18 @@ pre-build = [
 ]
 
 [target.aarch64-unknown-linux-gnu]
-# aarch64 doesn't need the GCC 11 dance — numkong on ARM uses NEON
-# intrinsics, not AVX-512, so the stock GCC 9 in the cross image
-# handles them fine. Just protoc.
+# aarch64 DOES need GCC 11 after all — numkong uses NEON SDOT
+# (vdotq_s32) which requires GCC ≥ 11 to handle the always_inline
+# target-attribute correctly. The amd64-host cross compiler
+# (`gcc-11-aarch64-linux-gnu`) lives in ppa:ubuntu-toolchain-r/test.
 pre-build = [
-    "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update",
-    "apt-get install -y --no-install-recommends protobuf-compiler",
+    "apt-get install -y --no-install-recommends software-properties-common gpg-agent",
+    "add-apt-repository -y ppa:ubuntu-toolchain-r/test",
+    "apt-get update",
+    "apt-get install -y --no-install-recommends gcc-11-aarch64-linux-gnu g++-11-aarch64-linux-gnu protobuf-compiler",
+    "update-alternatives --install /usr/bin/aarch64-linux-gnu-gcc aarch64-linux-gnu-gcc /usr/bin/aarch64-linux-gnu-gcc-11 100",
+    "update-alternatives --install /usr/bin/aarch64-linux-gnu-g++ aarch64-linux-gnu-g++ /usr/bin/aarch64-linux-gnu-g++-11 100",
 ]
 
 # Note: we previously targeted *-linux-musl for static binaries, but
