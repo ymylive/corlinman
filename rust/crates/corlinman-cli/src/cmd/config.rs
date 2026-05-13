@@ -53,6 +53,23 @@ pub enum Cmd {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Rewrite legacy `kind = "sub2api"` provider entries to
+    /// `kind = "newapi"`. With `--dry-run` (default), prints the diff
+    /// and exits zero; with `--apply`, writes a backup at
+    /// `config.toml.sub2api.bak` and rewrites the file in place.
+    MigrateSub2api {
+        /// Explicit config path; defaults to `$CORLINMAN_DATA_DIR/config.toml`.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Rewrite the file in place. Without this, the command runs as
+        /// a dry-run.
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+        /// Print the diff without writing. This is the default; the
+        /// flag exists for explicitness.
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+    },
 }
 
 pub async fn run(cmd: Cmd) -> Result<()> {
@@ -63,6 +80,112 @@ pub async fn run(cmd: Cmd) -> Result<()> {
         Cmd::Validate { path } => validate(path),
         Cmd::Init { path, force } => init(path, force),
         Cmd::Diff { path } => diff(path),
+        Cmd::MigrateSub2api {
+            path,
+            apply,
+            dry_run: _,
+        } => migrate_sub2api(path, apply),
+    }
+}
+
+/// Line-level rewrite of `kind = "sub2api"` → `kind = "newapi"` inside
+/// `[providers.X]` blocks. Preserves whitespace, comments, and TOML
+/// structure verbatim. Other fields (base_url, api_key, params) stay
+/// untouched; the operator continues to manage them through the admin
+/// UI or hand-editing.
+fn rewrite_sub2api_to_newapi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut iter = input.split_inclusive('\n').peekable();
+    while let Some(line) = iter.next() {
+        let trim = line.trim_start();
+        if trim.starts_with("kind") && trim.contains("\"sub2api\"") {
+            out.push_str(&line.replacen("\"sub2api\"", "\"newapi\"", 1));
+        } else {
+            out.push_str(line);
+        }
+        if iter.peek().is_none() && !line.ends_with('\n') {
+            // preserve trailing-newline state
+        }
+    }
+    out
+}
+
+fn print_diff(before: &str, after: &str) {
+    for (b, a) in before.lines().zip(after.lines()) {
+        if b != a {
+            println!("- {}", b);
+            println!("+ {}", a);
+        } else {
+            println!("  {}", a);
+        }
+    }
+}
+
+fn migrate_sub2api(path: Option<PathBuf>, apply: bool) -> Result<()> {
+    let cfg_path = resolve_path(path);
+    let original = std::fs::read_to_string(&cfg_path)
+        .with_context(|| format!("read config from {}", cfg_path.display()))?;
+    let rewritten = rewrite_sub2api_to_newapi(&original);
+
+    if rewritten == original {
+        println!("no_sub2api_entries_found at {}", cfg_path.display());
+        return Ok(());
+    }
+
+    print_diff(&original, &rewritten);
+    if apply {
+        let backup = cfg_path.with_extension("toml.sub2api.bak");
+        std::fs::write(&backup, &original)
+            .with_context(|| format!("write backup to {}", backup.display()))?;
+        std::fs::write(&cfg_path, &rewritten)
+            .with_context(|| format!("write rewritten config to {}", cfg_path.display()))?;
+        println!(
+            "rewrote {} (backup: {})",
+            cfg_path.display(),
+            backup.display()
+        );
+    } else {
+        println!("--dry-run: no changes written (pass --apply to write)");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_changes_only_kind_sub2api_lines() {
+        let i = r#"
+[providers.subhub]
+kind = "sub2api"
+base_url = "http://127.0.0.1:7980"
+api_key = { env = "SUB2API_KEY" }
+
+[providers.openai]
+kind = "openai"
+api_key = { env = "OPENAI_API_KEY" }
+"#;
+        let o = rewrite_sub2api_to_newapi(i);
+        assert!(o.contains("kind = \"newapi\""));
+        assert!(!o.contains("kind = \"sub2api\""));
+        assert!(o.contains("http://127.0.0.1:7980"));
+        assert!(o.contains("[providers.openai]"));
+        assert!(o.contains("kind = \"openai\""));
+    }
+
+    #[test]
+    fn rewrite_idempotent_when_already_newapi() {
+        let i = "[providers.x]\nkind = \"newapi\"\nbase_url = \"http://x\"\n";
+        let o = rewrite_sub2api_to_newapi(i);
+        assert_eq!(o, i);
+    }
+
+    #[test]
+    fn rewrite_handles_indented_kind_line() {
+        let i = "[providers.x]\n  kind = \"sub2api\"\n";
+        let o = rewrite_sub2api_to_newapi(i);
+        assert!(o.contains("  kind = \"newapi\""));
     }
 }
 
