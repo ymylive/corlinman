@@ -72,6 +72,21 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
+# Faster release builds for predistribution dogfooding. Inherits from
+# release but bumps codegen-units to 16 for ~50% faster builds at a
+# small (single-digit %) runtime cost. Use this for CI / dogfood
+# binaries; use the regular `release` profile for the GA artifacts
+# that ship to operators.
+[profile.release-thin]
+inherits = "release"
+codegen-units = 16
+lto = "thin"
+
+# Smaller dev cycle: incremental on, debug-info unpacked, no
+# opt-level=0 surprises (kept at 0 — anything higher slows the
+# inner edit-build loop without a corresponding correctness win).
 [profile.dev]
 opt-level = 0
 debug = true
+incremental = true
+split-debuginfo = "unpacked"

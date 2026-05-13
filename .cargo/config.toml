@@ -1,0 +1,38 @@
+# Cargo build acceleration knobs.
+#
+# Honoured automatically by every cargo invocation in this repo.
+# Operators can opt out by setting CARGO_TARGET_DIR / RUSTC_WRAPPER /
+# RUSTFLAGS at the env level — cargo's normal env precedence applies.
+#
+# Recommended one-time setup on a dev box (macOS or Linux):
+#   cargo install sccache      # local build cache
+#   # Linux only:
+#   sudo apt-get install -y mold clang   # faster linker
+#   # macOS already has lld via Xcode CLT.
+#
+# See docs/dev/build-fast.md for details.
+
+[build]
+# Honour SCCACHE_DIR / SCCACHE_BUCKET if set; otherwise sccache uses
+# its own cache dir under ~/.cache/sccache. If sccache isn't on PATH,
+# cargo falls back to the normal driver — no error, no warning.
+rustc-wrapper = "sccache"
+# Reasonable parallelism even on machines that lie about CPU count.
+jobs = 0   # 0 = let cargo pick (default); reserve override room
+
+[target.x86_64-unknown-linux-gnu]
+# mold cuts link time from ~30s → ~3s on the gateway crate.
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+
+# macOS uses Apple's built-in linker; LLD doesn't help much here.
