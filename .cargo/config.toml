@@ -13,12 +13,10 @@
 # See docs/dev/build-fast.md for details.
 
 [build]
-# Honour SCCACHE_DIR / SCCACHE_BUCKET if set; otherwise sccache uses
-# its own cache dir under ~/.cache/sccache. If sccache isn't on PATH,
-# cargo falls back to the normal driver — no error, no warning.
-rustc-wrapper = "sccache"
-# Reasonable parallelism even on machines that lie about CPU count.
-jobs = 0   # 0 = let cargo pick (default); reserve override room
+# `rustc-wrapper` is set by env var when sccache is installed, not
+# pinned here — that way cargo on a fresh box doesn't error out on
+# "wrapper not found". To enable: `export RUSTC_WRAPPER=sccache`
+# (or add to ~/.zshrc / ~/.bashrc). See docs/dev/build-fast.md.
 
 [target.x86_64-unknown-linux-gnu]
 # mold cuts link time from ~30s → ~3s on the gateway crate.

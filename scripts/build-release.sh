@@ -24,10 +24,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # Binaries to ship. Keep in sync with [[bin]] sections in Cargo.toml.
+# `cargo build --bin <name>` only resolves bins that have a real
+# [[bin]] entry; library-only crates (corlinman-mcp) are skipped here
+# even though they ship as part of the gateway runtime.
 BINS=(
     "corlinman-gateway"
-    "corlinman"            # corlinman-cli's bin name
-    "corlinman-mcp"
+    "corlinman"               # corlinman-cli's bin name
+    "corlinman-auto-rollback" # rollback CLI helper
+    "corlinman-shadow-tester" # shadow-router tester
 )
 
 VERSION="$(grep -E '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
@@ -41,18 +45,19 @@ TARGETS_ALL=(
     "aarch64-apple-darwin"
 )
 
-declare -A TARGET_ALIAS=(
-    [linux-x86_64]="x86_64-unknown-linux-musl"
-    [linux-aarch64]="aarch64-unknown-linux-musl"
-    [macos-aarch64]="aarch64-apple-darwin"
-)
+# Friendly aliases → real rustc target triples. Resolved via case for
+# bash 3.2 compatibility (macOS default).
+resolve_target_alias() {
+    case "$1" in
+        linux-x86_64)  echo "x86_64-unknown-linux-musl" ;;
+        linux-aarch64) echo "aarch64-unknown-linux-musl" ;;
+        macos-aarch64) echo "aarch64-apple-darwin" ;;
+        *) echo "$1" ;;
+    esac
+}
 
 if [[ $# -gt 0 ]]; then
-    if [[ -n "${TARGET_ALIAS[$1]:-}" ]]; then
-        TARGETS=("${TARGET_ALIAS[$1]}")
-    else
-        TARGETS=("$1")
-    fi
+    TARGETS=("$(resolve_target_alias "$1")")
 else
     TARGETS=("${TARGETS_ALL[@]}")
 fi
