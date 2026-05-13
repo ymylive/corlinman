@@ -33,18 +33,14 @@ pre-build = [
 ]
 
 [target.aarch64-unknown-linux-gnu]
-# aarch64 DOES need GCC 11 after all — numkong uses NEON SDOT
-# (vdotq_s32) which requires GCC ≥ 11 to handle the always_inline
-# target-attribute correctly. The amd64-host cross compiler
-# (`gcc-11-aarch64-linux-gnu`) lives in ppa:ubuntu-toolchain-r/test.
+# Switch from the default Ubuntu 20.04 (GCC 9) image to cross-rs's
+# :edge tag, which is based on Ubuntu 24.04 and ships GCC 13+. Needed
+# because numkong's NEON SDOT (vdotq_s32) intrinsic requires the
+# always_inline target-attribute support added in GCC 11.
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge"
 pre-build = [
     "apt-get update",
-    "apt-get install -y --no-install-recommends software-properties-common gpg-agent",
-    "add-apt-repository -y ppa:ubuntu-toolchain-r/test",
-    "apt-get update",
-    "apt-get install -y --no-install-recommends gcc-11-aarch64-linux-gnu g++-11-aarch64-linux-gnu protobuf-compiler",
-    "update-alternatives --install /usr/bin/aarch64-linux-gnu-gcc aarch64-linux-gnu-gcc /usr/bin/aarch64-linux-gnu-gcc-11 100",
-    "update-alternatives --install /usr/bin/aarch64-linux-gnu-g++ aarch64-linux-gnu-g++ /usr/bin/aarch64-linux-gnu-g++-11 100",
+    "apt-get install -y --no-install-recommends protobuf-compiler",
 ]
 
 # Note: we previously targeted *-linux-musl for static binaries, but
