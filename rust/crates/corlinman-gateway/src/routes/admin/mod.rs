@@ -53,6 +53,7 @@ pub mod logs;
 pub mod memory;
 pub mod models;
 pub mod napcat;
+pub mod newapi;
 pub mod plugins;
 pub mod providers;
 pub mod rag;
@@ -441,6 +442,7 @@ pub fn router_with_state(state: AdminState) -> Router {
         .merge(logs::router(state.clone()))
         .merge(models::router(state.clone()))
         .merge(providers::router(state.clone()))
+        .merge(newapi::router(state.clone()))
         .merge(embedding::router(state.clone()))
         .merge(rag::router(state.clone()))
         .merge(channels::router(state.clone()))
