@@ -56,6 +56,10 @@ def _spec(
         (ProviderKind.QWEN, QwenProvider, None),
         (ProviderKind.GLM, GLMProvider, None),
         (ProviderKind.OPENAI_COMPATIBLE, OpenAICompatibleProvider, "http://localhost:8000/v1"),
+        # newapi is a named OpenAI-compat upstream (QuantumNous/new-api).
+        # The kind exists for admin-UI labelling; runtime dispatches via
+        # OpenAICompatibleProvider, same as openai_compatible.
+        (ProviderKind.NEWAPI, OpenAICompatibleProvider, "http://localhost:3000/v1"),
     ],
 )
 def test_registry_builds_each_kind(

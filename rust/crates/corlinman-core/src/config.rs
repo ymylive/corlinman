@@ -438,15 +438,17 @@ pub enum ProviderKind {
     /// `<resource>.openai.azure.com/openai/deployments/<deployment>`.
     /// Real adapter pending — runtime currently raises NotImplementedError.
     Azure,
-    /// sub2api (`https://github.com/Wei-Shaw/sub2api`) — sidecar that pools
-    /// consumer subscriptions (Claude Pro / ChatGPT / Gemini / Antigravity)
-    /// behind an OpenAI-compatible `/v1/chat/completions` endpoint. corlinman
-    /// treats it as a plain OpenAI-compat upstream; the dedicated kind exists
-    /// so the admin UI can surface sub2api-specific health / channel data,
-    /// and so operators see "sub2api" instead of an opaque
-    /// `openai_compatible`. Like `openai_compatible`, requires `base_url`.
-    /// See `docs/design/sub2api-integration.md` for the integration plan.
-    Sub2api,
+    /// new-api (`https://github.com/QuantumNous/new-api`) — sidecar that pools
+    /// channels (LLM / embedding / audio TTS) behind a single OpenAI-wire
+    /// endpoint. Operators run new-api separately and point one corlinman
+    /// provider entry at it. Wire shape is pure OpenAI-compat (chat,
+    /// embeddings, audio speech), so all three capabilities dispatch via
+    /// the shared adapter. The named kind exists so the admin UI can
+    /// surface new-api-specific health / channel data, and so operators
+    /// see "newapi" instead of an opaque "openai_compatible". Like
+    /// `openai_compatible`, requires `base_url`.
+    /// See `docs/design/newapi-integration.md` for the integration plan.
+    Newapi,
 }
 
 impl ProviderKind {
@@ -467,7 +469,7 @@ impl ProviderKind {
             Self::Replicate => "replicate",
             Self::Bedrock => "bedrock",
             Self::Azure => "azure",
-            Self::Sub2api => "sub2api",
+            Self::Newapi => "newapi",
         }
     }
 
@@ -490,7 +492,7 @@ impl ProviderKind {
             Self::Replicate,
             Self::Bedrock,
             Self::Azure,
-            Self::Sub2api,
+            Self::Newapi,
         ]
     }
 
@@ -3803,7 +3805,7 @@ enabled = true
             (ProviderKind::Replicate, "replicate"),
             (ProviderKind::Bedrock, "bedrock"),
             (ProviderKind::Azure, "azure"),
-            (ProviderKind::Sub2api, "sub2api"),
+            (ProviderKind::Newapi, "newapi"),
         ] {
             assert_eq!(kind.as_str(), wire, "as_str() for {kind:?}");
             let frag = format!(

@@ -68,10 +68,10 @@ _KIND_TO_CLASS: dict[ProviderKind, type[Any]] = {
     # runtime fails loudly until proper SigV4 / deployment-routing lands.
     ProviderKind.BEDROCK: BedrockProvider,
     ProviderKind.AZURE: AzureProvider,
-    # sub2api speaks pure OpenAI wire format — same shared adapter as
+    # new-api speaks pure OpenAI wire format — same shared adapter as
     # ``openai_compatible``. The kind exists to document operator intent
-    # and let the admin UI light up sub2api-specific health columns.
-    ProviderKind.SUB2API: OpenAICompatibleProvider,
+    # and let the admin UI light up new-api-specific health columns.
+    ProviderKind.NEWAPI: OpenAICompatibleProvider,
 }
 
 
