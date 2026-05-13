@@ -74,7 +74,7 @@ describe("OnboardPage", () => {
     expect(replaceMock).not.toHaveBeenCalled();
   });
 
-  it("calls /admin/onboard and redirects to /login on success", async () => {
+  it("calls /admin/onboard and advances to the newapi step on success", async () => {
     render(<OnboardPage />);
     fireEvent.change(screen.getByLabelText("用户名"), {
       target: { value: "alice" },
@@ -87,7 +87,11 @@ describe("OnboardPage", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "创建管理员" }));
 
-    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/login"));
+    // No redirect after step 1 — wizard advances to step 2 (newapi).
+    await waitFor(() => {
+      expect(screen.getByLabelText("newapi 地址")).toBeInTheDocument();
+    });
+    expect(replaceMock).not.toHaveBeenCalled();
     const fetchCalls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
       .calls;
     expect(fetchCalls[0][0]).toContain("/admin/onboard");
