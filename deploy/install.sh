@@ -134,7 +134,7 @@ install_native() {
     os="$(detect_os)"
     arch="$(detect_arch)"
     if [[ "$os" == "linux" ]]; then
-        tarball="corlinman-${VERSION#v}-${arch}-unknown-linux-musl.tar.gz"
+        tarball="corlinman-${VERSION#v}-${arch}-unknown-linux-gnu.tar.gz"
     else
         tarball="corlinman-${VERSION#v}-${arch}-apple-darwin.tar.gz"
     fi

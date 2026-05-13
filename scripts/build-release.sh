@@ -49,8 +49,8 @@ PARALLEL=0
 
 resolve_target_alias() {
     case "$1" in
-        linux-x86_64)  echo "x86_64-unknown-linux-musl" ;;
-        linux-aarch64) echo "aarch64-unknown-linux-musl" ;;
+        linux-x86_64)  echo "x86_64-unknown-linux-gnu" ;;
+        linux-aarch64) echo "aarch64-unknown-linux-gnu" ;;
         macos-aarch64) echo "aarch64-apple-darwin" ;;
         *) echo "$1" ;;
     esac
@@ -59,8 +59,8 @@ resolve_target_alias() {
 # Friendly alias → target dir suffix (so each target gets its own target/).
 target_dir_for() {
     case "$1" in
-        x86_64-unknown-linux-musl)  echo "target-x86_64-linux-musl" ;;
-        aarch64-unknown-linux-musl) echo "target-aarch64-linux-musl" ;;
+        x86_64-unknown-linux-gnu)  echo "target-x86_64-linux-gnu" ;;
+        aarch64-unknown-linux-gnu) echo "target-aarch64-linux-gnu" ;;
         aarch64-apple-darwin)       echo "target-aarch64-darwin" ;;
         *)                           echo "target-$1" ;;
     esac
@@ -95,8 +95,8 @@ done
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
     # Default to all three when no positional arg.
     TARGETS=(
-        "x86_64-unknown-linux-musl"
-        "aarch64-unknown-linux-musl"
+        "x86_64-unknown-linux-gnu"
+        "aarch64-unknown-linux-gnu"
         "aarch64-apple-darwin"
     )
 fi

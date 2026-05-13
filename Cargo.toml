@@ -44,7 +44,7 @@ backoff = { version = "0.4", features = ["tokio"] }
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "macros", "time"] }
 usearch = "2"
 bollard = "0.17"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "charset", "http2", "macos-system-configuration"] }
 bytes = "1"
 tokio-tungstenite = "0.23"
 futures-util = "0.3"

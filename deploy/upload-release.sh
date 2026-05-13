@@ -18,7 +18,7 @@
 #
 # Optional env:
 #   TARGET_PREFIX  remote install root (default: /opt/corlinman)
-#   TARGET_ARCH    arch to push (default: x86_64-unknown-linux-musl)
+#   TARGET_ARCH    arch to push (default: x86_64-unknown-linux-gnu)
 #   SERVICE_NAME   systemd unit (default: corlinman)
 
 set -euo pipefail
@@ -26,7 +26,7 @@ set -euo pipefail
 : "${TARGET_USER:?Set TARGET_USER}"
 : "${TARGET_HOST:?Set TARGET_HOST}"
 TARGET_PREFIX="${TARGET_PREFIX:-/opt/corlinman}"
-TARGET_ARCH="${TARGET_ARCH:-x86_64-unknown-linux-musl}"
+TARGET_ARCH="${TARGET_ARCH:-x86_64-unknown-linux-gnu}"
 SERVICE_NAME="${SERVICE_NAME:-corlinman}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
