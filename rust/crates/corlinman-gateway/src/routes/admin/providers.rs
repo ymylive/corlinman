@@ -205,13 +205,20 @@ async fn upsert_provider(
     if body.name.trim().is_empty() {
         return bad_request("invalid_name", "provider name must be non-empty");
     }
-    // openai_compatible requires base_url (feature-c §1).
-    if matches!(body.kind, ProviderKind::OpenaiCompatible)
-        && body.base_url.as_deref().unwrap_or("").is_empty()
+    // openai_compatible + sub2api both require base_url. openai_compatible
+    // has no canonical endpoint by design; sub2api is operator-hosted.
+    if matches!(
+        body.kind,
+        ProviderKind::OpenaiCompatible | ProviderKind::Sub2api
+    ) && body.base_url.as_deref().unwrap_or("").is_empty()
     {
+        let kind_str = match body.kind {
+            ProviderKind::Sub2api => "sub2api",
+            _ => "openai_compatible",
+        };
         return bad_request(
             "base_url_required",
-            "providers of kind 'openai_compatible' must supply a base_url",
+            &format!("providers of kind '{kind_str}' must supply a base_url"),
         );
     }
     // First-party slot names are reserved for their matching kind — keeps
@@ -334,14 +341,20 @@ async fn patch_provider(
         }
         merged.params = params;
     }
-    // openai_compatible still requires base_url after the patch is applied.
+    // openai_compatible + sub2api still require base_url after the patch is applied.
     let resolved_kind = merged.kind.or_else(|| ProviderKind::from_slot_name(&name));
-    if matches!(resolved_kind, Some(ProviderKind::OpenaiCompatible))
-        && merged.base_url.as_deref().unwrap_or("").is_empty()
+    if matches!(
+        resolved_kind,
+        Some(ProviderKind::OpenaiCompatible) | Some(ProviderKind::Sub2api)
+    ) && merged.base_url.as_deref().unwrap_or("").is_empty()
     {
+        let kind_str = match resolved_kind {
+            Some(ProviderKind::Sub2api) => "sub2api",
+            _ => "openai_compatible",
+        };
         return bad_request(
             "base_url_required",
-            "providers of kind 'openai_compatible' must supply a base_url",
+            &format!("providers of kind '{kind_str}' must supply a base_url"),
         );
     }
 
@@ -535,7 +548,8 @@ pub(crate) fn params_schema_for(kind: ProviderKind) -> JsonValue {
         | ProviderKind::Groq
         | ProviderKind::Replicate
         | ProviderKind::Bedrock
-        | ProviderKind::Azure => openai_schema(),
+        | ProviderKind::Azure
+        | ProviderKind::Sub2api => openai_schema(),
     }
 }
 
@@ -1095,6 +1109,107 @@ mod tests {
             "openai slot should appear in py-config.json; got {parsed}"
         );
     }
+
+
+
+    #[tokio::test]
+    async fn upsert_rejects_sub2api_without_base_url() {
+        // sub2api shares OpenAI wire shape but is operator-hosted — there is
+        // no default URL the adapter can fall back to. The handler must
+        // reject an upsert that omits base_url with the same
+        // `base_url_required` code as openai_compatible.
+        let tmp = TempDir::new().unwrap();
+        let state = base_state(Some(tmp.path().join("config.toml")));
+        let app = router(state);
+        let body = json!({
+            "name": "subhub",
+            "kind": "sub2api",
+            "api_key": { "env": "SUB2API_KEY" },
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "base_url_required");
+        // The message names the kind so the operator sees "sub2api" rather
+        // than a generic "openai_compatible" hint inherited from a shared
+        // string.
+        let msg = v["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("sub2api"),
+            "message should mention sub2api; got {msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_persists_sub2api_slot_and_renders_py_config() {
+        // End-to-end on the admin side of the sub2api round-trip: upsert a
+        // sub2api provider with a base_url, then assert (a) the slot lands
+        // in config.toml with `kind = "sub2api"`, and (b) the py-config.json
+        // emitted for the Python side carries `kind: "sub2api"` so the
+        // Python ProviderRegistry routes it through OpenAICompatibleProvider.
+        // This is the Phase-3 minimal-slice contract: corlinman treats
+        // sub2api as a named OpenAI-compat upstream, no schema mirror.
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let py_path = tmp.path().join("py-config.json");
+        let mut state = base_state(Some(cfg_path.clone()));
+        state = state.with_py_config_path(py_path.clone());
+        let app = router(state.clone());
+        let body = json!({
+            "name": "subhub",
+            "kind": "sub2api",
+            "enabled": true,
+            "base_url": "http://127.0.0.1:7980",
+            "api_key": { "env": "SUB2API_KEY" },
+            "params": { "temperature": 0.4 }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // config.toml carries the new slot.
+        let toml_text = tokio::fs::read_to_string(&cfg_path).await.unwrap();
+        assert!(
+            toml_text.contains("[providers.subhub]")
+                && toml_text.contains("kind = \"sub2api\""),
+            "config.toml should carry sub2api slot; got:\n{toml_text}"
+        );
+
+        // py-config.json carries the kind in the snake_case wire shape so
+        // the Python registry's _KIND_TO_CLASS lookup matches
+        // ProviderKind.SUB2API → OpenAICompatibleProvider.
+        assert!(py_path.exists(), "py-config.json should be written");
+        let parsed: JsonValue =
+            serde_json::from_str(&tokio::fs::read_to_string(&py_path).await.unwrap()).unwrap();
+        let providers = parsed["providers"].as_array().unwrap();
+        let subhub = providers
+            .iter()
+            .find(|p| p["name"] == "subhub")
+            .expect("subhub slot must appear in py-config.json");
+        assert_eq!(subhub["kind"], "sub2api");
+        assert_eq!(subhub["base_url"], "http://127.0.0.1:7980");
+        assert_eq!(subhub["enabled"], true);
+    }
+
 
     /// PR-#2 review issue #1: posting a literal `api_key.value` of
     /// `"***REDACTED***"` for a slot that has *no* matching entry in the

@@ -62,3 +62,15 @@ load-bearing components:
 Code in this repository is licensed under the terms in `LICENSE`. Third-party
 code is attributed inline where vendored and listed under the authoritative
 lockfiles (`Cargo.lock`, `uv.lock`, `pnpm-lock.yaml`) with their own licenses.
+
+## Upstream reference projects
+
+### Wei-Shaw/sub2api
+
+We integrate [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) as a
+sidecar process. corlinman registers a `ProviderKind::Sub2api` that dials
+sub2api over HTTP — sub2api itself is not vendored, linked, or otherwise
+combined with this binary. **License: LGPL-3.0-or-later.** Sidecar
+deployment honours the LGPL boundary; see
+`docs/design/sub2api-integration.md` for the architecture and licence
+reasoning.

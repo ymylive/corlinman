@@ -64,6 +64,7 @@ side mirrors it in
 | `replicate`         | `https://api.replicate.com/openai/v1`               | Bearer token           | Yes       | OpenAI-compat predictions endpoint.                                                    |
 | `bedrock`           | n/a                                                 | SigV4 (TODO)           | n/a       | **Declared-only stub.** Runtime raises `NotImplementedError`. See workaround below.    |
 | `azure`             | n/a                                                 | API key + deployment   | n/a       | **Declared-only stub.** Runtime raises `NotImplementedError`. See workaround below.    |
+| `sub2api`           | **none — `base_url` REQUIRED**                      | Bearer token           | No\*      | OpenAI-wire sidecar for subscription pooling ([Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api), LGPL-3.0). \*Embedding endpoint not advertised; declare a separate paid provider for embeddings. See `docs/design/sub2api-integration.md`. |
 
 The seven kinds added in the free-form-providers refactor (`mistral`,
 `cohere`, `together`, `groq`, `replicate`, `bedrock`, `azure`) all dispatch
