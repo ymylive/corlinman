@@ -50,7 +50,20 @@ detect_arch() {
     m="$(uname -m)"
     case "$m" in
         x86_64|amd64) echo "x86_64" ;;
-        aarch64|arm64) echo "aarch64" ;;
+        aarch64|arm64)
+            local os
+            os="$(uname -s)"
+            if [[ "$os" == "Darwin" ]]; then
+                echo "aarch64"
+            else
+                # Linux aarch64 prebuilts aren't currently published — numkong
+                # cross-compile blocker. Fall back to source build.
+                die "Linux aarch64 prebuilts are not yet published. Build from source:
+  git clone https://github.com/ymylive/corlinman && cd corlinman
+  cargo build --release -p corlinman-gateway -p corlinman-cli
+See docs/dev/build-fast.md for native build tips."
+            fi
+            ;;
         *) die "unsupported arch: $m" ;;
     esac
 }

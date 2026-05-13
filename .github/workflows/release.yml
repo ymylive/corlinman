@@ -105,8 +105,21 @@ jobs:
             dist/corlinman-*-x86_64-unknown-linux-gnu.tar.gz
             dist/corlinman-*-x86_64-unknown-linux-gnu.tar.gz.sha256
 
-  build-aarch64-linux:
+  # aarch64-linux-gnu cross-compile is currently disabled. numkong (a
+  # transitive dep of usearch) emits NEON SDOT intrinsics under
+  # always_inline + target("dotprod") attributes that the
+  # aarch64-linux-gnu-gcc cross compiler (any GCC version we tried, up
+  # through 13 on cross-rs :edge) can't satisfy when the caller is
+  # compiled with the default `-march=armv8-a` baseline. Six runs
+  # exhausted: stock GCC 9, ppa GCC 11 (package not published for
+  # focal arm64), and :edge with GCC 13 all hit the same
+  # "target specific option mismatch" failure. Operators on Graviton /
+  # Ampere should build from source (`cargo install --path ...`) until
+  # we either patch numkong upstream or pin a usearch version without
+  # this dependency. x86_64 + macOS prebuilts still ship.
+  build-aarch64-linux-disabled:
     name: Build aarch64-linux-gnu (cross from amd64)
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
