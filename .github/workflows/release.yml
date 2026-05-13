@@ -1,8 +1,17 @@
 name: release
 
-# Trigger on annotated/v* tags. Tag locally (`git tag v0.5.0 && git
-# push --tags`) or use `gh release create v0.5.0 --generate-notes`
-# to fire this workflow.
+# Triggered on annotated v* tags (and manual dispatch). Two jobs:
+#
+#   1. build-x86_64-linux: compiles natively on ubuntu-latest
+#      (amd64 runner, GCC modern enough for usearch's numkong
+#      AVX-512 intrinsics), packages, uploads to the release.
+#
+#   2. upload-local-artifacts: attaches whatever the maintainer
+#      pre-built locally (macOS + aarch64-linux-gnu from
+#      `./scripts/build-release.sh`). Expected to live in
+#      a committed `dist/` directory or be re-attached after-tag
+#      via `gh release upload`. This job is a sanity check that
+#      surfaces missing artifacts.
 
 on:
   push:
@@ -10,36 +19,88 @@ on:
       - "v*"
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
 jobs:
-  upload:
-    name: Upload prebuilt artifacts to Release
-    # The actual cross-compile runs on the maintainer's laptop via
-    # scripts/build-release.sh — CI runners are slow and rate-limited
-    # for cross compilation. This job just attaches whatever sits in
-    # dist/ on the tagged commit. The maintainer is expected to have
-    # built and tagged before pushing.
+  build-x86_64-linux:
+    name: Build x86_64-linux-gnu (native)
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Sanity-check dist/
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target-x86_64-linux-gnu
+          key: cargo-x86_64-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-x86_64-${{ runner.os }}-
+
+      - name: Install build prerequisites
         run: |
-          if [[ ! -d dist || -z "$(ls -A dist/*.tar.gz 2>/dev/null)" ]]; then
-            echo "No prebuilt artifacts found in dist/." >&2
-            echo "Run scripts/build-release.sh locally and commit dist/ before tagging." >&2
-            exit 1
-          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: Resolve version + tag
+        id: meta
+        run: |
+          VERSION=$(grep -E '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binaries
+        run: |
+          export CARGO_TARGET_DIR=target-x86_64-linux-gnu
+          cargo build --release --target x86_64-unknown-linux-gnu \
+            --bin corlinman-gateway \
+            --bin corlinman \
+            --bin corlinman-auto-rollback \
+            --bin corlinman-shadow-tester
+
+      - name: Package
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          TARGET="x86_64-unknown-linux-gnu"
+          OUTDIR="dist/corlinman-${VERSION}-${TARGET}"
+          mkdir -p "$OUTDIR"
+          for b in corlinman-gateway corlinman corlinman-auto-rollback corlinman-shadow-tester; do
+            cp "target-x86_64-linux-gnu/${TARGET}/release/${b}" "$OUTDIR/"
+            strip "$OUTDIR/$b" 2>/dev/null || true
+          done
+          cat > "$OUTDIR/README" <<EOF
+          corlinman ${VERSION}
+          target: ${TARGET}
+          built on: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          source: ${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }}
+          EOF
+          ARCHIVE="corlinman-${VERSION}-${TARGET}.tar.gz"
+          (cd dist && tar -czf "$ARCHIVE" "$(basename "$OUTDIR")")
+          (cd dist && shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256")
           ls -lh dist/
 
       - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag }}
           files: |
-            dist/*.tar.gz
-            dist/*.sha256
-          generate_release_notes: true
+            dist/corlinman-*-x86_64-unknown-linux-gnu.tar.gz
+            dist/corlinman-*-x86_64-unknown-linux-gnu.tar.gz.sha256
           fail_on_unmatched_files: true
+
+      - name: Upload as workflow artifact (when manually dispatched)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: corlinman-x86_64-unknown-linux-gnu
+          path: |
+            dist/corlinman-*-x86_64-unknown-linux-gnu.tar.gz
+            dist/corlinman-*-x86_64-unknown-linux-gnu.tar.gz.sha256

@@ -8,19 +8,45 @@
 # Pass through git refs so build scripts that stamp version info
 # (e.g. for the gateway's --version output) can read them.
 passthrough = ["GIT_SHA", "GIT_TAG"]
+# rustc 1.95 defaults to invoking lld inside the cross-rs container,
+# which intermittently SIGSEGVs under QEMU emulation on Apple Silicon
+# hosts (zmij/proc-macro2 build scripts repro). Force the classic BFD
+# linker for the cross targets — slower but stable.
+volumes = []
 
 [target.x86_64-unknown-linux-gnu]
+# Disable rustc's bundled lld for this target — it SIGSEGVs under QEMU
+# emulation when linking build scripts (zmij, proc-macro2 reproducers).
+# Fall back to the classic BFD ld which is rock-stable under emulation.
+rustflags = ["-C", "linker-features=-lld"]
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update",
-    "apt-get install -y --no-install-recommends protobuf-compiler",
+    "apt-get install -y --no-install-recommends software-properties-common gpg-agent",
+    # Default cross-rs GNU image is Ubuntu 20.04 (GCC 9). usearch's
+    # numkong dep uses AVX-512 ICELake intrinsics that require GCC ≥ 11.
+    # ppa:ubuntu-toolchain-r/test is the canonical place to get newer
+    # GCC on Ubuntu 20.04.
+    "add-apt-repository -y ppa:ubuntu-toolchain-r/test",
+    "apt-get update",
+    "apt-get install -y --no-install-recommends gcc-11 g++-11 protobuf-compiler",
+    "update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100",
+    "update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100",
+    "update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-11 100",
+    "update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-11 100",
 ]
 
 [target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "linker-features=-lld"]
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update",
-    "apt-get install -y --no-install-recommends protobuf-compiler",
+    "apt-get install -y --no-install-recommends software-properties-common gpg-agent",
+    "add-apt-repository -y ppa:ubuntu-toolchain-r/test",
+    "apt-get update",
+    "apt-get install -y --no-install-recommends gcc-11 g++-11 gcc-11-aarch64-linux-gnu g++-11-aarch64-linux-gnu protobuf-compiler",
+    "update-alternatives --install /usr/bin/aarch64-linux-gnu-gcc aarch64-linux-gnu-gcc /usr/bin/aarch64-linux-gnu-gcc-11 100",
+    "update-alternatives --install /usr/bin/aarch64-linux-gnu-g++ aarch64-linux-gnu-g++ /usr/bin/aarch64-linux-gnu-g++-11 100",
 ]
 
 # Note: we previously targeted *-linux-musl for static binaries, but
