@@ -64,7 +64,7 @@ side mirrors it in
 | `replicate`         | `https://api.replicate.com/openai/v1`               | Bearer token           | Yes       | OpenAI-compat predictions endpoint.                                                    |
 | `bedrock`           | n/a                                                 | SigV4 (TODO)           | n/a       | **Declared-only stub.** Runtime raises `NotImplementedError`. See workaround below.    |
 | `azure`             | n/a                                                 | API key + deployment   | n/a       | **Declared-only stub.** Runtime raises `NotImplementedError`. See workaround below.    |
-| `sub2api`           | **none — `base_url` REQUIRED**                      | Bearer token           | No\*      | OpenAI-wire sidecar for subscription pooling ([Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api), LGPL-3.0). \*Embedding endpoint not advertised; declare a separate paid provider for embeddings. See `docs/design/sub2api-integration.md`. |
+| `newapi`            | **none — `base_url` REQUIRED**                      | Bearer token           | Yes       | OpenAI-wire sidecar for channel pooling ([QuantumNous/new-api](https://github.com/QuantumNous/new-api), MIT). Routes LLM (`/v1/chat/completions`), embedding (`/v1/embeddings`), and audio TTS (`/v1/audio/speech`) through one URL + bearer token. The dedicated kind exists so the admin UI can list channels via the new-api admin API (`newapi_admin_key` in params). Use `corlinman config migrate-sub2api` to migrate legacy `kind = "sub2api"` entries. See `docs/design/newapi-integration.md`. |
 
 The seven kinds added in the free-form-providers refactor (`mistral`,
 `cohere`, `together`, `groq`, `replicate`, `bedrock`, `azure`) all dispatch
