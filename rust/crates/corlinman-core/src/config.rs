@@ -531,7 +531,7 @@ impl SecretRef {
         match self {
             Self::EnvVar { env } => Self::EnvVar { env: env.clone() },
             Self::Literal { .. } => Self::Literal {
-                value: "***REDACTED***".into(),
+                value: REDACTED_SENTINEL.into(),
             },
         }
     }
@@ -2196,12 +2196,23 @@ impl Config {
         Self::load_from_path(&Self::default_path())
     }
 
+    /// Refresh `meta.last_touched_*` in-place to the current crate version
+    /// and an ISO-8601 UTC timestamp. Call this immediately before any
+    /// admin-write code path serialises the config to disk so the audit
+    /// stamps stay accurate — [`Self::save_to_path`] does this for its
+    /// callers, but admin handlers that bypass it (e.g. the gateway's
+    /// `tokio::fs::write` atomic-rename helpers) must invoke this method
+    /// directly before `toml::to_string_pretty`.
+    pub fn stamp_meta(&mut self) {
+        self.meta.last_touched_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        self.meta.last_touched_at = Some(current_timestamp());
+    }
+
     /// Serialise to TOML at `path`, creating parent directories as needed and
     /// refreshing `meta.last_touched_*` to the current version / UTC time.
     pub fn save_to_path(&self, path: &Path) -> Result<(), CorlinmanError> {
         let mut to_write = self.clone();
-        to_write.meta.last_touched_version = Some(env!("CARGO_PKG_VERSION").to_string());
-        to_write.meta.last_touched_at = Some(current_timestamp());
+        to_write.stamp_meta();
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -2506,11 +2517,101 @@ slot. Set `kind = \"...\"` explicitly. Valid kinds: {}",
             }
         }
         if out.admin.password_hash.is_some() {
-            out.admin.password_hash = Some("***REDACTED***".into());
+            out.admin.password_hash = Some(REDACTED_SENTINEL.into());
         }
         out
     }
+
+    /// Restore any field that still carries the [`REDACTED_SENTINEL`]
+    /// string from `source`. Use this before serialising a `Config` that
+    /// originated from the redacted GET payload — otherwise a round-trip
+    /// (GET → edit → POST → write) would clobber the real secrets with
+    /// the literal `"***REDACTED***"` placeholder and lock the operator
+    /// out.
+    ///
+    /// Only fields known to be touched by [`Self::redacted`] are merged:
+    /// provider `api_key` literals, channel access tokens, and
+    /// `admin.password_hash`. Fields the operator legitimately edited to
+    /// some other value are preserved untouched.
+    pub fn merge_redacted_secrets_from(&mut self, source: &Self) {
+        // admin.password_hash
+        if self.admin.password_hash.as_deref() == Some(REDACTED_SENTINEL) {
+            self.admin.password_hash = source.admin.password_hash.clone();
+        }
+
+        // providers.*.api_key
+        for (name, entry) in self.providers.0.iter_mut() {
+            if let Some(SecretRef::Literal { value }) = entry.api_key.as_ref() {
+                if value == REDACTED_SENTINEL {
+                    if let Some(src) = source.providers.0.get(name) {
+                        entry.api_key = src.api_key.clone();
+                    }
+                }
+            }
+        }
+
+        // channels.qq.access_token
+        if let (Some(self_qq), Some(src_qq)) =
+            (self.channels.qq.as_mut(), source.channels.qq.as_ref())
+        {
+            if let Some(SecretRef::Literal { value }) = self_qq.access_token.as_ref() {
+                if value == REDACTED_SENTINEL {
+                    self_qq.access_token = src_qq.access_token.clone();
+                }
+            }
+        }
+
+        // channels.telegram.bot_token
+        if let (Some(self_tg), Some(src_tg)) = (
+            self.channels.telegram.as_mut(),
+            source.channels.telegram.as_ref(),
+        ) {
+            if let Some(SecretRef::Literal { value }) = self_tg.bot_token.as_ref() {
+                if value == REDACTED_SENTINEL {
+                    self_tg.bot_token = src_tg.bot_token.clone();
+                }
+            }
+        }
+    }
+
+    /// `true` if any field still carries the redaction sentinel after a
+    /// would-be save path. Callers that can't reconstruct the original
+    /// secrets (e.g. no in-memory snapshot to merge from) should refuse
+    /// to write rather than corrupt the on-disk file.
+    pub fn has_redacted_sentinel(&self) -> bool {
+        if self.admin.password_hash.as_deref() == Some(REDACTED_SENTINEL) {
+            return true;
+        }
+        for entry in self.providers.0.values() {
+            if let Some(SecretRef::Literal { value }) = entry.api_key.as_ref() {
+                if value == REDACTED_SENTINEL {
+                    return true;
+                }
+            }
+        }
+        if let Some(qq) = self.channels.qq.as_ref() {
+            if let Some(SecretRef::Literal { value }) = qq.access_token.as_ref() {
+                if value == REDACTED_SENTINEL {
+                    return true;
+                }
+            }
+        }
+        if let Some(tg) = self.channels.telegram.as_ref() {
+            if let Some(SecretRef::Literal { value }) = tg.bot_token.as_ref() {
+                if value == REDACTED_SENTINEL {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
+
+/// Literal placeholder string used by [`Config::redacted`] for fields the
+/// `SecretRef::Literal` redactor or `admin.password_hash` redactor erase.
+/// Lives in the public API so save-paths can detect "this is the redacted
+/// echo, not a real secret" and refuse to clobber the on-disk file.
+pub const REDACTED_SENTINEL: &str = "***REDACTED***";
 
 /// Return `true` iff `bind` is a loopback `host:port` (`127.0.0.0/8` or `::1`).
 /// Any unparseable or non-loopback address returns `false`. Best-effort; the
@@ -2890,6 +2991,119 @@ bogus = "field"
             SecretRef::EnvVar { .. } => panic!("expected literal"),
         }
         assert_eq!(red.admin.password_hash.as_deref(), Some("***REDACTED***"));
+    }
+
+    /// Regression for the "GET → edit → POST → write" round-trip that
+    /// destroyed the real `password_hash` (operator lockout). Posting back
+    /// the redacted echo must NOT result in the sentinel landing on disk —
+    /// `merge_redacted_secrets_from` restores the original hash before
+    /// the save path serialises.
+    #[test]
+    fn merge_redacted_secrets_round_trip_preserves_password_hash() {
+        let real_hash = "$argon2id$v=19$m=19456,t=2,p=1$realsaltbytes$realhashbytes";
+        let mut cfg = Config::default();
+        cfg.admin.username = Some("admin".into());
+        cfg.admin.password_hash = Some(real_hash.into());
+
+        // Simulate the wire round-trip: redact → toml → load → write-back.
+        let redacted = cfg.redacted();
+        let wire = toml::to_string_pretty(&redacted).unwrap();
+        let mut posted: Config = toml::from_str(&wire).unwrap();
+        assert_eq!(
+            posted.admin.password_hash.as_deref(),
+            Some(REDACTED_SENTINEL),
+            "redacted echo carries the sentinel"
+        );
+
+        // The save path merges secrets from the live snapshot before
+        // serialising — sentinel must be replaced with the real hash.
+        posted.merge_redacted_secrets_from(&cfg);
+        assert_eq!(
+            posted.admin.password_hash.as_deref(),
+            Some(real_hash),
+            "merge_redacted_secrets_from must restore the real hash"
+        );
+
+        let on_disk = toml::to_string_pretty(&posted).unwrap();
+        assert!(
+            !on_disk.contains(REDACTED_SENTINEL),
+            "on-disk TOML must NOT contain the redaction sentinel; got:\n{on_disk}"
+        );
+        assert!(
+            on_disk.contains(real_hash),
+            "on-disk TOML must carry the real argon2 hash"
+        );
+    }
+
+    #[test]
+    fn has_redacted_sentinel_detects_password_hash_and_provider_key() {
+        let mut cfg = Config::default();
+        assert!(!cfg.has_redacted_sentinel());
+        cfg.admin.password_hash = Some(REDACTED_SENTINEL.into());
+        assert!(cfg.has_redacted_sentinel());
+        cfg.admin.password_hash = Some("real".into());
+        assert!(!cfg.has_redacted_sentinel());
+
+        cfg.providers.insert(
+            "openai",
+            ProviderEntry {
+                api_key: Some(SecretRef::Literal {
+                    value: REDACTED_SENTINEL.into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        assert!(cfg.has_redacted_sentinel());
+    }
+
+    #[test]
+    fn stamp_meta_sets_version_and_iso_timestamp() {
+        // Sprint PR-#2 review: every admin-write path must call
+        // `stamp_meta()` before serialise so the audit trail in
+        // `[meta]` stays accurate. Pre-stamp the fields with junk so
+        // we can assert the helper *replaces* them rather than only
+        // filling in the `None` case.
+        let mut cfg = Config::default();
+        cfg.meta.last_touched_version = Some("stale".into());
+        cfg.meta.last_touched_at = Some("yesterday".into());
+        cfg.stamp_meta();
+        assert_eq!(
+            cfg.meta.last_touched_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "stamp_meta must overwrite stale version",
+        );
+        let ts = cfg
+            .meta
+            .last_touched_at
+            .as_deref()
+            .expect("stamp_meta sets last_touched_at");
+        // RFC 3339 / ISO 8601 — crude shape check: starts with a 4-digit
+        // year and contains a `T` separator. `current_timestamp` already
+        // round-trips through `time::OffsetDateTime`; this just guards
+        // against the helper returning the `"unknown"` fallback.
+        assert_ne!(ts, "unknown", "stamp_meta must format a real timestamp");
+        assert!(ts.contains('T'), "expected ISO 8601 timestamp, got {ts}");
+        assert!(
+            ts.starts_with(|c: char| c.is_ascii_digit()),
+            "expected ISO 8601 timestamp, got {ts}",
+        );
+    }
+
+    #[test]
+    fn merge_redacted_secrets_preserves_explicit_edits() {
+        // Operator legitimately rotated the hash via the POST payload —
+        // merge_redacted_secrets_from must NOT clobber it.
+        let mut source = Config::default();
+        source.admin.password_hash = Some("$argon2id$old".into());
+        let mut posted = Config::default();
+        posted.admin.password_hash = Some("$argon2id$rotated".into());
+        posted.merge_redacted_secrets_from(&source);
+        assert_eq!(
+            posted.admin.password_hash.as_deref(),
+            Some("$argon2id$rotated")
+        );
     }
 
     #[test]
