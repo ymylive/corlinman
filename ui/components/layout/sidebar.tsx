@@ -98,6 +98,7 @@ const ITEMS: NavEntry[] = [
   { href: "/evolution", labelKey: "nav.evolution", icon: Leaf },
   { href: "/models", labelKey: "nav.models", icon: Route },
   { href: "/providers", labelKey: "nav.providers", icon: Plug },
+  { href: "/newapi", labelKey: "nav.newapi", icon: Plug },
   { href: "/embedding", labelKey: "nav.embedding", icon: Sparkles },
   { href: "/tagmemo", labelKey: "nav.tagmemo", icon: Sparkles },
   { href: "/config", labelKey: "nav.config", icon: Settings },

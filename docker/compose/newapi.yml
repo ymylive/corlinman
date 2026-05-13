@@ -1,0 +1,29 @@
+# Optional newapi sidecar compose snippet.
+#
+# Run with:
+#   docker compose -f docker/compose/newapi.yml up -d
+#
+# Then point corlinman's [providers.newapi].base_url at
+# http://localhost:3000. Onboard wizard step 2 takes
+# (URL, user token, system access token) — generate the tokens
+# in the new-api console at http://localhost:3000 after first
+# login (default credentials: root / 123456 — change immediately).
+
+services:
+  newapi:
+    image: calciumion/new-api:latest
+    container_name: corlinman-newapi
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./newapi-data:/data
+    environment:
+      # SQLite default — swap to postgres for HA deployments.
+      - SQL_DSN=sqlite:///data/newapi.db
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:3000/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

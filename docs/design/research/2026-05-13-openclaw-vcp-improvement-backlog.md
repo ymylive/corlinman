@@ -1,6 +1,6 @@
 # openclaw + vcp-tools 改进点 backlog（草稿，待核验）
 
-Status: **草稿 / VERIFICATION NEEDED**. 由 Explore agent (read-only) 输出，未由人工核验 URL 与 feature 真实性。
+Status: **URL verified 2026-05-13** — repo handles confirmed via `gh repo view`. Feature claims (multi-agent routing, geodesic reranking, etc.) remain second-hand from Explore agent's web search; concrete improvement adoption still requires source-level read of each candidate.
 Date: 2026-05-13.
 Owner: B 子项目。
 Related: `CREDITS.md`（两个上游仓库 URL 当前为占位 placeholder）。
@@ -11,8 +11,8 @@ Related: `CREDITS.md`（两个上游仓库 URL 当前为占位 placeholder）。
 
 | 主张 | 状态 |
 |---|---|
-| openclaw 官方仓库 = `https://github.com/openclaw/openclaw` | **未核验**。Explore agent 报告，需人工 `gh repo view` 或浏览器确认 |
-| VCPToolBox 官方仓库 = `https://github.com/lioensky/VCPToolBox` | **未核验**。同上 |
+| openclaw 官方仓库 = `https://github.com/openclaw/openclaw` | ✅ 已核验（gh repo view, 2026-05-13）"personal AI assistant" |
+| VCPToolBox 官方仓库 = `https://github.com/lioensky/VCPToolBox` | ✅ 已核验（gh repo view, 2026-05-13）VCP 协议 + 分布式插件引擎 |
 | Verdent Guides 对比文章 `https://www.verdent.ai/guides/claw-code-claude-code-vs-openclaw` | **未核验** |
 | Feature 主张（multi-agent / voice / Live Canvas 等）| **二手描述**。Agent 转述了搜索结果，未读源码本身 |
 

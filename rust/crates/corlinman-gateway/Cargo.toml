@@ -31,6 +31,7 @@ corlinman-tenant = { path = "../corlinman-tenant" }
 corlinman-replay = { path = "../corlinman-replay" }
 corlinman-identity = { path = "../corlinman-identity" }
 corlinman-mcp = { path = "../corlinman-mcp" }
+corlinman-newapi-client = { path = "../corlinman-newapi-client" }
 corlinman-skills = { path = "../corlinman-skills" }
 corlinman-memory-host = { path = "../corlinman-memory-host" }
 # Phase 4 W3 C3 iter 8 — Canvas Host renderer is pulled in here so

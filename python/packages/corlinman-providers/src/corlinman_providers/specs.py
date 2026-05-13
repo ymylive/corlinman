@@ -50,11 +50,11 @@ class ProviderKind(StrEnum):
     REPLICATE = "replicate"
     BEDROCK = "bedrock"
     AZURE = "azure"
-    # sub2api (Wei-Shaw/sub2api) sidecar — OAuth-subscription pooling
-    # exposed over OpenAI-compat. Wire shape is identical to
-    # ``openai_compatible``; the named kind exists so admin UIs / configs
-    # document operator intent. See ``docs/design/sub2api-integration.md``.
-    SUB2API = "sub2api"
+    # new-api (QuantumNous/new-api) sidecar — OpenAI-wire channel pooling
+    # manager. corlinman dispatches via the shared OpenAICompatibleProvider;
+    # the named kind exists so the admin UI / inspection commands can
+    # document operator intent. See ``docs/design/newapi-integration.md``.
+    NEWAPI = "newapi"
 
 
 class ProviderSpec(BaseModel):

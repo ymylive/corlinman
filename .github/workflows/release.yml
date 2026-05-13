@@ -1,0 +1,45 @@
+name: release
+
+# Trigger on annotated/v* tags. Tag locally (`git tag v0.5.0 && git
+# push --tags`) or use `gh release create v0.5.0 --generate-notes`
+# to fire this workflow.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  upload:
+    name: Upload prebuilt artifacts to Release
+    # The actual cross-compile runs on the maintainer's laptop via
+    # scripts/build-release.sh — CI runners are slow and rate-limited
+    # for cross compilation. This job just attaches whatever sits in
+    # dist/ on the tagged commit. The maintainer is expected to have
+    # built and tagged before pushing.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sanity-check dist/
+        run: |
+          if [[ ! -d dist || -z "$(ls -A dist/*.tar.gz 2>/dev/null)" ]]; then
+            echo "No prebuilt artifacts found in dist/." >&2
+            echo "Run scripts/build-release.sh locally and commit dist/ before tagging." >&2
+            exit 1
+          fi
+          ls -lh dist/
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true

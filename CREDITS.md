@@ -26,8 +26,7 @@ from external reference implementations.
   `python/packages/corlinman-tagmemo/` reproduce the math described by the
   TagMemo subsystem in this project.
 
-Repository: `https://github.com/` — specific URL to be added before the first
-public release.
+Repository: https://github.com/lioensky/VCPToolBox
 
 ### openclaw
 - **Hook event bus shape** — the lifecycle event names
@@ -41,8 +40,7 @@ public release.
   on the `Channel` trait in `rust/crates/corlinman-channels/src/lib.rs` follow
   openclaw's channel adapter model.
 
-Repository: `https://github.com/` — specific URL to be added before the first
-public release.
+Repository: https://github.com/openclaw/openclaw
 
 ## Third-party libraries
 
@@ -65,12 +63,18 @@ lockfiles (`Cargo.lock`, `uv.lock`, `pnpm-lock.yaml`) with their own licenses.
 
 ## Upstream reference projects
 
-### Wei-Shaw/sub2api
+### QuantumNous/new-api
 
-We integrate [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) as a
-sidecar process. corlinman registers a `ProviderKind::Sub2api` that dials
-sub2api over HTTP — sub2api itself is not vendored, linked, or otherwise
-combined with this binary. **License: LGPL-3.0-or-later.** Sidecar
-deployment honours the LGPL boundary; see
-`docs/design/sub2api-integration.md` for the architecture and licence
-reasoning.
+We integrate [QuantumNous/new-api](https://github.com/QuantumNous/new-api)
+as a sidecar process. corlinman registers a `ProviderKind::Newapi` that
+dials new-api over HTTP — new-api itself is not vendored, linked, or
+otherwise combined with this binary. **License: MIT.** corlinman ships a
+thin HTTP admin client (`corlinman-newapi-client`) for channel discovery
+and health checks; the wire format is plain OpenAI-compat (chat,
+embeddings, audio TTS). See `docs/design/newapi-integration.md` for the
+architecture.
+
+The previous integration (Wei-Shaw/sub2api, LGPL-3.0) was removed in the
+v0.5.0 cycle. Operators with legacy `kind = "sub2api"` config entries
+should run `corlinman config migrate-sub2api --apply` and follow
+`docs/migration/sub2api-to-newapi.md`.

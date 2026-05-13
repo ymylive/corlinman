@@ -103,11 +103,29 @@ Deep dive: [`docs/architecture.md`](docs/architecture.md).
 
 ## Quickstart
 
-### 30-second Docker (recommended)
+### Fastest: one-line installer (recommended)
 
 ```bash
-# Build locally (no prebuilt image yet — coming in 0.2.x).
-# Host needs docker + buildx. Output is a single ~170 MB linux/amd64 image.
+# Prebuilt binary + docker compose for newapi sidecar. Detects arch,
+# verifies checksums, runs as systemd unit (native mode) or compose
+# stack (docker mode). Linux x86_64 / aarch64, macOS aarch64.
+curl -fsSL https://raw.githubusercontent.com/ymylive/corlinman/main/deploy/install.sh \
+  | bash -s -- --mode docker
+```
+
+On first run the installer points your browser at
+`http://localhost:6005/onboard` for the 4-step wizard: admin
+account → newapi connection (token + base URL) → pick default
+LLM / embedding / TTS models → confirm. The wizard writes a
+complete `config.toml` atomically.
+
+For a fully-native install with no Docker, swap `--mode docker` for
+`--mode native`. See [`deploy/install.sh`](deploy/install.sh).
+
+### From source
+
+```bash
+# Build locally. Host needs docker + buildx. Output is a single image.
 git clone https://github.com/ymylive/corlinman && cd corlinman
 docker buildx build --platform linux/amd64 \
   -f docker/Dockerfile -t corlinman:latest --target runtime --load .
@@ -117,7 +135,8 @@ docker compose -f docker/compose/docker-compose.yml up -d
 ```
 
 Visit `http://127.0.0.1:6005/health` to confirm, then open the admin UI.
-On first run, generate credentials and configure at least one provider:
+On first run, walk the 4-step onboard wizard at `/onboard`, or use the
+CLI wizard:
 
 ```bash
 docker exec -it corlinman corlinman onboard
@@ -249,6 +268,7 @@ a config reload, no channel restart.
 | Qwen       |  ✅  |    ✅     |     ✅     |    n/a     | production   |
 | GLM        |  ✅  |    ✅     |     ✅     |    n/a     | production   |
 | _OpenAI-compatible_ (local vLLM, Ollama, SiliconFlow, any gateway speaking the spec) |  ✅  | ✅ | ✅ | ✅ | works via `providers.openai.base_url` |
+| **newapi** ([QuantumNous/new-api](https://github.com/QuantumNous/new-api)) | ✅ | ✅ | ✅ | ✅ | sidecar pools LLM + embedding + audio TTS channels behind one URL; managed via `/admin/newapi` and the onboard wizard. MIT licence. |
 
 Custom providers are a ~200-line Python class: subclass
 `corlinman_providers.base.CorlinmanProvider`, register a model-name
