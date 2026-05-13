@@ -6,11 +6,35 @@ All notable changes to corlinman are documented here. Format follows
 
 ## [Unreleased] — targets v0.5.0
 
-Free-form named providers + 7 new market `kind`s. Full notes:
+Free-form named providers + 7 new market `kind`s, **plus a BREAKING swap
+from `sub2api` to `newapi`** as the channel-pool sidecar. Full notes:
 [`docs/release-notes-v0.5.0.md`](docs/release-notes-v0.5.0.md).
+
+### Removed (BREAKING)
+
+- **`ProviderKind::Sub2api` removed.** The `kind = "sub2api"` provider entry
+  is no longer recognised. Replace with `kind = "newapi"` pointing at a
+  [QuantumNous/new-api](https://github.com/QuantumNous/new-api) instance.
+  Run `corlinman config migrate-sub2api --apply` to rewrite legacy entries
+  automatically. See [`docs/migration/sub2api-to-newapi.md`](docs/migration/sub2api-to-newapi.md).
 
 ### Added
 
+- **`ProviderKind::Newapi`** + new-api admin client crate
+  (`corlinman-newapi-client`). MIT-licensed sidecar that pools channels
+  (LLM / embedding / audio TTS) behind one OpenAI-wire endpoint. Replaces
+  the LGPL-3.0 sub2api integration.
+- **4-step interactive onboard wizard** (account → newapi connect →
+  pick defaults → confirm). The gateway calls new-api's `/api/channel`
+  to populate model dropdowns; the operator only types the URL + token
+  once.
+- **`/admin/newapi` connector page** with live channel health, usage
+  quota, token TTL, and a 1-token round-trip test button.
+- **`corlinman config migrate-sub2api [--dry-run|--apply]`** CLI
+  subcommand that rewrites legacy `kind = "sub2api"` entries to
+  `kind = "newapi"` in place (with backup).
+- **Full i18n coverage (zh-CN + en)** for the new onboard wizard and
+  admin newapi page.
 - **Free-form `[providers.*]` configuration**: the providers section is
   now a `BTreeMap<String, ProviderEntry>` keyed by an operator-chosen
   name. Add OpenRouter, SiliconFlow, Ollama, vLLM, or any other
