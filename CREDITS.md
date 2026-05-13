@@ -26,8 +26,7 @@ from external reference implementations.
   `python/packages/corlinman-tagmemo/` reproduce the math described by the
   TagMemo subsystem in this project.
 
-Repository: `https://github.com/` — specific URL to be added before the first
-public release.
+Repository: https://github.com/lioensky/VCPToolBox
 
 ### openclaw
 - **Hook event bus shape** — the lifecycle event names
@@ -41,8 +40,7 @@ public release.
   on the `Channel` trait in `rust/crates/corlinman-channels/src/lib.rs` follow
   openclaw's channel adapter model.
 
-Repository: `https://github.com/` — specific URL to be added before the first
-public release.
+Repository: https://github.com/openclaw/openclaw
 
 ## Third-party libraries
 
