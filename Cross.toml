@@ -15,10 +15,6 @@ passthrough = ["GIT_SHA", "GIT_TAG"]
 volumes = []
 
 [target.x86_64-unknown-linux-gnu]
-# Disable rustc's bundled lld for this target — it SIGSEGVs under QEMU
-# emulation when linking build scripts (zmij, proc-macro2 reproducers).
-# Fall back to the classic BFD ld which is rock-stable under emulation.
-rustflags = ["-C", "linker-features=-lld"]
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update",
@@ -39,8 +35,7 @@ pre-build = [
 [target.aarch64-unknown-linux-gnu]
 # aarch64 doesn't need the GCC 11 dance — numkong on ARM uses NEON
 # intrinsics, not AVX-512, so the stock GCC 9 in the cross image
-# handles them fine. Just protoc + a stable linker.
-rustflags = ["-C", "linker-features=-lld"]
+# handles them fine. Just protoc.
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update",
