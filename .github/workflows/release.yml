@@ -104,3 +104,81 @@ jobs:
           path: |
             dist/corlinman-*-x86_64-unknown-linux-gnu.tar.gz
             dist/corlinman-*-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+  build-aarch64-linux:
+    name: Build aarch64-linux-gnu (cross from amd64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target-aarch64-linux-gnu
+          key: cargo-aarch64-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-aarch64-${{ runner.os }}-
+
+      - name: Install cross
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross --locked
+
+      - name: Resolve version + tag
+        id: meta
+        run: |
+          VERSION=$(grep -E '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-build release binaries
+        # No QEMU emulation issues here: the runner is native amd64,
+        # cross's container is amd64, only the target binary is arm64.
+        run: |
+          export CARGO_TARGET_DIR=target-aarch64-linux-gnu
+          cross build --release --target aarch64-unknown-linux-gnu \
+            --bin corlinman-gateway \
+            --bin corlinman \
+            --bin corlinman-auto-rollback \
+            --bin corlinman-shadow-tester
+
+      - name: Package
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          TARGET="aarch64-unknown-linux-gnu"
+          OUTDIR="dist/corlinman-${VERSION}-${TARGET}"
+          mkdir -p "$OUTDIR"
+          for b in corlinman-gateway corlinman corlinman-auto-rollback corlinman-shadow-tester; do
+            cp "target-aarch64-linux-gnu/${TARGET}/release/${b}" "$OUTDIR/"
+            # Use the cross-build's strip (aarch64-linux-gnu-strip) so
+            # the host amd64 strip doesn't refuse the foreign arch.
+            aarch64-linux-gnu-strip "$OUTDIR/$b" 2>/dev/null \
+              || sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu \
+              && aarch64-linux-gnu-strip "$OUTDIR/$b" 2>/dev/null \
+              || true
+          done
+          cat > "$OUTDIR/README" <<EOF
+          corlinman ${VERSION}
+          target: ${TARGET}
+          built on: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          source: ${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }}
+          EOF
+          ARCHIVE="corlinman-${VERSION}-${TARGET}.tar.gz"
+          (cd dist && tar -czf "$ARCHIVE" "$(basename "$OUTDIR")")
+          (cd dist && shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256")
+          ls -lh dist/
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          files: |
+            dist/corlinman-*-aarch64-unknown-linux-gnu.tar.gz
+            dist/corlinman-*-aarch64-unknown-linux-gnu.tar.gz.sha256
+          fail_on_unmatched_files: true
