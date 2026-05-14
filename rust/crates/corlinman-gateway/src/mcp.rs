@@ -167,8 +167,10 @@ mod tests {
 
     #[test]
     fn build_router_returns_none_when_disabled() {
-        let mut cfg = McpConfig::default();
-        cfg.enabled = false;
+        let cfg = McpConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let plugins = Arc::new(PluginRegistry::default());
         let skills = Arc::new(SkillRegistry::default());
         let hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
@@ -178,22 +180,24 @@ mod tests {
 
     #[test]
     fn build_server_config_carries_frame_cap_and_tokens() {
-        let mut cfg = McpConfig::default();
-        cfg.server = McpServerSection {
-            bind: "127.0.0.1:18791".into(),
-            allowed_origins: vec![],
-            max_frame_bytes: 8192,
-            inactivity_timeout_secs: 300,
-            heartbeat_secs: 20,
-            max_concurrent_sessions: 4,
-            tokens: vec![McpTokenConfig {
-                token: "tok-1".into(),
-                label: "lap".into(),
-                tools_allowlist: vec!["*".into()],
-                resources_allowed: vec!["*".into()],
-                prompts_allowed: vec!["*".into()],
-                tenant_id: None,
-            }],
+        let cfg = McpConfig {
+            server: McpServerSection {
+                bind: "127.0.0.1:18791".into(),
+                allowed_origins: vec![],
+                max_frame_bytes: 8192,
+                inactivity_timeout_secs: 300,
+                heartbeat_secs: 20,
+                max_concurrent_sessions: 4,
+                tokens: vec![McpTokenConfig {
+                    token: "tok-1".into(),
+                    label: "lap".into(),
+                    tools_allowlist: vec!["*".into()],
+                    resources_allowed: vec!["*".into()],
+                    prompts_allowed: vec!["*".into()],
+                    tenant_id: None,
+                }],
+            },
+            ..Default::default()
         };
         let s = build_server_config(&cfg);
         assert_eq!(s.max_frame_bytes, 8192);

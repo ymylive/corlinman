@@ -766,11 +766,13 @@ mod tests {
     async fn voice_disabled_when_section_present_but_flag_off() {
         // Operator may keep the section around with `enabled = false`
         // for reference; the route still 503s.
-        let mut cfg = Config::default();
-        cfg.voice = Some(VoiceConfig {
-            enabled: false,
-            ..VoiceConfig::default()
-        });
+        let cfg = Config {
+            voice: Some(VoiceConfig {
+                enabled: false,
+                ..VoiceConfig::default()
+            }),
+            ..Default::default()
+        };
         let resp = router_for(cfg).oneshot(get_voice()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -781,11 +783,13 @@ mod tests {
         // without subprotocol header is rejected first by the
         // negotiation step → 400 subprotocol_rejected. Iter-1's 501
         // stub is gone.
-        let mut cfg = Config::default();
-        cfg.voice = Some(VoiceConfig {
-            enabled: true,
-            ..VoiceConfig::default()
-        });
+        let cfg = Config {
+            voice: Some(VoiceConfig {
+                enabled: true,
+                ..VoiceConfig::default()
+            }),
+            ..Default::default()
+        };
         let resp = router_for(cfg).oneshot(get_voice()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
@@ -797,11 +801,13 @@ mod tests {
     async fn voice_enabled_subprotocol_ok_but_no_upgrade_426s() {
         // Subprotocol matched but no `Upgrade: websocket` headers →
         // 426 Upgrade Required (RFC 7231 §6.5.15).
-        let mut cfg = Config::default();
-        cfg.voice = Some(VoiceConfig {
-            enabled: true,
-            ..VoiceConfig::default()
-        });
+        let cfg = Config {
+            voice: Some(VoiceConfig {
+                enabled: true,
+                ..VoiceConfig::default()
+            }),
+            ..Default::default()
+        };
         let req = Request::builder()
             .method("GET")
             .uri("/voice")
@@ -836,11 +842,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         // Hot-flip enabled.
-        let mut next = Config::default();
-        next.voice = Some(VoiceConfig {
-            enabled: true,
-            ..VoiceConfig::default()
-        });
+        let next = Config {
+            voice: Some(VoiceConfig {
+                enabled: true,
+                ..VoiceConfig::default()
+            }),
+            ..Default::default()
+        };
         arcs.store(Arc::new(next));
 
         let resp = app.oneshot(get_voice()).await.unwrap();
@@ -866,11 +874,13 @@ mod tests {
     }
 
     fn enabled_voice_router() -> Router {
-        let mut cfg = Config::default();
-        cfg.voice = Some(VoiceConfig {
-            enabled: true,
-            ..VoiceConfig::default()
-        });
+        let cfg = Config {
+            voice: Some(VoiceConfig {
+                enabled: true,
+                ..VoiceConfig::default()
+            }),
+            ..Default::default()
+        };
         router_for(cfg)
     }
 
@@ -939,13 +949,14 @@ mod tests {
     }
 
     fn enabled_cfg(budget_min: u32) -> Config {
-        let mut cfg = Config::default();
-        cfg.voice = Some(VoiceConfig {
-            enabled: true,
-            budget_minutes_per_tenant_per_day: budget_min,
-            ..VoiceConfig::default()
-        });
-        cfg
+        Config {
+            voice: Some(VoiceConfig {
+                enabled: true,
+                budget_minutes_per_tenant_per_day: budget_min,
+                ..VoiceConfig::default()
+            }),
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
@@ -1098,11 +1109,13 @@ mod tests {
         // (the iter-3 default) still routes 503 / 400 / 426 the same
         // way — proves the seam additions don't change behaviour for
         // operators who haven't enabled persistence.
-        let mut cfg = Config::default();
-        cfg.voice = Some(VoiceConfig {
-            enabled: true,
-            ..VoiceConfig::default()
-        });
+        let cfg = Config {
+            voice: Some(VoiceConfig {
+                enabled: true,
+                ..VoiceConfig::default()
+            }),
+            ..Default::default()
+        };
         let resp = router_for(cfg).oneshot(get_voice()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }

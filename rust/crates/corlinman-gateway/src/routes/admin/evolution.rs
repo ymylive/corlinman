@@ -244,7 +244,7 @@ fn assert_meta_approver(
     state: &AdminState,
     kind: EvolutionKind,
     decided_by: &str,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     if !kind.is_meta() {
         return Ok(());
     }
@@ -257,15 +257,17 @@ fn assert_meta_approver(
     {
         return Ok(());
     }
-    Err((
-        StatusCode::FORBIDDEN,
-        Json(json!({
-            "error": "meta_approver_required",
-            "user": decided_by,
-            "kind": kind.as_str(),
-        })),
-    )
-        .into_response())
+    Err(Box::new(
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "meta_approver_required",
+                "user": decided_by,
+                "kind": kind.as_str(),
+            })),
+        )
+            .into_response(),
+    ))
 }
 
 async fn list_proposals(State(state): State<AdminState>, Query(q): Query<ListQuery>) -> Response {
@@ -346,7 +348,7 @@ async fn approve_proposal(
     // Non-meta kinds short-circuit; meta kinds require `body.decided_by`
     // to be present in `[admin].meta_approver_users`.
     if let Err(resp) = assert_meta_approver(&state, current.kind, &body.decided_by) {
-        return resp;
+        return *resp;
     }
     if let Err(err) = repo
         .set_decision(&pid, EvolutionStatus::Approved, now_ms(), &body.decided_by)
@@ -562,7 +564,7 @@ async fn apply_proposal(State(state): State<AdminState>, Path(id): Path<String>)
             Ok(p) => {
                 let decided_by = p.decided_by.as_deref().unwrap_or("<missing>");
                 if let Err(resp) = assert_meta_approver(&state, p.kind, decided_by) {
-                    return resp;
+                    return *resp;
                 }
             }
             Err(RepoError::NotFound(_)) => return not_found(&id),

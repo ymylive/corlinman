@@ -49,7 +49,7 @@ struct StubMemoryHost {
 }
 
 impl StubMemoryHost {
-    fn new(name: &str, seed: &[(&str, &str)]) -> Arc<dyn MemoryHost> {
+    fn make(name: &str, seed: &[(&str, &str)]) -> Arc<dyn MemoryHost> {
         let m: BTreeMap<String, String> = seed
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -278,7 +278,7 @@ async fn resources_list_filters_by_scheme_allowlist_end_to_end() {
     let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
     hosts.insert(
         "alpha".into(),
-        StubMemoryHost::new("alpha", &[("1", "ALPHA-1")]),
+        StubMemoryHost::make("alpha", &[("1", "ALPHA-1")]),
     );
     let skills = make_skills(&tmpd, &["foo"]);
     let adapter = ResourcesAdapter::new(hosts, skills);
@@ -333,7 +333,7 @@ async fn cross_tenant_read_returns_empty_or_unknown_host() {
     let mut alpha_only_hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
     alpha_only_hosts.insert(
         "alpha".into(),
-        StubMemoryHost::new("alpha", &[("1", "ALPHA-1")]),
+        StubMemoryHost::make("alpha", &[("1", "ALPHA-1")]),
     );
     let skills = make_skills(&tmpd, &[]);
     let adapter = ResourcesAdapter::new(alpha_only_hosts, skills);
@@ -440,7 +440,7 @@ async fn empty_acl_lists_fail_closed_at_adapter_layer() {
     // ResourcesAdapter — read of any URI is denied at scheme-ACL.
     let tmpd = tempfile::tempdir().unwrap();
     let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
-    hosts.insert("kb".into(), StubMemoryHost::new("kb", &[("1", "x")]));
+    hosts.insert("kb".into(), StubMemoryHost::make("kb", &[("1", "x")]));
     let skills = make_skills(&tmpd, &["foo"]);
     let res_adapter = ResourcesAdapter::new(hosts, skills);
     let lvalue = res_adapter

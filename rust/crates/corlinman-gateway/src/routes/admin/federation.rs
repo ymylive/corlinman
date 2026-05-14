@@ -285,12 +285,15 @@ fn resolve_data_dir(state: &AdminState) -> PathBuf {
 /// proceed. Mirrors the `/admin/tenants` gate but collapses
 /// "config-off" and "admin DB missing" onto the same 503 envelope —
 /// see module docs.
-fn require_admin_db(state: &AdminState) -> Result<Arc<AdminDb>, Response> {
+fn require_admin_db(state: &AdminState) -> Result<Arc<AdminDb>, Box<Response>> {
     let cfg = state.config.load();
     if !cfg.tenants.enabled {
-        return Err(tenants_disabled_503());
+        return Err(Box::new(tenants_disabled_503()));
     }
-    state.admin_db.clone().ok_or_else(tenants_disabled_503)
+    state
+        .admin_db
+        .clone()
+        .ok_or_else(|| Box::new(tenants_disabled_503()))
 }
 
 /// Best-effort extraction of the operator's username from the
@@ -327,7 +330,7 @@ fn admin_username(headers: &HeaderMap) -> String {
 async fn list_peers(State(state): State<AdminState>, Tenant(tenant): Tenant) -> Response {
     let db = match require_admin_db(&state) {
         Ok(d) => d,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let accepted_from = match db.list_federation_sources_for(&tenant).await {
@@ -354,7 +357,7 @@ async fn add_peer(
 ) -> Response {
     let db = match require_admin_db(&state) {
         Ok(d) => d,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let Some(Json(body)) = body else {
         return invalid_tenant_slug("", "body must include source_tenant_id");
@@ -418,7 +421,7 @@ async fn remove_peer(
 ) -> Response {
     let db = match require_admin_db(&state) {
         Ok(d) => d,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let source = match TenantId::new(source_raw.clone()) {
         Ok(t) => t,
@@ -439,7 +442,7 @@ async fn recent_proposals(
 ) -> Response {
     let _db = match require_admin_db(&state) {
         Ok(d) => d,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let source = match TenantId::new(source_raw.clone()) {

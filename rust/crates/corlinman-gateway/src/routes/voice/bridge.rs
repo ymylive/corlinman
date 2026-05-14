@@ -1355,12 +1355,12 @@ mod e2e_tests {
     ///
     ///   1. Ready
     ///   2. (audio in) → TranscriptFinal { user, "search the news" }
-    ///                + AgentText { "checking now" }
-    ///                + AudioOut (echo of bytes)
+    ///      + AgentText { "checking now" }
+    ///      + AudioOut (echo of bytes)
     ///   3. (audio in) → ToolCall { call_id, "web_search", {q:"news"} }
     ///   4. (after ApproveTool { true }) → AgentText { "found 3 stories" }
-    ///                                   + AudioOut (synthetic 4 bytes)
-    ///                                   + TranscriptFinal { assistant, "Here are the stories." }
+    ///      + AudioOut (synthetic 4 bytes)
+    ///      + TranscriptFinal { assistant, "Here are the stories." }
     ///   5. (Close) → End { Graceful }
     struct ScriptedProvider;
 

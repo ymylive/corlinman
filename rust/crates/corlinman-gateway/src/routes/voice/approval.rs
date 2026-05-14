@@ -15,7 +15,7 @@
 //!    `pending_approvals` row and parks on a oneshot until either:
 //!    - an operator decides via `POST /admin/approvals/:id/decide`, or
 //!    - the configured timeout elapses
-//!    (default `DEFAULT_PROMPT_TIMEOUT = 5 min`).
+//!      (default `DEFAULT_PROMPT_TIMEOUT = 5 min`).
 //! 4. **Resume on the decision**:
 //!    - **Approve**: send [`ProviderCommand::ApproveTool { approve:
 //!      true }`] upstream and emit an `agent_text` "Approved,

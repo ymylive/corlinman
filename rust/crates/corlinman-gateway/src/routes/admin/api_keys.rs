@@ -13,18 +13,18 @@
 //! Three routes, all behind `require_admin` and `tenant_scope`:
 //!
 //! - `POST   /admin/api_keys`
-//!     body  `{ scope: string, username?: string, label?: string }`
-//!     → 201 `{ key_id, token, scope, username, label, tenant_id,
-//!             created_at_ms }`. The cleartext `token` is returned
-//!     **once** — subsequent listings show the hash only.
+//!   body  `{ scope: string, username?: string, label?: string }`
+//!   → 201 `{ key_id, token, scope, username, label, tenant_id,
+//!   created_at_ms }`. The cleartext `token` is returned
+//!   **once** — subsequent listings show the hash only.
 //! - `GET    /admin/api_keys`
-//!     → `{ keys: [{ key_id, scope, username, label, created_at_ms,
-//!                   last_used_at_ms }] }`. Active keys for the
-//!     resolved tenant, ordered by `created_at_ms DESC`.
+//!   → `{ keys: [{ key_id, scope, username, label, created_at_ms,
+//!   last_used_at_ms }] }`. Active keys for the
+//!   resolved tenant, ordered by `created_at_ms DESC`.
 //! - `DELETE /admin/api_keys/:key_id`
-//!     → `{ revoked: bool }`. `false` is a 404 (key already revoked or
-//!     never existed) so the UI can distinguish typos from idempotent
-//!     revokes.
+//!   → `{ revoked: bool }`. `false` is a 404 (key already revoked or
+//!   never existed) so the UI can distinguish typos from idempotent
+//!   revokes.
 //!
 //! ### Disabled / not-found paths
 //!
@@ -165,10 +165,10 @@ fn tenants_disabled() -> Response {
         .into_response()
 }
 
-fn require_admin_db(state: &AdminState) -> Result<Arc<AdminDb>, Response> {
+fn require_admin_db(state: &AdminState) -> Result<Arc<AdminDb>, Box<Response>> {
     match state.admin_db.as_ref() {
         Some(db) => Ok(db.clone()),
-        None => Err(tenants_disabled()),
+        None => Err(Box::new(tenants_disabled())),
     }
 }
 
@@ -179,7 +179,7 @@ async fn mint_key(
 ) -> Response {
     let db = match require_admin_db(&state) {
         Ok(db) => db,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let scope = body.scope.trim();
@@ -227,7 +227,7 @@ async fn mint_key(
 async fn list_keys(State(state): State<AdminState>, Tenant(tenant_id): Tenant) -> Response {
     let db = match require_admin_db(&state) {
         Ok(db) => db,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     match db.list_api_keys(&tenant_id).await {
@@ -256,7 +256,7 @@ async fn revoke_key(
 ) -> Response {
     let db = match require_admin_db(&state) {
         Ok(db) => db,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     match db.revoke_api_key(&key_id).await {
