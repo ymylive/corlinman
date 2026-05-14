@@ -26,7 +26,11 @@ env:
 jobs:
   build-x86_64-linux:
     name: Build x86_64-linux-gnu (native)
-    runs-on: ubuntu-latest
+    # Pin to ubuntu-22.04 (glibc 2.35) so binaries run on Debian 12
+    # (glibc 2.36) and other LTS distros. ubuntu-latest currently maps
+    # to 24.04 (glibc 2.39), which fails to load on Debian 12 with
+    # `libc.so.6: version GLIBC_2.39 not found`.
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
@@ -120,7 +124,7 @@ jobs:
   build-aarch64-linux-disabled:
     name: Build aarch64-linux-gnu (cross from amd64)
     if: false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
