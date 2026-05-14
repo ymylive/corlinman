@@ -10,7 +10,7 @@ memory, real tools, multiple chat channels, and an operations plane — all
 in one binary you can run on your own hardware, audit end-to-end, and
 govern with human-in-the-loop approvals.
 
-![corlinman Tidepool admin — day/night tour of dashboard, skills, characters, nodes](docs/assets/tidepool-hero.gif)
+![corlinman — 60-second product tour: five pillars, multi-provider agent loop, sandboxed plugins, human-in-the-loop approvals, hybrid RAG memory, first-class channels, Tidepool admin day & night, and a one-second doctor check](docs/assets/tidepool-hero.gif)
 
 > _Live deployment reference: <https://corlinman.cornna.xyz>._
 > _中文介绍章节见文末 ["中文速览"](#中文速览)。_
