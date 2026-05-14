@@ -26,11 +26,12 @@ env:
 jobs:
   build-x86_64-linux:
     name: Build x86_64-linux-gnu (native)
-    # Pin to ubuntu-22.04 (glibc 2.35) so binaries run on Debian 12
-    # (glibc 2.36) and other LTS distros. ubuntu-latest currently maps
-    # to 24.04 (glibc 2.39), which fails to load on Debian 12 with
-    # `libc.so.6: version GLIBC_2.39 not found`.
-    runs-on: ubuntu-22.04
+    # ubuntu-latest = 24.04 (gcc 13 + binutils 2.42) — needed for
+    # numkong's AVX-512/AMX intrinsics. Resulting binary links against
+    # glibc 2.39, so the prebuilt **does not load on Debian 12**
+    # (glibc 2.36) via deploy/install.sh --mode native; for older
+    # distros use --mode docker (the runtime image stays bookworm).
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -48,18 +49,9 @@ jobs:
             cargo-x86_64-${{ runner.os }}-
 
       - name: Install build prerequisites
-        # gcc-13 from the ubuntu-toolchain-r/test PPA: ubuntu-22.04's
-        # default gcc-11 doesn't recognise numkong's AVX-512 / AMX
-        # intrinsics (-mavx512fp16, -mamx-fp16, -mavxvnniint8, etc.).
-        # gcc-13 understands them. We keep the *runner* on 22.04 so
-        # the resulting binary still links against glibc 2.35 (so it
-        # loads on Debian 12 / RHEL 9 / etc.) — gcc-13 only changes
-        # what the C compiler accepts, not which libc the linker pins.
         run: |
-          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            protobuf-compiler gcc-13 g++-13
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
 
       - name: Resolve version + tag
         id: meta
@@ -70,9 +62,6 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Build release binaries
-        env:
-          CC: gcc-13
-          CXX: g++-13
         run: |
           export CARGO_TARGET_DIR=target-x86_64-linux-gnu
           cargo build --release --target x86_64-unknown-linux-gnu \
@@ -136,7 +125,7 @@ jobs:
   build-aarch64-linux-disabled:
     name: Build aarch64-linux-gnu (cross from amd64)
     if: false
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:

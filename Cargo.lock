@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-agent-client"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-auto-rollback"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -831,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-auto-rollback-cli"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-canvas"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "blake3",
  "csv",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-channels"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-cli"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "argon2",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-core"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "argon2",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-evolution"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-gateway"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-gateway-api"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-hooks"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-trait",
  "corlinman-core",
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-identity"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-trait",
  "corlinman-core",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-integration-tests"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-mcp"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-memory-host"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-newapi-client"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "reqwest",
  "serde",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-nodebridge"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "axum",
  "corlinman-hooks",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-plugins"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-proto"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "prost",
  "tonic",
@@ -1253,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-replay"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-trait",
  "corlinman-core",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-scheduler"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-shadow-tester"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1314,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-skills"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-subagent"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-tenant"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-trait",
  "once_cell",
@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-vector"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1388,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "corlinman-wstool"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-trait",
