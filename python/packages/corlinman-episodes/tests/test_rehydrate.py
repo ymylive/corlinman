@@ -37,7 +37,6 @@ from corlinman_episodes import (
     render_cold_file,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
 # ---------------------------------------------------------------------------
@@ -60,7 +59,7 @@ def _ms(days_ago: int, *, now: int = 1_700_000_000_000) -> int:
 async def _seed_episode(
     store: EpisodesStore,
     *,
-    id: str | None = None,
+    episode_id: str | None = None,
     tenant_id: str = "default",
     kind: EpisodeKind = EpisodeKind.CONVERSATION,
     summary: str = "a summary",
@@ -69,7 +68,7 @@ async def _seed_episode(
     embedding_dim: int | None = None,
     source_signal_ids: list[int] | None = None,
 ) -> str:
-    eid = id or new_episode_id()
+    eid = episode_id or new_episode_id()
     ep = Episode(
         id=eid,
         tenant_id=tenant_id,
@@ -203,7 +202,7 @@ async def test_rehydrate_restores_summary_and_embedding(
     async with EpisodesStore(episodes_db) as store:
         eid = await _seed_episode(
             store,
-            id="ep-rt",
+            episode_id="ep-rt",
             ended_at_ms=_ms(200, now=now),
             summary="the original summary",
             embedding=blob,
@@ -259,7 +258,7 @@ async def test_rehydrate_already_hot_returns_false(
     async with EpisodesStore(episodes_db) as store:
         eid = await _seed_episode(
             store,
-            id="ep-hot",
+            episode_id="ep-hot",
             ended_at_ms=_ms(10, now=now),
             summary="still hot",
         )
@@ -304,7 +303,7 @@ async def test_rehydrate_missing_cold_file_returns_false(
 ) -> None:
     """No cold file → rehydrate is a no-op (False)."""
     async with EpisodesStore(episodes_db) as store:
-        await _seed_episode(store, id="ep-x", ended_at_ms=1)
+        await _seed_episode(store, episode_id="ep-x", ended_at_ms=1)
         ok = await rehydrate_episode(
             store=store, cold_root=cold_root, episode_id="never-existed"
         )
@@ -328,7 +327,7 @@ async def test_rehydrate_all_promotes_every_cold_row(
         for i, eid in enumerate(ids):
             await _seed_episode(
                 store,
-                id=eid,
+                episode_id=eid,
                 ended_at_ms=_ms(200 + i, now=now),
                 summary=f"summary-{i}",
             )
@@ -363,7 +362,7 @@ async def test_rehydrate_all_is_idempotent(
     async with EpisodesStore(episodes_db) as store:
         await _seed_episode(
             store,
-            id="ep-once",
+            episode_id="ep-once",
             ended_at_ms=_ms(200, now=now),
             summary="hi",
         )
@@ -389,14 +388,14 @@ async def test_rehydrate_all_filters_by_tenant(
     async with EpisodesStore(episodes_db) as store:
         await _seed_episode(
             store,
-            id="ep-acme",
+            episode_id="ep-acme",
             tenant_id="acme",
             ended_at_ms=_ms(200, now=now),
             summary="acme",
         )
         await _seed_episode(
             store,
-            id="ep-globex",
+            episode_id="ep-globex",
             tenant_id="globex",
             ended_at_ms=_ms(200, now=now),
             summary="globex",
@@ -447,7 +446,7 @@ async def test_rehydrate_all_handles_malformed_file(
     async with EpisodesStore(episodes_db) as store:
         await _seed_episode(
             store,
-            id="ep-good",
+            episode_id="ep-good",
             ended_at_ms=_ms(200, now=now),
             summary="good",
         )
@@ -498,7 +497,7 @@ def test_cli_rehydrate_all_subcommand(
     async def setup() -> None:
         async with EpisodesStore(episodes_db) as store:
             await _seed_episode(
-                store, id="ep-cli", ended_at_ms=_ms(200, now=now), summary="hello"
+                store, episode_id="ep-cli", ended_at_ms=_ms(200, now=now), summary="hello"
             )
             await archive_unreferenced_episodes(
                 config=cfg, store=store, cold_root=cold_root, now_ms=now

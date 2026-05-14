@@ -22,7 +22,7 @@ overhead.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 # Defaults pulled from the design doc's `[subagent]` config block. Mirror
 # the `defaults::*` consts in Rust `types.rs` so a Python-side override
@@ -44,12 +44,12 @@ DEFAULT_MAX_TOOL_CALLS: int = 12
 DEFAULT_MAX_DEPTH: int = 2
 
 
-class FinishReason(str, Enum):
+class FinishReason(StrEnum):
     """Why the child stopped. String-valued so JSON serialisation drops
     straight onto the wire under the same lowercase snake_case names the
     Rust ``FinishReason`` enum uses (`#[serde(rename_all = "snake_case")]`).
 
-    Inheriting from ``str`` means ``json.dumps`` emits the value verbatim
+    Inheriting from ``StrEnum`` means ``json.dumps`` emits the value verbatim
     and ``FinishReason("stop")`` parses back without a custom decoder —
     important because the parent's LLM produces and consumes these strings.
     """

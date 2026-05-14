@@ -443,9 +443,9 @@ async def test_child_timeout_decrements_concurrency_via_supervisor() -> None:
 
 
 from corlinman_agent.subagent import (  # noqa: E402  -- placed near tests for locality
+    DEFAULT_MAX_DEPTH,
     SUBAGENT_SPAWN_TOOL,
     TOOL_ALLOWLIST_ESCALATION_ERROR,
-    DEFAULT_MAX_DEPTH,
 )
 
 

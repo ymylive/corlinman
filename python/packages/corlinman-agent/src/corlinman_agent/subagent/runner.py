@@ -39,6 +39,7 @@ where :class:`ReasoningLoop` and the providers live.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Sequence
 from dataclasses import replace
@@ -95,7 +96,7 @@ async def run_child(
     *,
     provider: Any,
     child_seq: int = 0,
-    persona_store: "PersonaStore | None" = None,
+    persona_store: PersonaStore | None = None,
     tool_result_timeout: float = 0.05,
     parent_tools: Sequence[dict[str, Any]] | None = None,
     max_depth: int = DEFAULT_MAX_DEPTH,
@@ -204,7 +205,7 @@ async def run_child(
             child_depth=child_ctx.depth,
             max_depth=max_depth,
         )
-    except _ToolAllowlistEscalation as exc:
+    except _ToolAllowlistEscalationError as exc:
         logger.info(
             "subagent.runner.tool_allowlist_escalation",
             child_session_key=child_ctx.parent_session_key,
@@ -316,7 +317,7 @@ async def _drive_and_collect(
             asyncio.shield(drain_task),
             timeout=float(task.max_wall_seconds),
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         # Cooperative cancel first: the loop's own cancel handler emits
         # an ErrorEvent and drains, which lets the drain coroutine exit
         # cleanly with the partial output already accumulated.
@@ -326,16 +327,14 @@ async def _drive_and_collect(
                 asyncio.shield(drain_task),
                 timeout=_TIMEOUT_GRACE_SECONDS,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Cooperative grace exhausted — force-drop. ``cancel()`` on
             # the asyncio.Task throws CancelledError into the coroutine;
             # we suppress it because we've already captured whatever
             # the drain produced before the freeze.
             drain_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await drain_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
         state["finish_reason"] = FinishReason.TIMEOUT
         # Preserve any partial error_msg the loop set (e.g. cancelled
         # ErrorEvent). If none, leave error blank — TIMEOUT is itself
@@ -405,7 +404,7 @@ async def _drain_events(
         raise
 
 
-class _ToolAllowlistEscalation(Exception):
+class _ToolAllowlistEscalationError(Exception):
     """Internal signal raised by :func:`_filter_tools_for_child` when a
     request asks for tools the parent doesn't already hold.
 
@@ -440,7 +439,7 @@ def _filter_tools_for_child(
       from ``None`` so the parent can opt the child out of all tools
       without the runner inferring "they meant inherit".
     * non-empty list → must be a subset of ``parent_tool_names``;
-      anything outside raises :class:`_ToolAllowlistEscalation`.
+      anything outside raises :class:`_ToolAllowlistEscalationError`.
 
     After resolution, prune ``subagent.spawn`` when the child is at the
     deepest depth that could still spawn a grandchild
@@ -464,7 +463,7 @@ def _filter_tools_for_child(
         # set so it falls straight through to the prune step.
         offending = requested - parent_tool_names
         if offending:
-            raise _ToolAllowlistEscalation(offending)
+            raise _ToolAllowlistEscalationError(offending)
         effective = requested
 
     # Self-prune at the deepest legal depth. ``max_depth - 1`` is the
@@ -528,10 +527,7 @@ def _project_tool_schemas(
         if not isinstance(entry, dict):
             continue
         function = entry.get("function")
-        if isinstance(function, dict):
-            name = function.get("name")
-        else:
-            name = entry.get("name")
+        name = function.get("name") if isinstance(function, dict) else entry.get("name")
         if isinstance(name, str) and name in keep_names:
             out.append(entry)
     return out
@@ -609,7 +605,7 @@ def _map_finish_reason(provider_reason: str) -> FinishReason:
 
 
 async def _seed_child_persona(
-    store: "PersonaStore",
+    store: PersonaStore,
     agent_card: AgentCard,
     child_ctx: ParentContext,
 ) -> None:

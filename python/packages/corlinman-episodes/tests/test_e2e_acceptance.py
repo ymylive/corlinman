@@ -399,7 +399,7 @@ def test_resolver_summary_char_cap_pinned_to_rust_value() -> None:
         "SUMMARY_CHAR_CAP not found in gateway resolver — was it renamed?"
     )
     rust_value = int(match.group(1))
-    assert RESOLVER_SUMMARY_CHAR_CAP == rust_value, (
+    assert rust_value == RESOLVER_SUMMARY_CHAR_CAP, (
         f"Python mirror RESOLVER_SUMMARY_CHAR_CAP={RESOLVER_SUMMARY_CHAR_CAP} "
         f"drifted from Rust SUMMARY_CHAR_CAP={rust_value}"
     )
