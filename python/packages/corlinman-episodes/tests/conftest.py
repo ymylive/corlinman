@@ -12,8 +12,9 @@ about must also land here, and the collector's test will fail loudly
 if the join goes wrong.
 
 Insert helpers live in ``tests/_seed.py`` so test modules can import
-them by name (pytest's ``conftest.py`` only re-exports fixtures
-under ``importlib`` import-mode, not raw functions).
+them by name via ``from ._seed import ...`` (pytest's ``conftest.py``
+only re-exports fixtures under ``importlib`` import-mode, not raw
+functions).
 """
 
 from __future__ import annotations

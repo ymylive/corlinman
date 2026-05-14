@@ -55,7 +55,7 @@ from corlinman_episodes import (
 from corlinman_episodes.distiller import SummaryProvider
 from corlinman_episodes.sources import SourceBundle
 
-from tests._seed import (
+from ._seed import (
     insert_hook_event,
     insert_proposal_with_history,
     insert_session_message,
