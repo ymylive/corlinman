@@ -13,8 +13,7 @@ from pathlib import Path
 
 from corlinman_agent_brain.config import CuratorConfig
 from corlinman_agent_brain.models import KnowledgeNode, MemoryKind, NodeScope
-from corlinman_agent_brain.serialization import frontmatter_to_yaml, node_to_markdown
-
+from corlinman_agent_brain.serialization import node_to_markdown
 
 # ---------------------------------------------------------------------------
 # WriteResult
@@ -70,10 +69,7 @@ def _safe_filename(title: str) -> str:
     # Truncate to 80 chars (break at hyphen boundary if possible)
     if len(cleaned) > 80:
         truncated = cleaned[:80]
-        if "-" in truncated:
-            cleaned = truncated.rsplit("-", 1)[0]
-        else:
-            cleaned = truncated
+        cleaned = truncated.rsplit("-", 1)[0] if "-" in truncated else truncated
 
     return cleaned if cleaned else "untitled"
 

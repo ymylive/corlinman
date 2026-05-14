@@ -28,10 +28,8 @@ from corlinman_agent_brain.risk_classifier import (
 from corlinman_agent_brain.vault_writer import VaultWriter, WriteResult
 
 __all__ = [
-    # Config
-    "CuratorConfig",
-    # Models
     "BundleMessage",
+    "CuratorConfig",
     "CuratorRun",
     "CuratorRunStatus",
     "KnowledgeNode",
@@ -45,16 +43,13 @@ __all__ = [
     "NodeStatus",
     "RiskLevel",
     "SessionBundle",
-    "WritePolicy",
-    # Risk classifier
+    "VaultWriter",
     "WriteDecision",
+    "WritePolicy",
+    "WriteResult",
     "classify_risk",
     "classify_risk_batch",
     "decide_write_action",
-    # Link planner
     "plan_links",
     "plan_links_batch",
-    # Vault writer
-    "VaultWriter",
-    "WriteResult",
 ]

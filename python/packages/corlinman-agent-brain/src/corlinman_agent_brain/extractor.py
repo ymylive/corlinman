@@ -25,13 +25,11 @@ from typing import Any, Protocol
 
 from corlinman_agent_brain.config import CuratorConfig
 from corlinman_agent_brain.models import (
-    BundleMessage,
     MemoryCandidate,
     MemoryKind,
     RiskLevel,
     SessionBundle,
 )
-
 
 # ---------------------------------------------------------------------------
 # Provider protocol
@@ -137,10 +135,7 @@ def should_skip_session(bundle: SessionBundle, config: CuratorConfig) -> bool:
         m for m in bundle.messages
         if m.role in ("user", "human") and len(m.content.strip()) > 20
     ]
-    if not user_messages:
-        return True
-
-    return False
+    return not user_messages
 
 
 # ---------------------------------------------------------------------------
@@ -368,9 +363,9 @@ async def extract_candidates_batch(
 # ---------------------------------------------------------------------------
 
 __all__ = [
+    "SYSTEM_PROMPT",
     "ExtractionFn",
     "ExtractionProvider",
-    "SYSTEM_PROMPT",
     "extract_candidates",
     "extract_candidates_batch",
     "should_skip_session",

@@ -11,7 +11,6 @@ Covers:
 from __future__ import annotations
 
 import pytest
-
 from corlinman_agent_brain.config import CuratorConfig
 from corlinman_agent_brain.models import (
     MemoryCandidate,

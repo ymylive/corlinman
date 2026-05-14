@@ -13,7 +13,8 @@ Design principles:
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol, Sequence
+from collections.abc import Sequence
+from typing import Protocol
 
 from corlinman_agent_brain.config import CuratorConfig
 from corlinman_agent_brain.models import (
@@ -25,7 +26,6 @@ from corlinman_agent_brain.models import (
     MemoryKind,
     RiskLevel,
 )
-
 
 # ---------------------------------------------------------------------------
 # Protocol for retrieval injection
@@ -70,8 +70,8 @@ def _compute_similarity_score(candidate: MemoryCandidate, node: KnowledgeNode) -
     - Title/topic word overlap (60%)
     """
     # Tag similarity
-    candidate_tags = set(t.lower() for t in candidate.tags)
-    node_tags = set(t.lower() for t in node.frontmatter.tags)
+    candidate_tags = {t.lower() for t in candidate.tags}
+    node_tags = {t.lower() for t in node.frontmatter.tags}
     tag_sim = _jaccard(candidate_tags, node_tags)
 
     # Title / topic word overlap
@@ -233,7 +233,7 @@ async def plan_links(
             continue
 
         # Build retrieval query from topic + tags
-        query_parts = [candidate.topic] + candidate.tags
+        query_parts = [candidate.topic, *candidate.tags]
         query = " ".join(query_parts)
 
         # Retrieve similar nodes
@@ -282,10 +282,10 @@ async def plan_links_batch(
 
 __all__ = [
     "RetrievalProvider",
-    "plan_links",
-    "plan_links_batch",
     "_compute_similarity_score",
     "_decide_action",
     "_generate_links",
+    "plan_links",
+    "plan_links_batch",
 ]
 

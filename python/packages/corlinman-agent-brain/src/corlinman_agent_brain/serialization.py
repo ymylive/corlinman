@@ -8,7 +8,7 @@ into Obsidian-compatible Markdown files.
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -20,7 +20,6 @@ from corlinman_agent_brain.models import (
     NodeStatus,
     RiskLevel,
 )
-
 
 # ---------------------------------------------------------------------------
 # Generic dataclass <-> dict
@@ -180,4 +179,4 @@ def node_to_markdown(node: KnowledgeNode) -> str:
 
 def now_iso() -> str:
     """Return current UTC time as ISO 8601 string."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -11,8 +11,9 @@ Covers:
 
 from __future__ import annotations
 
-import pytest
+from dataclasses import FrozenInstanceError
 
+import pytest
 from corlinman_agent_brain.models import (
     BundleMessage,
     CuratorRun,
@@ -37,7 +38,6 @@ from corlinman_agent_brain.serialization import (
     now_iso,
     to_dict,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -144,7 +144,7 @@ class TestEnums:
 class TestModels:
     def test_bundle_message_frozen(self) -> None:
         msg = BundleMessage(seq=1, role="user", content="hello", ts_ms=1000)
-        with pytest.raises(Exception):
+        with pytest.raises(FrozenInstanceError):
             msg.seq = 2  # type: ignore[misc]
 
     def test_session_bundle_defaults(self) -> None:
@@ -175,7 +175,7 @@ class TestModels:
             candidate_id="c1",
             action=LinkAction.CREATE_NEW,
         )
-        with pytest.raises(Exception):
+        with pytest.raises(FrozenInstanceError):
             entry.candidate_id = "c2"  # type: ignore[misc]
 
     def test_link_plan_defaults(self) -> None:

@@ -11,7 +11,6 @@ Covers:
 from __future__ import annotations
 
 import pytest
-
 from corlinman_agent_brain.config import CuratorConfig
 from corlinman_agent_brain.link_planner import (
     _compute_similarity_score,
@@ -30,7 +29,6 @@ from corlinman_agent_brain.models import (
     NodeStatus,
     RiskLevel,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

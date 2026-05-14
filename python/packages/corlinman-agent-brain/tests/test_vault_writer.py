@@ -15,7 +15,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from corlinman_agent_brain.config import CuratorConfig
 from corlinman_agent_brain.models import (
     KnowledgeNode,
@@ -31,7 +30,6 @@ from corlinman_agent_brain.vault_writer import (
     _resolve_vault_path,
     _safe_filename,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

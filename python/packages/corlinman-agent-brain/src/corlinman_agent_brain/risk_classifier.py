@@ -9,9 +9,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from corlinman_agent_brain.models import MemoryCandidate, MemoryKind, RiskLevel, WritePolicy
 from corlinman_agent_brain.config import CuratorConfig
-
+from corlinman_agent_brain.models import MemoryCandidate, MemoryKind, RiskLevel, WritePolicy
 
 # ---------------------------------------------------------------------------
 # Sensitive content detection patterns (compiled at module level)
@@ -74,10 +73,7 @@ class WriteDecision:
 
 def _contains_sensitive_content(text: str) -> bool:
     """Check if text matches any sensitive content pattern."""
-    for pattern in _SENSITIVE_PATTERNS:
-        if pattern.search(text):
-            return True
-    return False
+    return any(pattern.search(text) for pattern in _SENSITIVE_PATTERNS)
 
 
 def classify_risk(candidate: MemoryCandidate, config: CuratorConfig) -> RiskLevel:
@@ -94,7 +90,7 @@ def classify_risk(candidate: MemoryCandidate, config: CuratorConfig) -> RiskLeve
         The determined RiskLevel.
     """
     # Check evidence and summary for sensitive content -> HIGH
-    texts_to_check = [candidate.summary] + list(candidate.evidence)
+    texts_to_check = [candidate.summary, *candidate.evidence]
     for text in texts_to_check:
         if _contains_sensitive_content(text):
             return RiskLevel.HIGH

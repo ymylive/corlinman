@@ -14,9 +14,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-
 from corlinman_agent_brain.session_reader import (
-    DEFAULT_TENANT_ID,
     MAX_MESSAGE_CONTENT_LEN,
     _ts_to_ms,
     read_episodes_as_context,
@@ -24,7 +22,6 @@ from corlinman_agent_brain.session_reader import (
     read_sessions_by_range,
     sanitize_content,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
