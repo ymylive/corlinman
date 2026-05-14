@@ -265,54 +265,66 @@ impl SqliteStore {
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true);
 
+        // Stage 1: run all migrations on a *single-connection* pool that
+        // we then close before opening the production pool. This isolates
+        // the migration window from any concurrent reader and forces the
+        // wal_checkpoint(TRUNCATE) below to fully finalise into the main
+        // DB file before any other connection ever opens the file.
+        //
+        // Background: PRs #6, #4, and #8 all hit a CI-only flake where a
+        // production-pool connection opened by a later .execute() call
+        // saw "no such table: chunks". An earlier wal_checkpoint(TRUNCATE)
+        // alone wasn't enough — a connection opened *concurrently* with
+        // the migration could still race the WAL/shm setup. Building the
+        // schema on a private 1-connection pool, fsyncing, and dropping
+        // it before the multi-conn pool exists collapses the race window.
+        {
+            let migrate_pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .min_connections(1)
+                .connect_with(options.clone())
+                .await
+                .with_context(|| {
+                    format!("connect sqlite (migration) '{}'", path.display())
+                })?;
+
+            sqlx::raw_sql(SCHEMA_SQL)
+                .execute(&migrate_pool)
+                .await
+                .context("apply SCHEMA_SQL")?;
+
+            ensure_decay_columns(&migrate_pool).await?;
+            ensure_tenant_columns(&migrate_pool).await?;
+
+            sqlx::raw_sql(TENANT_INDEXES_SQL)
+                .execute(&migrate_pool)
+                .await
+                .context("apply TENANT_INDEXES_SQL")?;
+
+            // Truncate WAL into the main DB file so any future connection
+            // (including the brand-new production pool below) reads schema
+            // straight from the main file with no WAL replay needed.
+            sqlx::raw_sql("PRAGMA wal_checkpoint(TRUNCATE);")
+                .execute(&migrate_pool)
+                .await
+                .context("checkpoint WAL after migration")?;
+
+            // Explicit close drains the pool and closes the SQLite handle
+            // synchronously, releasing the file lock before stage 2 opens
+            // a fresh pool against the same file.
+            migrate_pool.close().await;
+        }
+
+        // Stage 2: production pool. Connections are still opened lazily
+        // (max=8, min=default 0) — pre-warming would cache the catalog at
+        // pool-open time which would then desync if downstream tests do
+        // their own DROP/CREATE DDL against the same file (e.g. the v4
+        // migration backfill tests in this crate).
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
             .connect_with(options)
             .await
             .with_context(|| format!("connect sqlite '{}'", path.display()))?;
-
-        // Run the schema DDL as a single multi-statement script. sqlx's
-        // SQLite driver accepts this via `raw_sql`; we can't split on `;`
-        // because CREATE TRIGGER bodies contain internal `;` separators.
-        sqlx::raw_sql(SCHEMA_SQL)
-            .execute(&pool)
-            .await
-            .context("apply SCHEMA_SQL")?;
-
-        // Phase 3 W3-A: idempotent decay column additions for legacy v6 DBs.
-        // SCHEMA_SQL above declares the columns on fresh DBs, but pre-W3-A
-        // v6 files have the chunks table without them. ALTER TABLE ... ADD
-        // COLUMN is the only DDL we need (no FTS rewrite, no index drop)
-        // and probing `pragma_table_info` keeps the call idempotent so a
-        // re-open of an already-migrated file is a no-op.
-        ensure_decay_columns(&pool).await?;
-
-        // Phase 4 W1 4-1A: idempotent tenant_id column additions for the
-        // five top-level tables. Same pragma-probe + ALTER pattern as the
-        // decay columns above; pre-Phase-4 DBs converge by adding the
-        // column with `DEFAULT 'default'` so legacy rows backfill at
-        // ALTER time without a separate UPDATE.
-        ensure_tenant_columns(&pool).await?;
-
-        // Indexes that reference `tenant_id` must be created *after* the
-        // ensure_tenant_columns call so legacy DBs have the column in
-        // place before SQLite resolves index column names.
-        sqlx::raw_sql(TENANT_INDEXES_SQL)
-            .execute(&pool)
-            .await
-            .context("apply TENANT_INDEXES_SQL")?;
-
-        // Flush every migration write from WAL into the main DB file
-        // before any caller can acquire a *different* connection from
-        // the pool. CI on Linux occasionally surfaced "no such table:
-        // chunks" from a connection that opened the file before the
-        // migration's WAL frames had been merged — TRUNCATE checkpoint
-        // collapses that window by guaranteeing the schema is in the
-        // main file the moment `open` returns.
-        sqlx::raw_sql("PRAGMA wal_checkpoint(TRUNCATE);")
-            .execute(&pool)
-            .await
-            .context("checkpoint WAL after migration")?;
 
         Ok(Self { pool })
     }
