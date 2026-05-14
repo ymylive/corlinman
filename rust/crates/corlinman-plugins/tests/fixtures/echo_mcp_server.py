@@ -120,7 +120,7 @@ def handle_tools_call(req_id, params) -> None:
             )
             return
         try:
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(path, encoding="utf-8") as fh:
                 body = fh.read()
             respond(
                 req_id,

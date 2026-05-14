@@ -162,7 +162,11 @@ pub struct ServerCapabilities {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolsCapability {
-    #[serde(default, rename = "listChanged", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "listChanged",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub list_changed: Option<bool>,
 }
 
@@ -175,7 +179,11 @@ pub mod tools {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ListResult {
         pub tools: Vec<ToolDescriptor>,
-        #[serde(default, rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "nextCursor",
+            skip_serializing_if = "Option::is_none"
+        )]
         pub next_cursor: Option<String>,
     }
 

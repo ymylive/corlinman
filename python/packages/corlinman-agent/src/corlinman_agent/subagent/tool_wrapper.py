@@ -50,7 +50,7 @@ LLM↔runner round-trip without needing the Rust crate built.
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -71,9 +71,9 @@ from corlinman_agent.subagent.runner import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
-    from corlinman_agent.agents.card import AgentCard
-    from corlinman_agent.agents.registry import AgentCardRegistry
     from corlinman_persona.store import PersonaStore
+
+    from corlinman_agent.agents.registry import AgentCardRegistry
 
 logger = structlog.get_logger(__name__)
 
@@ -213,10 +213,10 @@ async def dispatch_subagent_spawn(
     *,
     args_json: bytes | str,
     parent_ctx: ParentContext,
-    agent_registry: "AgentCardRegistry",
+    agent_registry: AgentCardRegistry,
     provider: Any,
     parent_tools: Sequence[dict[str, Any]] | None = None,
-    persona_store: "PersonaStore | None" = None,
+    persona_store: PersonaStore | None = None,
     supervisor_acquire: SupervisorAcquire | None = None,
     child_seq: int = 0,
     max_depth: int = DEFAULT_MAX_DEPTH,
@@ -280,7 +280,7 @@ async def dispatch_subagent_spawn(
     # ── 1. Parse + validate the LLM's args. ──────────────────────────
     try:
         spec, agent_name = _parse_args(args_json)
-    except _ArgsInvalid as exc:
+    except _ArgsInvalidError as exc:
         logger.warning(
             "subagent.dispatch.args_invalid",
             session=parent_ctx.parent_session_key,
@@ -358,7 +358,7 @@ async def dispatch_subagent_spawn(
                 parent_tools=parent_tools,
                 max_depth=max_depth,
             )
-    except Exception as exc:  # noqa: BLE001 — last-resort safety net
+    except Exception as exc:
         logger.exception(
             "subagent.dispatch.runner_uncaught",
             session=parent_ctx.parent_session_key,
@@ -381,7 +381,7 @@ async def dispatch_subagent_spawn(
 # ---------------------------------------------------------------------------
 
 
-class _ArgsInvalid(Exception):
+class _ArgsInvalidError(Exception):
     """Raised by :func:`_parse_args` when the LLM's arguments are
     unparseable or fail shape validation. Caught in
     :func:`dispatch_subagent_spawn` and folded into a rejected result.
@@ -404,49 +404,49 @@ def _parse_args(args_json: bytes | str) -> tuple[TaskSpec, str]:
         try:
             decoded = args_json.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise _ArgsInvalid(f"args_json not utf-8: {exc}") from exc
+            raise _ArgsInvalidError(f"args_json not utf-8: {exc}") from exc
     else:
         decoded = args_json
 
     try:
         raw = json.loads(decoded) if decoded else {}
     except json.JSONDecodeError as exc:
-        raise _ArgsInvalid(f"args_json not JSON: {exc}") from exc
+        raise _ArgsInvalidError(f"args_json not JSON: {exc}") from exc
 
     if not isinstance(raw, dict):
-        raise _ArgsInvalid(
+        raise _ArgsInvalidError(
             f"args_json must be a JSON object, got {type(raw).__name__}"
         )
 
     agent = raw.get("agent")
     if not isinstance(agent, str) or not agent:
-        raise _ArgsInvalid("missing or empty 'agent' field")
+        raise _ArgsInvalidError("missing or empty 'agent' field")
     goal = raw.get("goal")
     if not isinstance(goal, str) or not goal:
-        raise _ArgsInvalid("missing or empty 'goal' field")
+        raise _ArgsInvalidError("missing or empty 'goal' field")
 
     # Optional fields — validate type, fall through to defaults.
     tool_allowlist = raw.get("tool_allowlist")
-    if tool_allowlist is not None:
-        if not isinstance(tool_allowlist, list) or not all(
-            isinstance(t, str) for t in tool_allowlist
-        ):
-            raise _ArgsInvalid("'tool_allowlist' must be a list of strings")
+    if tool_allowlist is not None and (
+        not isinstance(tool_allowlist, list)
+        or not all(isinstance(t, str) for t in tool_allowlist)
+    ):
+        raise _ArgsInvalidError("'tool_allowlist' must be a list of strings")
 
     max_wall_seconds = raw.get("max_wall_seconds", DEFAULT_MAX_WALL_SECONDS)
     if not isinstance(max_wall_seconds, int) or max_wall_seconds <= 0:
-        raise _ArgsInvalid("'max_wall_seconds' must be a positive integer")
+        raise _ArgsInvalidError("'max_wall_seconds' must be a positive integer")
 
     max_tool_calls = raw.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
     if not isinstance(max_tool_calls, int) or max_tool_calls <= 0:
-        raise _ArgsInvalid("'max_tool_calls' must be a positive integer")
+        raise _ArgsInvalidError("'max_tool_calls' must be a positive integer")
 
     extra_context = raw.get("extra_context", {})
     if not isinstance(extra_context, dict) or not all(
         isinstance(k, str) and isinstance(v, str)
         for k, v in extra_context.items()
     ):
-        raise _ArgsInvalid("'extra_context' must be a dict[str, str]")
+        raise _ArgsInvalidError("'extra_context' must be a dict[str, str]")
 
     spec = TaskSpec(
         goal=goal,

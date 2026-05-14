@@ -34,9 +34,7 @@ use tracing::{debug, warn};
 
 use crate::adapters::{CapabilityAdapter, SessionContext};
 use crate::error::McpError;
-use crate::schema::{
-    InitializeParams, JsonRpcRequest, JsonRpcResponse, ServerCapabilities,
-};
+use crate::schema::{InitializeParams, JsonRpcRequest, JsonRpcResponse, ServerCapabilities};
 use crate::server::session::{
     initialize_reply, SessionState, INITIALIZED_NOTIFICATION, INITIALIZE_METHOD,
 };
@@ -101,7 +99,10 @@ impl AdapterDispatcher {
     pub fn register(&mut self, adapter: Arc<dyn CapabilityAdapter>) {
         let cap = adapter.capability_name();
         if self.adapters.contains_key(cap) {
-            warn!(capability = cap, "mcp dispatcher: duplicate adapter; replacing");
+            warn!(
+                capability = cap,
+                "mcp dispatcher: duplicate adapter; replacing"
+            );
         }
         self.adapters.insert(cap, adapter);
         // Refresh advertised capabilities. We use the spec's "object,
@@ -111,13 +112,11 @@ impl AdapterDispatcher {
                 self.capabilities.tools = Some(crate::schema::ToolsCapability::default());
             }
             "resources" => {
-                self.capabilities.resources = Some(
-                    crate::schema::ResourcesCapability {
-                        // C1 advertises subscribe=false (per design Open Q §3).
-                        subscribe: Some(false),
-                        list_changed: None,
-                    },
-                );
+                self.capabilities.resources = Some(crate::schema::ResourcesCapability {
+                    // C1 advertises subscribe=false (per design Open Q §3).
+                    subscribe: Some(false),
+                    list_changed: None,
+                });
             }
             "prompts" => {
                 self.capabilities.prompts = Some(crate::schema::PromptsCapability::default());
@@ -171,17 +170,13 @@ impl FrameHandler for AdapterDispatcher {
         // Lifecycle gate (requests).
         {
             let s = session.lock().await;
-            if let Err(err) = s.check_request_allowed(&req.method) {
-                return Err(err);
-            }
+            s.check_request_allowed(&req.method)?
         }
 
         // Built-in `initialize` reply.
         if req.method == INITIALIZE_METHOD {
-            let parsed: InitializeParams =
-                serde_json::from_value(req.params.clone()).map_err(|e| {
-                    McpError::invalid_params(format!("initialize: bad params: {e}"))
-                })?;
+            let parsed: InitializeParams = serde_json::from_value(req.params.clone())
+                .map_err(|e| McpError::invalid_params(format!("initialize: bad params: {e}")))?;
             {
                 let mut s = session.lock().await;
                 s.observe_initialize(&parsed)?;
@@ -191,9 +186,8 @@ impl FrameHandler for AdapterDispatcher {
                 self.server_info.name.clone(),
                 self.server_info.version.clone(),
             );
-            let value = serde_json::to_value(reply).map_err(|e| {
-                McpError::Internal(format!("initialize: serialize reply: {e}"))
-            })?;
+            let value = serde_json::to_value(reply)
+                .map_err(|e| McpError::Internal(format!("initialize: serialize reply: {e}")))?;
             return Ok(Some(JsonRpcResponse::ok(id, value)));
         }
 

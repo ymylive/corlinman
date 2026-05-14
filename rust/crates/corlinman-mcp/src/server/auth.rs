@@ -84,12 +84,13 @@ impl TokenAcl {
     /// Iter 8: every adapter method receives this context, so any future
     /// ACL fields must extend [`SessionContext`] in lock-step.
     pub fn to_session_context(&self) -> SessionContext {
-        let mut ctx = SessionContext::default();
-        ctx.tools_allowlist = self.tools_allowlist.clone();
-        ctx.resources_allowed = self.resources_allowed.clone();
-        ctx.prompts_allowed = self.prompts_allowed.clone();
-        ctx.tenant_id = Some(self.effective_tenant().to_string());
-        ctx
+        SessionContext {
+            tools_allowlist: self.tools_allowlist.clone(),
+            resources_allowed: self.resources_allowed.clone(),
+            prompts_allowed: self.prompts_allowed.clone(),
+            tenant_id: Some(self.effective_tenant().to_string()),
+            ..Default::default()
+        }
     }
 }
 

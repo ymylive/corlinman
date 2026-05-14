@@ -224,10 +224,7 @@ async fn post_finalize(
 
     // Build the newapi provider entry.
     let mut params = std::collections::BTreeMap::new();
-    let admin_url = format!(
-        "{}/api",
-        body.base_url.trim_end_matches('/')
-    );
+    let admin_url = format!("{}/api", body.base_url.trim_end_matches('/'));
     params.insert("newapi_admin_url".into(), json!(admin_url));
     if let Some(at) = body.admin_token.as_ref() {
         let secret = SecretRef::Literal { value: at.clone() };

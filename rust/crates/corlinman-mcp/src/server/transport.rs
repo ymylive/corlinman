@@ -297,10 +297,7 @@ async fn connection_loop(socket: WebSocket, state: Arc<ServerState>, acl: TokenA
                     debug!(%err, "mcp: notification handler errored; suppressed per spec");
                     continue;
                 }
-                let resp = JsonRpcResponse::err(
-                    id.unwrap_or(JsonValue::Null),
-                    err.into(),
-                );
+                let resp = JsonRpcResponse::err(id.unwrap_or(JsonValue::Null), err.into());
                 if let Err(err) = send_json(&mut ws_tx, &resp).await {
                     warn!(%err, "mcp: write failed; tearing down");
                     break;

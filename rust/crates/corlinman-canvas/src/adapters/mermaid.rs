@@ -84,10 +84,7 @@ pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 ///
 /// **`--features mermaid` build**: routes to the V8-backed pipeline
 /// in [`render_with_engine`].
-pub fn render(
-    diagram: &str,
-    theme_class: ThemeClass,
-) -> Result<RenderedArtifact, CanvasError> {
+pub fn render(diagram: &str, theme_class: ThemeClass) -> Result<RenderedArtifact, CanvasError> {
     // Input cap applies regardless of feature flag — a producer
     // shouldn't be able to ship a 1 MB blob through the gateway just
     // to get a "feature disabled" reply, that's wasted bandwidth.
@@ -169,7 +166,10 @@ mod tests {
         let err = render("graph LR; A-->B", ThemeClass::TpLight)
             .expect_err("default build must report feature off");
         match err {
-            CanvasError::Adapter { kind: ArtifactKind::Mermaid, message } => {
+            CanvasError::Adapter {
+                kind: ArtifactKind::Mermaid,
+                message,
+            } => {
                 assert!(
                     message.contains("--features mermaid"),
                     "expected feature-flag hint in error: {message}",
@@ -185,11 +185,13 @@ mod tests {
     #[test]
     fn oversized_input_rejected_before_engine() {
         let huge: String = "x".repeat(DEFAULT_MAX_BYTES + 1);
-        let err = render(&huge, ThemeClass::TpLight)
-            .expect_err("oversized must error");
+        let err = render(&huge, ThemeClass::TpLight).expect_err("oversized must error");
         assert!(matches!(
             err,
-            CanvasError::BodyTooLarge { kind: ArtifactKind::Mermaid, .. }
+            CanvasError::BodyTooLarge {
+                kind: ArtifactKind::Mermaid,
+                ..
+            }
         ));
     }
 }

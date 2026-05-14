@@ -232,7 +232,7 @@ fn default_data_dir() -> PathBuf {
 // [admin]
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Validate)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdminConfig {
     pub username: Option<String>,
@@ -247,16 +247,6 @@ pub struct AdminConfig {
     /// drop their identifier in without schema churn.
     #[serde(default)]
     pub meta_approver_users: Vec<String>,
-}
-
-impl Default for AdminConfig {
-    fn default() -> Self {
-        Self {
-            username: None,
-            password_hash: None,
-            meta_approver_users: Vec::new(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1416,7 +1406,7 @@ impl Default for CanvasConfig {
 ///
 /// Defaults: `enabled = false` (operator opts in), bind to loopback
 /// `127.0.0.1:18791` (matches `phase4-roadmap.md:368`), heartbeat 20 s.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Validate)]
 #[serde(default, deny_unknown_fields)]
 pub struct McpConfig {
     /// Top-level enable flag. When `false` the gateway skips mounting
@@ -1426,15 +1416,6 @@ pub struct McpConfig {
     /// outbound mcp-stdio plugin) can land alongside without churn.
     #[validate(nested)]
     pub server: McpServerSection,
-}
-
-impl Default for McpConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            server: McpServerSection::default(),
-        }
-    }
 }
 
 /// `[mcp.server]` knobs. Same shape as [`WsToolConfig`] (bind + token)
@@ -1488,7 +1469,7 @@ impl Default for McpServerSection {
 /// explicitly sets them; the safe out-of-the-box default is the empty
 /// list (fail-closed). Tenant defaults to the workspace's
 /// `DEFAULT_TENANT_ID`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Validate)]
 #[serde(default, deny_unknown_fields)]
 pub struct McpTokenConfig {
     /// Opaque bearer string. Required (validator catches empty entries).
@@ -1509,19 +1490,6 @@ pub struct McpTokenConfig {
     /// → falls back to `corlinman_tenant::DEFAULT_TENANT_ID`.
     #[serde(default)]
     pub tenant_id: Option<String>,
-}
-
-impl Default for McpTokenConfig {
-    fn default() -> Self {
-        Self {
-            token: String::new(),
-            label: String::new(),
-            tools_allowlist: Vec::new(),
-            resources_allowed: Vec::new(),
-            prompts_allowed: Vec::new(),
-            tenant_id: None,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2374,10 +2342,7 @@ slot. Set `kind = \"...\"` explicitly. Valid kinds: {}",
                         message: "voice.enabled = true but provider_alias is empty".into(),
                         level: IssueLevel::Error,
                     });
-                } else if !self
-                    .providers
-                    .contains_key(voice.provider_alias.as_str())
-                {
+                } else if !self.providers.contains_key(voice.provider_alias.as_str()) {
                     issues.push(ValidationIssue {
                         path: "voice.provider_alias".into(),
                         code: "voice_provider_alias_missing".into(),
@@ -3910,12 +3875,14 @@ enabled = true
         // enabled = true with an alias that doesn't resolve to a
         // [providers.*] block: validator emits a Warn (not Error) so the
         // alpha can be toggled on before the operator wires the provider.
-        let mut cfg = Config::default();
-        cfg.voice = Some(VoiceConfig {
-            enabled: true,
-            provider_alias: "no-such-provider".into(),
-            ..VoiceConfig::default()
-        });
+        let cfg = Config {
+            voice: Some(VoiceConfig {
+                enabled: true,
+                provider_alias: "no-such-provider".into(),
+                ..VoiceConfig::default()
+            }),
+            ..Config::default()
+        };
         let issues = cfg.validate_report();
         let voice_issue = issues
             .iter()
@@ -3929,17 +3896,17 @@ enabled = true
         // enabled = false with a bogus alias is fine — operators should be
         // able to keep the section around with `enabled = false` for
         // reference (mirrors the [embedding] disabled-but-present pattern).
-        let mut cfg = Config::default();
-        cfg.voice = Some(VoiceConfig {
-            enabled: false,
-            provider_alias: "no-such-provider".into(),
-            ..VoiceConfig::default()
-        });
+        let cfg = Config {
+            voice: Some(VoiceConfig {
+                enabled: false,
+                provider_alias: "no-such-provider".into(),
+                ..VoiceConfig::default()
+            }),
+            ..Config::default()
+        };
         let issues = cfg.validate_report();
         assert!(
-            issues
-                .iter()
-                .all(|i| !i.code.starts_with("voice_")),
+            issues.iter().all(|i| !i.code.starts_with("voice_")),
             "no voice_* issues when disabled; got: {issues:?}"
         );
     }
@@ -3948,13 +3915,15 @@ enabled = true
     fn voice_validate_errors_on_zero_sample_rate() {
         // sample_rate_hz_in = 0 is impossible audio; should hard-error
         // rather than silently produce a broken WebSocket session.
-        let mut cfg = Config::default();
-        cfg.voice = Some(VoiceConfig {
-            enabled: true,
-            provider_alias: "openai".into(), // present in default seed
-            sample_rate_hz_in: 0,
-            ..VoiceConfig::default()
-        });
+        let cfg = Config {
+            voice: Some(VoiceConfig {
+                enabled: true,
+                provider_alias: "openai".into(), // present in default seed
+                sample_rate_hz_in: 0,
+                ..VoiceConfig::default()
+            }),
+            ..Config::default()
+        };
         let issues = cfg.validate_report();
         let issue = issues
             .iter()
@@ -3968,12 +3937,14 @@ enabled = true
         // Validator-derive `range(min = 0, max = 1440)` rejects 25h/day
         // budgets — a misconfig that would otherwise be a silent way to
         // disable the cost gate.
-        let mut cfg = Config::default();
-        cfg.voice = Some(VoiceConfig {
-            enabled: false,
-            budget_minutes_per_tenant_per_day: 9_999,
-            ..VoiceConfig::default()
-        });
+        let cfg = Config {
+            voice: Some(VoiceConfig {
+                enabled: false,
+                budget_minutes_per_tenant_per_day: 9_999,
+                ..VoiceConfig::default()
+            }),
+            ..Config::default()
+        };
         let issues = cfg.validate_report();
         assert!(
             issues

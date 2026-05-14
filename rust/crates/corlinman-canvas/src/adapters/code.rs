@@ -80,7 +80,9 @@ pub fn render(
         let mut gen = ClassedHTMLGenerator::new_with_class_style(
             syntax,
             syntaxes,
-            ClassStyle::SpacedPrefixed { prefix: CLASS_PREFIX },
+            ClassStyle::SpacedPrefixed {
+                prefix: CLASS_PREFIX,
+            },
         );
         for line in LinesWithEndings::from(source) {
             // `parse_html_for_line_which_includes_newline` returns
@@ -102,7 +104,9 @@ pub fn render(
             "language `{language}` not recognised; rendered as plain text"
         ));
         let escaped = html_escape(source);
-        format!("<pre class=\"{WRAPPER_CLASS} {WRAPPER_CLASS}--plain\"><code>{escaped}</code></pre>")
+        format!(
+            "<pre class=\"{WRAPPER_CLASS} {WRAPPER_CLASS}--plain\"><code>{escaped}</code></pre>"
+        )
     };
 
     Ok(RenderedArtifact {

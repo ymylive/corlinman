@@ -130,7 +130,11 @@ fn render_markdown(source: &str) -> Result<String, CanvasError> {
                 html.push_str("</tr>");
             }
             Event::Start(Tag::TableCell) => {
-                html.push_str(if in_thead { "<th class=\"" } else { "<td class=\"" });
+                html.push_str(if in_thead {
+                    "<th class=\""
+                } else {
+                    "<td class=\""
+                });
                 html.push_str(CELL_CLASS);
                 html.push_str("\">");
             }

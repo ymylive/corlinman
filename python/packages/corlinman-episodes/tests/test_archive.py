@@ -66,7 +66,7 @@ def _ms(days_ago: int, *, now: int = 1_700_000_000_000) -> int:
 async def _seed_episode(
     store: EpisodesStore,
     *,
-    id: str | None = None,
+    episode_id: str | None = None,
     tenant_id: str = "default",
     kind: EpisodeKind = EpisodeKind.CONVERSATION,
     summary: str = "a summary",
@@ -77,7 +77,7 @@ async def _seed_episode(
     embedding_dim: int | None = None,
 ) -> str:
     """Insert one episode row and return its id."""
-    eid = id or new_episode_id()
+    eid = episode_id or new_episode_id()
     ep = Episode(
         id=eid,
         tenant_id=tenant_id,
@@ -111,7 +111,7 @@ async def test_archives_old_unreferenced_row(
     async with EpisodesStore(episodes_db) as store:
         eid = await _seed_episode(
             store,
-            id="ep-old",
+            episode_id="ep-old",
             kind=EpisodeKind.CONVERSATION,
             summary="long-forgotten chat about haiku",
             ended_at_ms=_ms(200, now=now),
@@ -165,7 +165,7 @@ async def test_archive_skips_recently_referenced(
     async with EpisodesStore(episodes_db) as store:
         eid = await _seed_episode(
             store,
-            id="ep-warm",
+            episode_id="ep-warm",
             ended_at_ms=_ms(300, now=now),
             last_referenced_at=_ms(30, now=now),
             summary="hit recently",
@@ -195,7 +195,7 @@ async def test_archive_skips_recent_unreferenced(
     async with EpisodesStore(episodes_db) as store:
         await _seed_episode(
             store,
-            id="ep-young",
+            episode_id="ep-young",
             ended_at_ms=_ms(30, now=now),
             last_referenced_at=None,
             summary="recent chat",
@@ -218,7 +218,7 @@ async def test_archive_exempts_incident_kind(
     async with EpisodesStore(episodes_db) as store:
         eid = await _seed_episode(
             store,
-            id="ep-incident",
+            episode_id="ep-incident",
             kind=EpisodeKind.INCIDENT,
             ended_at_ms=_ms(365, now=now),  # 1 year ago, plenty stale
             last_referenced_at=None,
@@ -254,7 +254,7 @@ async def test_archive_is_idempotent_on_rerun(
     async with EpisodesStore(episodes_db) as store:
         await _seed_episode(
             store,
-            id="ep-once",
+            episode_id="ep-once",
             ended_at_ms=_ms(200, now=now),
             summary="archive me",
         )
@@ -292,7 +292,7 @@ async def test_cold_file_round_trips_embedding_hex(
     async with EpisodesStore(episodes_db) as store:
         eid = await _seed_episode(
             store,
-            id="ep-vec",
+            episode_id="ep-vec",
             ended_at_ms=_ms(200, now=now),
             embedding=blob,
             embedding_dim=4,
@@ -322,7 +322,7 @@ async def test_iter_cold_files_yields_archived(
         for i in range(3):
             await _seed_episode(
                 store,
-                id=f"ep-{i}",
+                episode_id=f"ep-{i}",
                 ended_at_ms=_ms(200 + i, now=now),
                 summary=f"summary {i}",
             )
@@ -353,14 +353,14 @@ async def test_archive_is_tenant_scoped(
     async with EpisodesStore(episodes_db) as store:
         await _seed_episode(
             store,
-            id="ep-acme",
+            episode_id="ep-acme",
             tenant_id="acme",
             ended_at_ms=_ms(200, now=now),
             summary="acme secret",
         )
         await _seed_episode(
             store,
-            id="ep-globex",
+            episode_id="ep-globex",
             tenant_id="globex",
             ended_at_ms=_ms(200, now=now),
             summary="globex secret",

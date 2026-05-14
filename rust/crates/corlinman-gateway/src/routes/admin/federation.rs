@@ -206,10 +206,7 @@ pub struct RecentProposalsOut {
 /// tenant via the [`Tenant`] extractor.
 pub fn router(state: AdminState) -> Router {
     Router::new()
-        .route(
-            "/admin/federation/peers",
-            get(list_peers).post(add_peer),
-        )
+        .route("/admin/federation/peers", get(list_peers).post(add_peer))
         .route(
             "/admin/federation/peers/:source_tenant_id",
             delete(remove_peer),
@@ -288,15 +285,15 @@ fn resolve_data_dir(state: &AdminState) -> PathBuf {
 /// proceed. Mirrors the `/admin/tenants` gate but collapses
 /// "config-off" and "admin DB missing" onto the same 503 envelope —
 /// see module docs.
-fn require_admin_db(state: &AdminState) -> Result<Arc<AdminDb>, Response> {
+fn require_admin_db(state: &AdminState) -> Result<Arc<AdminDb>, Box<Response>> {
     let cfg = state.config.load();
     if !cfg.tenants.enabled {
-        return Err(tenants_disabled_503());
+        return Err(Box::new(tenants_disabled_503()));
     }
     state
         .admin_db
         .clone()
-        .ok_or_else(tenants_disabled_503)
+        .ok_or_else(|| Box::new(tenants_disabled_503()))
 }
 
 /// Best-effort extraction of the operator's username from the
@@ -307,7 +304,10 @@ fn require_admin_db(state: &AdminState) -> Result<Arc<AdminDb>, Response> {
 /// happy-path session-cookie case where we genuinely don't have the
 /// username at this layer.
 fn admin_username(headers: &HeaderMap) -> String {
-    if let Some(auth) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+    if let Some(auth) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
         if let Some(rest) = auth.strip_prefix("Basic ") {
             if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(rest.trim()) {
                 if let Ok(s) = String::from_utf8(decoded) {
@@ -330,7 +330,7 @@ fn admin_username(headers: &HeaderMap) -> String {
 async fn list_peers(State(state): State<AdminState>, Tenant(tenant): Tenant) -> Response {
     let db = match require_admin_db(&state) {
         Ok(d) => d,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let accepted_from = match db.list_federation_sources_for(&tenant).await {
@@ -357,7 +357,7 @@ async fn add_peer(
 ) -> Response {
     let db = match require_admin_db(&state) {
         Ok(d) => d,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let Some(Json(body)) = body else {
         return invalid_tenant_slug("", "body must include source_tenant_id");
@@ -396,7 +396,10 @@ async fn add_peer(
         // Should not happen — we just inserted with INSERT OR IGNORE
         // and the read happens against the same pool. Surface as a
         // storage_error rather than panic.
-        return storage_error("readback found no row after add", "add_federation_peer.readback");
+        return storage_error(
+            "readback found no row after add",
+            "add_federation_peer.readback",
+        );
     };
 
     (
@@ -418,7 +421,7 @@ async fn remove_peer(
 ) -> Response {
     let db = match require_admin_db(&state) {
         Ok(d) => d,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let source = match TenantId::new(source_raw.clone()) {
         Ok(t) => t,
@@ -426,11 +429,7 @@ async fn remove_peer(
     };
 
     match db.remove_federation_peer(&tenant, &source).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(RemovePeerOut { removed: true }),
-        )
-            .into_response(),
+        Ok(true) => (StatusCode::OK, Json(RemovePeerOut { removed: true })).into_response(),
         Ok(false) => peer_not_found(&source_raw),
         Err(err) => storage_error(err, "remove_federation_peer"),
     }
@@ -443,7 +442,7 @@ async fn recent_proposals(
 ) -> Response {
     let _db = match require_admin_db(&state) {
         Ok(d) => d,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let source = match TenantId::new(source_raw.clone()) {
@@ -544,11 +543,7 @@ async fn recent_proposals(
         });
     }
 
-    (
-        StatusCode::OK,
-        Json(RecentProposalsOut { proposals }),
-    )
-        .into_response()
+    (StatusCode::OK, Json(RecentProposalsOut { proposals })).into_response()
 }
 
 /* ------------------------------------------------------------------ */
@@ -563,8 +558,7 @@ mod tests {
     use axum::http::Request;
     use corlinman_core::config::Config;
     use corlinman_evolution::{
-        EvolutionKind, EvolutionProposal, EvolutionRisk, EvolutionStatus, ProposalId,
-        ProposalsRepo,
+        EvolutionKind, EvolutionProposal, EvolutionRisk, EvolutionStatus, ProposalId, ProposalsRepo,
     };
     use corlinman_plugins::registry::PluginRegistry;
     use corlinman_tenant::{tenant_db_path, AdminDb, TenantId};
@@ -626,12 +620,21 @@ mod tests {
         let charlie = TenantId::new("charlie").unwrap();
 
         // acme accepts from bravo, charlie accepts from acme.
-        db.add_federation_peer(&acme, &bravo, "alice").await.unwrap();
-        db.add_federation_peer(&charlie, &acme, "bob").await.unwrap();
+        db.add_federation_peer(&acme, &bravo, "alice")
+            .await
+            .unwrap();
+        db.add_federation_peer(&charlie, &acme, "bob")
+            .await
+            .unwrap();
 
         let app = router(state);
         let resp = app
-            .oneshot(req("GET", "/admin/federation/peers", acme.clone(), Body::empty()))
+            .oneshot(req(
+                "GET",
+                "/admin/federation/peers",
+                acme.clone(),
+                Body::empty(),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -819,7 +822,9 @@ mod tests {
         let (state, db) = fresh(&tmp).await;
         let acme = TenantId::new("acme").unwrap();
         let bravo = TenantId::new("bravo").unwrap();
-        db.add_federation_peer(&acme, &bravo, "alice").await.unwrap();
+        db.add_federation_peer(&acme, &bravo, "alice")
+            .await
+            .unwrap();
 
         let app = router(state);
         let resp = app
@@ -1053,9 +1058,13 @@ mod tests {
         let bravo = TenantId::new("bravo").unwrap();
         let charlie = TenantId::new("charlie").unwrap();
 
-        db.add_federation_peer(&acme, &bravo, "alice").await.unwrap();
+        db.add_federation_peer(&acme, &bravo, "alice")
+            .await
+            .unwrap();
         // bravo accepts from charlie — must NOT show up in acme's list.
-        db.add_federation_peer(&bravo, &charlie, "bob").await.unwrap();
+        db.add_federation_peer(&bravo, &charlie, "bob")
+            .await
+            .unwrap();
 
         let app = router(state);
         let resp = app
@@ -1073,7 +1082,9 @@ mod tests {
         assert_eq!(v.accepted_from[0].source_tenant_id, "bravo");
         // bravo's accepted_from row (charlie) must not bleed in.
         assert!(
-            v.accepted_from.iter().all(|r| r.source_tenant_id != "charlie"),
+            v.accepted_from
+                .iter()
+                .all(|r| r.source_tenant_id != "charlie"),
             "acme must not see bravo's opt-in to charlie"
         );
     }

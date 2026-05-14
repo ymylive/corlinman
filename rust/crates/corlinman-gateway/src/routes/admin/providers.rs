@@ -634,9 +634,7 @@ where
     let current = state.config.load_full();
     new_cfg.merge_redacted_secrets_from(&current);
     if new_cfg.has_redacted_sentinel() {
-        tracing::error!(
-            "admin/providers: refusing to write config containing redaction sentinel",
-        );
+        tracing::error!("admin/providers: refusing to write config containing redaction sentinel",);
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({
@@ -1110,8 +1108,6 @@ mod tests {
         );
     }
 
-
-
     #[tokio::test]
     async fn upsert_rejects_newapi_without_base_url() {
         // newapi shares OpenAI wire shape but is operator-hosted — there is
@@ -1189,8 +1185,7 @@ mod tests {
         // config.toml carries the new slot.
         let toml_text = tokio::fs::read_to_string(&cfg_path).await.unwrap();
         assert!(
-            toml_text.contains("[providers.newapi]")
-                && toml_text.contains("kind = \"newapi\""),
+            toml_text.contains("[providers.newapi]") && toml_text.contains("kind = \"newapi\""),
             "config.toml should carry newapi slot; got:\n{toml_text}"
         );
 
@@ -1209,7 +1204,6 @@ mod tests {
         assert_eq!(entry["base_url"], "http://127.0.0.1:3000");
         assert_eq!(entry["enabled"], true);
     }
-
 
     /// PR-#2 review issue #1: posting a literal `api_key.value` of
     /// `"***REDACTED***"` for a slot that has *no* matching entry in the

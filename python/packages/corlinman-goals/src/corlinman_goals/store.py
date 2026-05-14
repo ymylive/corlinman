@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 
@@ -129,7 +130,7 @@ def _decode_evidence(raw: str) -> list[str]:
     return [str(i) for i in parsed]
 
 
-def _row_to_goal(row: aiosqlite.Row | tuple[object, ...]) -> Goal:
+def _row_to_goal(row: aiosqlite.Row | tuple[Any, ...]) -> Goal:
     return Goal(
         id=str(row[0]),
         agent_id=str(row[1]),
@@ -143,7 +144,7 @@ def _row_to_goal(row: aiosqlite.Row | tuple[object, ...]) -> Goal:
     )
 
 
-def _row_to_eval(row: aiosqlite.Row | tuple[object, ...]) -> GoalEvaluation:
+def _row_to_eval(row: aiosqlite.Row | tuple[Any, ...]) -> GoalEvaluation:
     return GoalEvaluation(
         goal_id=str(row[0]),
         evaluated_at_ms=int(row[1]),

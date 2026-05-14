@@ -34,9 +34,7 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use crate::manifest::{
-    AllowlistMode, McpConfig, PluginManifest, PluginType, Tool, ToolsAllowlist,
-};
+use crate::manifest::{AllowlistMode, McpConfig, PluginManifest, PluginType, Tool, ToolsAllowlist};
 use crate::runtime::mcp::client::{ClientError, McpStdioClient};
 use crate::runtime::mcp::redact::{apply_env_passthrough, RedactError};
 use crate::runtime::mcp_stdio::{build_child_env, SpawnError};
@@ -447,10 +445,7 @@ impl McpAdapter {
             }
             return Err(AdapterError::SentinelIo {
                 plugin: name.to_string(),
-                message: format!(
-                    "writing sentinel {}: {err}",
-                    path.display()
-                ),
+                message: format!("writing sentinel {}: {err}", path.display()),
             });
         }
         tracing::info!(plugin = name, sentinel = %path.display(), "MCP plugin disabled");
@@ -488,10 +483,7 @@ impl McpAdapter {
                 }
                 return Err(AdapterError::SentinelIo {
                     plugin: name.to_string(),
-                    message: format!(
-                        "removing sentinel {}: {err}",
-                        path.display()
-                    ),
+                    message: format!("removing sentinel {}: {err}", path.display()),
                 });
             }
         }
@@ -525,13 +517,14 @@ impl McpAdapter {
         env_policy: &crate::manifest::EnvPassthrough,
     ) -> Result<(McpStdioClient, InitializeResult, Vec<Tool>), AdapterError> {
         // 1. Resolve env passthrough against the parent env.
-        let applied = apply_env_passthrough(env_policy, |k| std::env::var(k).ok())
-            .map_err(|e| AdapterError::EnvPolicy {
-                plugin: manifest.name.clone(),
-                source: e,
+        let applied =
+            apply_env_passthrough(env_policy, |k| std::env::var(k).ok()).map_err(|e| {
+                AdapterError::EnvPolicy {
+                    plugin: manifest.name.clone(),
+                    source: e,
+                }
             })?;
-        let env: Vec<(std::ffi::OsString, std::ffi::OsString)> =
-            build_child_env(applied.forwarded.into_iter().map(|(k, v)| (k, v)));
+        let env: Vec<(std::ffi::OsString, std::ffi::OsString)> = build_child_env(applied.forwarded);
 
         // 2. Spawn the child + wire the framing layer.
         let client = McpStdioClient::connect_stdio(
@@ -557,12 +550,11 @@ impl McpAdapter {
             capabilities: ClientCapabilities::default(),
             client_info: self.client_info.clone(),
         };
-        let params_json = serde_json::to_value(&init_params).map_err(|e| {
-            AdapterError::Handshake {
+        let params_json =
+            serde_json::to_value(&init_params).map_err(|e| AdapterError::Handshake {
                 plugin: manifest.name.clone(),
                 source: ClientError::Serde(e),
-            }
-        })?;
+            })?;
         let deadline = Duration::from_millis(mcp_cfg.handshake_timeout_ms);
         let raw = client
             .call("initialize", params_json, Some(deadline))
@@ -573,17 +565,19 @@ impl McpAdapter {
             })?;
 
         // 4. Parse the result.
-        let init_result: InitializeResult = serde_json::from_value(raw).map_err(|e| {
-            AdapterError::InvalidInitResult {
+        let init_result: InitializeResult =
+            serde_json::from_value(raw).map_err(|e| AdapterError::InvalidInitResult {
                 plugin: manifest.name.clone(),
                 message: format!("could not deserialize InitializeResult: {e}"),
-            }
-        })?;
+            })?;
 
         // 5. Send the `notifications/initialized` notification per
         //    MCP spec — most servers idle until they see it.
         if let Err(e) = client
-            .notify("notifications/initialized", JsonValue::Object(Default::default()))
+            .notify(
+                "notifications/initialized",
+                JsonValue::Object(Default::default()),
+            )
             .await
         {
             // Notification failure means the writer task exited; the
@@ -739,7 +733,6 @@ impl McpAdapter {
             })?;
         Ok(result)
     }
-
 }
 
 /// Filename of the sentinel file used to persist the
@@ -851,7 +844,12 @@ mod tests {
         })
     }
 
-    fn manifest(name: &str, command: &str, args: &[&str], handshake_ms: u64) -> Arc<PluginManifest> {
+    fn manifest(
+        name: &str,
+        command: &str,
+        args: &[&str],
+        handshake_ms: u64,
+    ) -> Arc<PluginManifest> {
         manifest_with(name, command, args, handshake_ms, None)
     }
 
@@ -900,10 +898,7 @@ mod tests {
                     fflush()
                 }
             }'"#;
-        (
-            "sh",
-            vec!["-c".into(), script.into()],
-        )
+        ("sh", vec!["-c".into(), script.into()])
     }
 
     #[tokio::test]
@@ -914,15 +909,26 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_initialize_responder();
-        let m = manifest("fs-test", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let m = manifest(
+            "fs-test",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            5_000,
+        );
         let adapter = McpAdapter::new();
-        adapter.register(m.clone(), tmp.path().to_path_buf()).await.unwrap();
+        adapter
+            .register(m.clone(), tmp.path().to_path_buf())
+            .await
+            .unwrap();
         assert_eq!(
             adapter.status("fs-test").await.unwrap(),
             AdapterStatus::Idle
         );
 
-        adapter.start_one("fs-test").await.expect("handshake must succeed");
+        adapter
+            .start_one("fs-test")
+            .await
+            .expect("handshake must succeed");
 
         assert_eq!(
             adapter.status("fs-test").await.unwrap(),
@@ -1007,7 +1013,10 @@ mod tests {
         m.mcp = None;
         let adapter = McpAdapter::new();
         let err = adapter
-            .register(Arc::new(m), tempfile::tempdir().unwrap().path().to_path_buf())
+            .register(
+                Arc::new(m),
+                tempfile::tempdir().unwrap().path().to_path_buf(),
+            )
             .await
             .expect_err("non-mcp must reject");
         assert!(matches!(err, AdapterError::NotMcpPlugin(_)));
@@ -1023,7 +1032,12 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_initialize_responder();
-        let m = manifest("idem", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let m = manifest(
+            "idem",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            5_000,
+        );
         let adapter = McpAdapter::new();
         adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
 
@@ -1044,20 +1058,16 @@ mod tests {
     async fn statuses_listing_is_sorted_and_includes_failed() {
         let tmp = tempfile::tempdir().unwrap();
         let adapter = McpAdapter::new();
-        let m1 = manifest(
-            "zzz",
-            "/definitely/not/a/real/binary/c2-iter4",
-            &[],
-            5_000,
-        );
-        let m2 = manifest(
-            "aaa",
-            "/definitely/not/a/real/binary/c2-iter4",
-            &[],
-            5_000,
-        );
-        adapter.register(m1, tmp.path().to_path_buf()).await.unwrap();
-        adapter.register(m2, tmp.path().to_path_buf()).await.unwrap();
+        let m1 = manifest("zzz", "/definitely/not/a/real/binary/c2-iter4", &[], 5_000);
+        let m2 = manifest("aaa", "/definitely/not/a/real/binary/c2-iter4", &[], 5_000);
+        adapter
+            .register(m1, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        adapter
+            .register(m2, tmp.path().to_path_buf())
+            .await
+            .unwrap();
 
         let _ = adapter.start_one("aaa").await;
         let _ = adapter.start_one("zzz").await;
@@ -1082,10 +1092,18 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_initialize_responder();
-        let m = manifest("fs-all", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let m = manifest(
+            "fs-all",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            5_000,
+        );
         let adapter = McpAdapter::new();
         adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
-        adapter.start_one("fs-all").await.expect("start must succeed");
+        adapter
+            .start_one("fs-all")
+            .await
+            .expect("start must succeed");
 
         let tools = adapter.tools_for("fs-all").await.unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -1239,7 +1257,12 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_initialize_responder();
-        let m = manifest("fs-call", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let m = manifest(
+            "fs-call",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            5_000,
+        );
         let adapter = McpAdapter::new();
         adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.start_one("fs-call").await.unwrap();
@@ -1276,7 +1299,12 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_initialize_responder();
-        let m = manifest("fs-mux", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let m = manifest(
+            "fs-mux",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            5_000,
+        );
         let adapter = Arc::new(McpAdapter::new());
         adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.start_one("fs-mux").await.unwrap();
@@ -1345,8 +1373,10 @@ mod tests {
                 names: vec![],
             },
         );
-        assert_eq!(all.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
-            vec!["a", "b", "c"]);
+        assert_eq!(
+            all.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
 
         let allow = filter_and_project_tools(
             &upstream,
@@ -1390,22 +1420,24 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_initialize_responder();
-        let m = manifest("dis", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let m = manifest(
+            "dis",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            5_000,
+        );
         let adapter = McpAdapter::new();
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.start_one("dis").await.unwrap();
         assert!(adapter.is_alive("dis").await.unwrap());
 
         adapter.disable_one("dis").await.unwrap();
         assert!(adapter.is_disabled("dis").await.unwrap());
-        assert!(!adapter.is_alive("dis").await.unwrap(), "child must be down");
-        assert_eq!(
-            adapter.status("dis").await.unwrap(),
-            AdapterStatus::Stopped
+        assert!(
+            !adapter.is_alive("dis").await.unwrap(),
+            "child must be down"
         );
+        assert_eq!(adapter.status("dis").await.unwrap(), AdapterStatus::Stopped);
 
         // Sentinel exists on disk.
         let sentinel = tmp.path().join(DISABLED_SENTINEL_FILENAME);
@@ -1432,12 +1464,14 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_initialize_responder();
-        let m = manifest("ena", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let m = manifest(
+            "ena",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            5_000,
+        );
         let adapter = McpAdapter::new();
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.start_one("ena").await.unwrap();
         adapter.disable_one("ena").await.unwrap();
 
@@ -1459,11 +1493,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_sentinel_persists_across_register() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join(DISABLED_SENTINEL_FILENAME),
-            b"disabled\n",
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join(DISABLED_SENTINEL_FILENAME), b"disabled\n").unwrap();
 
         let m = manifest(
             "ghost-disabled",
@@ -1472,10 +1502,7 @@ mod tests {
             5_000,
         );
         let adapter = McpAdapter::new();
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         assert!(adapter.is_disabled("ghost-disabled").await.unwrap());
 
         // start_one rejects without trying to spawn (the binary doesn't
@@ -1498,10 +1525,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let m = manifest("idem-dis", "/no-binary", &[], 5_000);
         let adapter = McpAdapter::new();
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.disable_one("idem-dis").await.unwrap();
         adapter
             .disable_one("idem-dis")
@@ -1517,10 +1541,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let m = manifest("idem-ena", "/no-binary", &[], 5_000);
         let adapter = McpAdapter::new();
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter
             .enable_one("idem-ena")
             .await
@@ -1538,12 +1559,14 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_initialize_responder();
-        let m = manifest("rest", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let m = manifest(
+            "rest",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            5_000,
+        );
         let adapter = McpAdapter::new();
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.start_one("rest").await.unwrap();
         adapter.stop_one("rest").await.unwrap();
         assert_eq!(
@@ -1566,10 +1589,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let m = manifest("rest-dis", "/no-binary", &[], 5_000);
         let adapter = McpAdapter::new();
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.disable_one("rest-dis").await.unwrap();
         let err = adapter
             .restart_one("rest-dis")
@@ -1592,12 +1612,14 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_initialize_responder();
-        let m = manifest("dis-call", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 5_000);
+        let m = manifest(
+            "dis-call",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            5_000,
+        );
         let adapter = McpAdapter::new();
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.start_one("dis-call").await.unwrap();
         adapter.disable_one("dis-call").await.unwrap();
 

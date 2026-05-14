@@ -34,15 +34,24 @@ fn sparkline_4_points() {
     // Path: 1 M (move-to) + 3 L (line-to) for a 4-point series.
     let m_count = html.matches('M').count();
     let l_count = html.matches('L').count();
-    assert_eq!(m_count, 1, "expected exactly 1 M (move-to), got {m_count}: {html}");
-    assert_eq!(l_count, 3, "expected exactly 3 L (line-to), got {l_count}: {html}");
+    assert_eq!(
+        m_count, 1,
+        "expected exactly 1 M (move-to), got {m_count}: {html}"
+    );
+    assert_eq!(
+        l_count, 3,
+        "expected exactly 3 L (line-to), got {l_count}: {html}"
+    );
 
     // Min should be at the bottom (high y), max at the top (low y).
     // We can't reliably parse floats without depending on a quoted
     // pattern; instead assert that 9.0 (the max) appears earlier in
     // the path than the smaller values via baseline padding (Y_PAD =
     // 1.0): the max y-coord should be `1.000`.
-    assert!(html.contains("1.000"), "expected y=1.000 (top, max=9): {html}");
+    assert!(
+        html.contains("1.000"),
+        "expected y=1.000 (top, max=9): {html}"
+    );
 
     // viewBox carries the right width: 3 segments * 8 step = 24.
     assert!(html.contains("viewBox=\"0 0 24"));
@@ -76,17 +85,29 @@ fn sparkline_empty_rejected() {
     // Zero points.
     let zero = renderer.render(&CanvasPresentPayload {
         artifact_kind: ArtifactKind::Sparkline,
-        body: ArtifactBody::Sparkline { values: vec![], unit: None },
+        body: ArtifactBody::Sparkline {
+            values: vec![],
+            unit: None,
+        },
         idempotency_key: "art_spark_empty".into(),
         theme_hint: None,
     });
     let err = zero.expect_err("empty must error");
-    assert!(matches!(err, CanvasError::Adapter { kind: ArtifactKind::Sparkline, .. }));
+    assert!(matches!(
+        err,
+        CanvasError::Adapter {
+            kind: ArtifactKind::Sparkline,
+            ..
+        }
+    ));
 
     // One point.
     let one = renderer.render(&CanvasPresentPayload {
         artifact_kind: ArtifactKind::Sparkline,
-        body: ArtifactBody::Sparkline { values: vec![3.14], unit: None },
+        body: ArtifactBody::Sparkline {
+            values: vec![3.15],
+            unit: None,
+        },
         idempotency_key: "art_spark_one".into(),
         theme_hint: None,
     });
@@ -102,7 +123,10 @@ fn sparkline_non_finite_rejected() {
     for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let result = renderer.render(&CanvasPresentPayload {
             artifact_kind: ArtifactKind::Sparkline,
-            body: ArtifactBody::Sparkline { values: vec![1.0, bad, 2.0], unit: None },
+            body: ArtifactBody::Sparkline {
+                values: vec![1.0, bad, 2.0],
+                unit: None,
+            },
             idempotency_key: "art_spark_bad".into(),
             theme_hint: None,
         });
@@ -131,12 +155,12 @@ fn sparkline_oversized_rejected() {
 /// `<script>` in the unit must not get it into the title or label.
 #[test]
 fn sparkline_unit_html_escaped() {
-    let out = render_spark(
-        vec![1.0, 2.0],
-        Some("<script>alert(1)</script>".into()),
-    );
+    let out = render_spark(vec![1.0, 2.0], Some("<script>alert(1)</script>".into()));
     let html = &out.html_fragment;
-    assert!(!html.contains("<script>"), "raw <script> reached HTML: {html}");
+    assert!(
+        !html.contains("<script>"),
+        "raw <script> reached HTML: {html}"
+    );
     assert!(html.contains("&lt;script&gt;"));
 }
 
@@ -147,7 +171,10 @@ fn sparkline_theme_class_echoed() {
     let out = Renderer::new()
         .render(&CanvasPresentPayload {
             artifact_kind: ArtifactKind::Sparkline,
-            body: ArtifactBody::Sparkline { values: vec![1.0, 2.0], unit: None },
+            body: ArtifactBody::Sparkline {
+                values: vec![1.0, 2.0],
+                unit: None,
+            },
             idempotency_key: "art_spark_theme".into(),
             theme_hint: Some(ThemeClass::TpDark),
         })

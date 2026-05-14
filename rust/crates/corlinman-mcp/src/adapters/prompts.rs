@@ -132,18 +132,16 @@ impl CapabilityAdapter for PromptsAdapter {
         match method {
             METHOD_LIST => {
                 let list = self.list_prompts(ctx);
-                serde_json::to_value(list).map_err(|e| {
-                    McpError::Internal(format!("prompts/list: serialize result: {e}"))
-                })
+                serde_json::to_value(list)
+                    .map_err(|e| McpError::Internal(format!("prompts/list: serialize result: {e}")))
             }
             METHOD_GET => {
                 let parsed: GetParams = serde_json::from_value(params).map_err(|e| {
                     McpError::invalid_params(format!("prompts/get: bad params: {e}"))
                 })?;
                 let result = self.get_prompt(parsed, ctx)?;
-                serde_json::to_value(result).map_err(|e| {
-                    McpError::Internal(format!("prompts/get: serialize result: {e}"))
-                })
+                serde_json::to_value(result)
+                    .map_err(|e| McpError::Internal(format!("prompts/get: serialize result: {e}")))
             }
             other => Err(McpError::MethodNotFound(other.to_string())),
         }
@@ -168,9 +166,7 @@ mod tests {
             let path = tmp.path().join(format!("{name}.md"));
             let mut f = std::fs::File::create(&path).unwrap();
             // Skill frontmatter: name + description are the minimum.
-            let frontmatter = format!(
-                "---\nname: {name}\ndescription: {desc}\n---\n{body}"
-            );
+            let frontmatter = format!("---\nname: {name}\ndescription: {desc}\n---\n{body}");
             f.write_all(frontmatter.as_bytes()).unwrap();
         }
         let reg = SkillRegistry::load_from_dir(tmp.path()).expect("skill registry load");
@@ -192,10 +188,7 @@ mod tests {
         );
         // Argument schema is empty by design (skills lack params today).
         assert!(result.prompts[0].arguments.is_empty());
-        assert_eq!(
-            result.prompts[0].description.as_deref(),
-            Some("a desc")
-        );
+        assert_eq!(result.prompts[0].description.as_deref(), Some("a desc"));
     }
 
     #[tokio::test]
@@ -206,8 +199,10 @@ mod tests {
             ("other-thing", "x", "x"),
         ]);
         let adapter = PromptsAdapter::new(reg);
-        let mut ctx = SessionContext::default();
-        ctx.prompts_allowed = vec!["kb-*".to_string()];
+        let ctx = SessionContext {
+            prompts_allowed: vec!["kb-*".to_string()],
+            ..Default::default()
+        };
         let result = adapter.list_prompts(&ctx);
         let names: Vec<_> = result.prompts.iter().map(|p| p.name.clone()).collect();
         assert_eq!(
@@ -267,8 +262,10 @@ mod tests {
     async fn get_disallowed_name_returns_invalid_params_with_distinct_message() {
         let (reg, _tmp) = make_registry(&[("foo", "x", "x")]);
         let adapter = PromptsAdapter::new(reg);
-        let mut ctx = SessionContext::default();
-        ctx.prompts_allowed = vec!["other-*".to_string()];
+        let ctx = SessionContext {
+            prompts_allowed: vec!["other-*".to_string()],
+            ..Default::default()
+        };
         let err = adapter
             .get_prompt(
                 GetParams {

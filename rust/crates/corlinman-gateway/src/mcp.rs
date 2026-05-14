@@ -58,12 +58,7 @@ pub fn token_config_to_acl(t: &corlinman_core::config::McpTokenConfig) -> TokenA
 /// Build an [`McpServerConfig`] from the gateway's [`McpConfig`].
 pub fn build_server_config(cfg: &McpConfig) -> McpServerConfig {
     McpServerConfig {
-        tokens: cfg
-            .server
-            .tokens
-            .iter()
-            .map(token_config_to_acl)
-            .collect(),
+        tokens: cfg.server.tokens.iter().map(token_config_to_acl).collect(),
         max_frame_bytes: cfg.server.max_frame_bytes as usize,
     }
 }
@@ -80,8 +75,8 @@ pub fn build_dispatcher(
     memory_hosts: BTreeMap<String, Arc<dyn MemoryHost>>,
     runtime: Arc<dyn PluginRuntime>,
 ) -> AdapterDispatcher {
-    let tools = Arc::new(ToolsAdapter::with_runtime(plugins, runtime))
-        as Arc<dyn CapabilityAdapter>;
+    let tools =
+        Arc::new(ToolsAdapter::with_runtime(plugins, runtime)) as Arc<dyn CapabilityAdapter>;
     let resources =
         Arc::new(ResourcesAdapter::new(memory_hosts, skills.clone())) as Arc<dyn CapabilityAdapter>;
     let prompts = Arc::new(corlinman_mcp::adapters::PromptsAdapter::new(skills))
@@ -172,8 +167,10 @@ mod tests {
 
     #[test]
     fn build_router_returns_none_when_disabled() {
-        let mut cfg = McpConfig::default();
-        cfg.enabled = false;
+        let cfg = McpConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let plugins = Arc::new(PluginRegistry::default());
         let skills = Arc::new(SkillRegistry::default());
         let hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
@@ -183,22 +180,24 @@ mod tests {
 
     #[test]
     fn build_server_config_carries_frame_cap_and_tokens() {
-        let mut cfg = McpConfig::default();
-        cfg.server = McpServerSection {
-            bind: "127.0.0.1:18791".into(),
-            allowed_origins: vec![],
-            max_frame_bytes: 8192,
-            inactivity_timeout_secs: 300,
-            heartbeat_secs: 20,
-            max_concurrent_sessions: 4,
-            tokens: vec![McpTokenConfig {
-                token: "tok-1".into(),
-                label: "lap".into(),
-                tools_allowlist: vec!["*".into()],
-                resources_allowed: vec!["*".into()],
-                prompts_allowed: vec!["*".into()],
-                tenant_id: None,
-            }],
+        let cfg = McpConfig {
+            server: McpServerSection {
+                bind: "127.0.0.1:18791".into(),
+                allowed_origins: vec![],
+                max_frame_bytes: 8192,
+                inactivity_timeout_secs: 300,
+                heartbeat_secs: 20,
+                max_concurrent_sessions: 4,
+                tokens: vec![McpTokenConfig {
+                    token: "tok-1".into(),
+                    label: "lap".into(),
+                    tools_allowlist: vec!["*".into()],
+                    resources_allowed: vec!["*".into()],
+                    prompts_allowed: vec!["*".into()],
+                    tenant_id: None,
+                }],
+            },
+            ..Default::default()
         };
         let s = build_server_config(&cfg);
         assert_eq!(s.max_frame_bytes, 8192);

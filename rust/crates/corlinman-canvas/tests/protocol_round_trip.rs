@@ -5,8 +5,7 @@
 //! contract without re-derivation.
 
 use corlinman_canvas::{
-    ArtifactBody, ArtifactKind, CanvasError, CanvasPresentPayload, Renderer,
-    ThemeClass,
+    ArtifactBody, ArtifactKind, CanvasError, CanvasPresentPayload, Renderer, ThemeClass,
 };
 
 /// `protocol_present_payload_round_trips` — every kind survives
@@ -62,8 +61,7 @@ fn protocol_present_payload_round_trips() {
 
     for original in cases {
         let json = serde_json::to_string(&original).expect("serialise");
-        let restored: CanvasPresentPayload =
-            serde_json::from_str(&json).expect("deserialise");
+        let restored: CanvasPresentPayload = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(
             original, restored,
             "round-trip mismatch for {:?}",
@@ -93,8 +91,7 @@ fn protocol_table_csv_round_trip() {
         theme_hint: None,
     };
     let json = serde_json::to_string(&original).expect("serialise");
-    let restored: CanvasPresentPayload =
-        serde_json::from_str(&json).expect("deserialise");
+    let restored: CanvasPresentPayload = serde_json::from_str(&json).expect("deserialise");
     assert_eq!(original, restored);
 }
 
@@ -146,7 +143,10 @@ fn renderer_dispatch_is_exhaustive() {
         .expect_err("mermaid must error under default features");
 
     match mermaid_err {
-        CanvasError::Adapter { kind: ArtifactKind::Mermaid, .. } => { /* expected */ }
+        CanvasError::Adapter {
+            kind: ArtifactKind::Mermaid,
+            ..
+        } => { /* expected */ }
         // If `--features mermaid` is enabled we may instead see a
         // different Adapter message (the JS-bundle scaffold), but
         // either way the variant must be Adapter — never

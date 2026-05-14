@@ -499,7 +499,9 @@ async fn render_code_artifact_returns_html_and_hash() {
     assert_eq!(v["theme_class"], "tp-light");
     let hash = v["content_hash"].as_str().unwrap();
     assert_eq!(hash.len(), 64, "blake3 hex: {hash}");
-    assert!(hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(hash
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
 
     gw.shutdown().await;
 }
@@ -797,7 +799,9 @@ async fn e2e_code_block_round_trip_renders_in_present_frame() {
     // 64-char blake3 hex content_hash.
     let hash = rendered["content_hash"].as_str().unwrap();
     assert_eq!(hash.len(), 64);
-    assert!(hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(hash
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
 
     gw.shutdown().await;
 }

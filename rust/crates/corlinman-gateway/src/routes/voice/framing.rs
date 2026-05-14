@@ -83,7 +83,7 @@ pub fn accept_subprotocol(header: Option<&str>) -> SubprotocolDecision {
         }
     };
     for token in raw.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()) {
-        if SUBPROTOCOLS.iter().any(|p| *p == token) {
+        if SUBPROTOCOLS.contains(&token) {
             // Return the canonical reference rather than the user-supplied
             // slice so the upgrade response uses our spelling (case &
             // whitespace canonicalised).

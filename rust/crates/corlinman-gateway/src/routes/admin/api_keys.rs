@@ -13,18 +13,18 @@
 //! Three routes, all behind `require_admin` and `tenant_scope`:
 //!
 //! - `POST   /admin/api_keys`
-//!     body  `{ scope: string, username?: string, label?: string }`
-//!     → 201 `{ key_id, token, scope, username, label, tenant_id,
-//!             created_at_ms }`. The cleartext `token` is returned
-//!     **once** — subsequent listings show the hash only.
+//!   body  `{ scope: string, username?: string, label?: string }`
+//!   → 201 `{ key_id, token, scope, username, label, tenant_id,
+//!   created_at_ms }`. The cleartext `token` is returned
+//!   **once** — subsequent listings show the hash only.
 //! - `GET    /admin/api_keys`
-//!     → `{ keys: [{ key_id, scope, username, label, created_at_ms,
-//!                   last_used_at_ms }] }`. Active keys for the
-//!     resolved tenant, ordered by `created_at_ms DESC`.
+//!   → `{ keys: [{ key_id, scope, username, label, created_at_ms,
+//!   last_used_at_ms }] }`. Active keys for the
+//!   resolved tenant, ordered by `created_at_ms DESC`.
 //! - `DELETE /admin/api_keys/:key_id`
-//!     → `{ revoked: bool }`. `false` is a 404 (key already revoked or
-//!     never existed) so the UI can distinguish typos from idempotent
-//!     revokes.
+//!   → `{ revoked: bool }`. `false` is a 404 (key already revoked or
+//!   never existed) so the UI can distinguish typos from idempotent
+//!   revokes.
 //!
 //! ### Disabled / not-found paths
 //!
@@ -165,10 +165,10 @@ fn tenants_disabled() -> Response {
         .into_response()
 }
 
-fn require_admin_db(state: &AdminState) -> Result<Arc<AdminDb>, Response> {
+fn require_admin_db(state: &AdminState) -> Result<Arc<AdminDb>, Box<Response>> {
     match state.admin_db.as_ref() {
         Some(db) => Ok(db.clone()),
-        None => Err(tenants_disabled()),
+        None => Err(Box::new(tenants_disabled())),
     }
 }
 
@@ -179,7 +179,7 @@ async fn mint_key(
 ) -> Response {
     let db = match require_admin_db(&state) {
         Ok(db) => db,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let scope = body.scope.trim();
@@ -207,11 +207,9 @@ async fn mint_key(
         .filter(|l| !l.is_empty());
 
     match db.mint_api_key(&tenant_id, username, scope, label).await {
-        Ok(minted) => (
-            StatusCode::CREATED,
-            Json(MintResponse::from_minted(minted)),
-        )
-            .into_response(),
+        Ok(minted) => {
+            (StatusCode::CREATED, Json(MintResponse::from_minted(minted))).into_response()
+        }
         Err(err) => {
             warn!(error = %err, tenant = %tenant_id.as_str(), "admin/api_keys: mint failed");
             (
@@ -226,13 +224,10 @@ async fn mint_key(
     }
 }
 
-async fn list_keys(
-    State(state): State<AdminState>,
-    Tenant(tenant_id): Tenant,
-) -> Response {
+async fn list_keys(State(state): State<AdminState>, Tenant(tenant_id): Tenant) -> Response {
     let db = match require_admin_db(&state) {
         Ok(db) => db,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     match db.list_api_keys(&tenant_id).await {
@@ -261,7 +256,7 @@ async fn revoke_key(
 ) -> Response {
     let db = match require_admin_db(&state) {
         Ok(db) => db,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     match db.revoke_api_key(&key_id).await {
@@ -269,7 +264,7 @@ async fn revoke_key(
             "revoked": true,
             "key_id": key_id,
         }))
-            .into_response(),
+        .into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(json!({
@@ -401,13 +396,19 @@ mod tests {
         .unwrap();
         let resp = app
             .clone()
-            .oneshot(auth_req("POST", "/admin/api_keys?tenant=acme", Body::from(body)))
+            .oneshot(auth_req(
+                "POST",
+                "/admin/api_keys?tenant=acme",
+                Body::from(body),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let token = v["token"].as_str().expect("token must appear in mint response");
+        let token = v["token"]
+            .as_str()
+            .expect("token must appear in mint response");
         assert!(token.starts_with("ck_"));
         assert_eq!(token.len(), 67);
         assert_eq!(v["tenant_id"], "acme");
@@ -419,7 +420,11 @@ mod tests {
         // List — token must NOT appear; the row's metadata does.
         let resp = app
             .clone()
-            .oneshot(auth_req("GET", "/admin/api_keys?tenant=acme", Body::empty()))
+            .oneshot(auth_req(
+                "GET",
+                "/admin/api_keys?tenant=acme",
+                Body::empty(),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -430,8 +435,14 @@ mod tests {
         assert_eq!(keys[0]["key_id"], key_id);
         assert_eq!(keys[0]["scope"], "chat");
         assert_eq!(keys[0]["label"], "MacBook");
-        assert!(keys[0].get("token").is_none(), "list must not leak the cleartext");
-        assert!(keys[0].get("token_hash").is_none(), "list must not leak the hash either");
+        assert!(
+            keys[0].get("token").is_none(),
+            "list must not leak the cleartext"
+        );
+        assert!(
+            keys[0].get("token_hash").is_none(),
+            "list must not leak the hash either"
+        );
     }
 
     #[tokio::test]
@@ -439,7 +450,11 @@ mod tests {
         let (app, _state, _tmp) = fixture(true).await;
         let body = serde_json::to_vec(&serde_json::json!({ "scope": "  " })).unwrap();
         let resp = app
-            .oneshot(auth_req("POST", "/admin/api_keys?tenant=acme", Body::from(body)))
+            .oneshot(auth_req(
+                "POST",
+                "/admin/api_keys?tenant=acme",
+                Body::from(body),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -462,7 +477,11 @@ mod tests {
             .unwrap();
             let resp = app
                 .clone()
-                .oneshot(auth_req("POST", "/admin/api_keys?tenant=acme", Body::from(body)))
+                .oneshot(auth_req(
+                    "POST",
+                    "/admin/api_keys?tenant=acme",
+                    Body::from(body),
+                ))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::CREATED);
@@ -493,7 +512,11 @@ mod tests {
         // List has only the survivor.
         let resp = app
             .clone()
-            .oneshot(auth_req("GET", "/admin/api_keys?tenant=acme", Body::empty()))
+            .oneshot(auth_req(
+                "GET",
+                "/admin/api_keys?tenant=acme",
+                Body::empty(),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);

@@ -79,7 +79,7 @@ from corlinman_providers.base import ProviderChunk
 #: dispatch overhead is a small fraction of the measurement (so the
 #: serial-vs-parallel ratio is dominated by the sleep) and (b) small
 #: enough that the test still completes in well under one second per
-#: leg. ~150ms per child × 3 = ~450ms serial; concurrent ≈ 150ms.
+#: leg. ~150ms per child x 3 = ~450ms serial; concurrent ≈ 150ms.
 _CHILD_SLEEP_SECONDS: float = 0.15
 
 #: Number of children spawned in parallel. Three matches the canonical
@@ -90,7 +90,7 @@ _CHILD_SLEEP_SECONDS: float = 0.15
 _FANOUT_DEGREE: int = 3
 
 #: Acceptance ratio from ``phase4-roadmap.md:309,429``. Parallel
-#: wall-clock must be strictly less than 0.7 × the serial wall-clock.
+#: wall-clock must be strictly less than 0.7 x the serial wall-clock.
 _ACCEPTANCE_RATIO: float = 0.7
 
 #: Per-child sub-topics. Match the design's "research X, summarize,
@@ -341,7 +341,7 @@ async def test_e2e_research_fanout_beats_serial_walltime() -> None:
     )
 
     # Also assert the parallel wall-clock is in the right order of
-    # magnitude — within 3× the per-child sleep. Catches a future
+    # magnitude — within 3x the per-child sleep. Catches a future
     # regression where dispatch overhead balloons (e.g. an accidental
     # synchronous file IO on every spawn) without it actually
     # serialising the children.

@@ -55,7 +55,7 @@ from corlinman_episodes import (
 from corlinman_episodes.distiller import SummaryProvider
 from corlinman_episodes.sources import SourceBundle
 
-from tests._seed import (
+from ._seed import (
     insert_hook_event,
     insert_proposal_with_history,
     insert_session_message,
@@ -399,7 +399,7 @@ def test_resolver_summary_char_cap_pinned_to_rust_value() -> None:
         "SUMMARY_CHAR_CAP not found in gateway resolver — was it renamed?"
     )
     rust_value = int(match.group(1))
-    assert RESOLVER_SUMMARY_CHAR_CAP == rust_value, (
+    assert rust_value == RESOLVER_SUMMARY_CHAR_CAP, (
         f"Python mirror RESOLVER_SUMMARY_CHAR_CAP={RESOLVER_SUMMARY_CHAR_CAP} "
         f"drifted from Rust SUMMARY_CHAR_CAP={rust_value}"
     )

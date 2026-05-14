@@ -42,10 +42,7 @@ where
 /// `Option<JsonValue>`; round-trip preserves the distinction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
-    #[serde(
-        default = "jsonrpc_default",
-        deserialize_with = "deserialize_jsonrpc"
-    )]
+    #[serde(default = "jsonrpc_default", deserialize_with = "deserialize_jsonrpc")]
     pub jsonrpc: String,
     /// Notification when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,19 +67,13 @@ impl JsonRpcRequest {
 #[serde(untagged)]
 pub enum JsonRpcResponse {
     Result {
-        #[serde(
-            default = "jsonrpc_default",
-            deserialize_with = "deserialize_jsonrpc"
-        )]
+        #[serde(default = "jsonrpc_default", deserialize_with = "deserialize_jsonrpc")]
         jsonrpc: String,
         id: JsonValue,
         result: JsonValue,
     },
     Error {
-        #[serde(
-            default = "jsonrpc_default",
-            deserialize_with = "deserialize_jsonrpc"
-        )]
+        #[serde(default = "jsonrpc_default", deserialize_with = "deserialize_jsonrpc")]
         jsonrpc: String,
         id: JsonValue,
         error: JsonRpcError,
@@ -203,7 +194,11 @@ pub struct ServerCapabilities {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolsCapability {
-    #[serde(default, rename = "listChanged", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "listChanged",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub list_changed: Option<bool>,
 }
 
@@ -211,13 +206,21 @@ pub struct ToolsCapability {
 pub struct ResourcesCapability {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscribe: Option<bool>,
-    #[serde(default, rename = "listChanged", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "listChanged",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub list_changed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PromptsCapability {
-    #[serde(default, rename = "listChanged", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "listChanged",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub list_changed: Option<bool>,
 }
 
@@ -232,7 +235,11 @@ pub mod tools {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ListResult {
         pub tools: Vec<ToolDescriptor>,
-        #[serde(default, rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "nextCursor",
+            skip_serializing_if = "Option::is_none"
+        )]
         pub next_cursor: Option<String>,
     }
 
@@ -298,7 +305,11 @@ pub mod resources {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ListResult {
         pub resources: Vec<Resource>,
-        #[serde(default, rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "nextCursor",
+            skip_serializing_if = "Option::is_none"
+        )]
         pub next_cursor: Option<String>,
     }
 
@@ -366,7 +377,11 @@ pub mod prompts {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ListResult {
         pub prompts: Vec<Prompt>,
-        #[serde(default, rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "nextCursor",
+            skip_serializing_if = "Option::is_none"
+        )]
         pub next_cursor: Option<String>,
     }
 

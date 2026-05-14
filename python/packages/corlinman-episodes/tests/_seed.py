@@ -1,6 +1,6 @@
 """Synchronous insert helpers for ``corlinman-episodes`` tests.
 
-Importable as ``from tests._seed import insert_signal`` etc. — kept
+Importable as ``from ._seed import insert_signal`` etc. — kept
 out of ``conftest.py`` because pytest only auto-imports fixture
 *decorated* names there; raw helpers need a real module path so test
 files can ``from`` them directly under ``importlib`` import-mode.

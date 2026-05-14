@@ -67,13 +67,17 @@ pub type CacheKey = [u8; 32];
 pub struct RenderCache {
     /// `None` ↔ disabled (capacity 0). Constructed once at
     /// `RenderCache::new`; never flips at runtime.
+    #[allow(clippy::type_complexity)]
     inner: Option<Arc<Mutex<LruCache<CacheKey, Arc<RenderedArtifact>>>>>,
 }
 
 impl std::fmt::Debug for RenderCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.inner {
-            None => f.debug_struct("RenderCache").field("disabled", &true).finish(),
+            None => f
+                .debug_struct("RenderCache")
+                .field("disabled", &true)
+                .finish(),
             Some(c) => {
                 let len = c.lock().map(|g| g.len()).unwrap_or(0);
                 f.debug_struct("RenderCache")
@@ -141,11 +145,7 @@ impl RenderCache {
 
     /// Insert and return the same `Arc` (so callers can hand it to
     /// the next layer without re-locking). No-op when disabled.
-    pub fn insert(
-        &self,
-        key: CacheKey,
-        artifact: Arc<RenderedArtifact>,
-    ) -> Arc<RenderedArtifact> {
+    pub fn insert(&self, key: CacheKey, artifact: Arc<RenderedArtifact>) -> Arc<RenderedArtifact> {
         if let Some(inner) = self.inner.as_ref() {
             if let Ok(mut guard) = inner.lock() {
                 guard.put(key, artifact.clone());
@@ -343,7 +343,9 @@ mod tests {
         let k = key_for(ArtifactKind::Code, &body_a(), ThemeClass::TpLight);
         let hex = key_to_hex(&k);
         assert_eq!(hex.len(), 64);
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]

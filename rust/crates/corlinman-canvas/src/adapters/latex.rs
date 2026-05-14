@@ -66,7 +66,7 @@
 
 use std::sync::OnceLock;
 
-use katex::{KatexContext, OutputFormat, Settings, StrictMode, StrictSetting, render_to_string};
+use katex::{render_to_string, KatexContext, OutputFormat, Settings, StrictMode, StrictSetting};
 
 use crate::protocol::{ArtifactKind, CanvasError, RenderedArtifact, ThemeClass};
 

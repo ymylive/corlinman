@@ -33,7 +33,7 @@ from corlinman_episodes.config import EpisodesConfig
 from corlinman_episodes.distiller import make_constant_provider
 from corlinman_episodes.store import EpisodesStore
 
-from tests._seed import insert_session_message
+from ._seed import insert_session_message
 
 # ---------------------------------------------------------------------------
 # Helpers

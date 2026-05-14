@@ -65,7 +65,10 @@ pub enum SpawnError {
     /// because we explicitly request `Stdio::piped()` for all three
     /// fds, but defensive against future tokio surprises.
     #[error("child {pid:?} reported missing stdio pipe ({which})")]
-    MissingPipe { pid: Option<u32>, which: &'static str },
+    MissingPipe {
+        pid: Option<u32>,
+        which: &'static str,
+    },
 }
 
 /// Owned handle to a spawned MCP child. Drop kills the process.
@@ -304,13 +307,8 @@ mod tests {
     #[tokio::test]
     async fn bad_cwd_returns_error() {
         let env = build_child_env(std::iter::empty::<(String, String)>());
-        let err = spawn_mcp_child(
-            "cat",
-            &[],
-            Path::new("/definitely/not/a/dir/c2-iter2"),
-            env,
-        )
-        .expect_err("bad cwd must error");
+        let err = spawn_mcp_child("cat", &[], Path::new("/definitely/not/a/dir/c2-iter2"), env)
+            .expect_err("bad cwd must error");
         assert!(
             matches!(err, SpawnError::BadCwd { .. }),
             "expected BadCwd variant, got {err:?}"
@@ -330,8 +328,8 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let env = build_child_env(std::iter::empty::<(String, String)>());
-        let child = spawn_mcp_child("sleep", &["120".to_string()], tmp.path(), env)
-            .expect("spawn sleep");
+        let child =
+            spawn_mcp_child("sleep", &["120".to_string()], tmp.path(), env).expect("spawn sleep");
         let pid = child.pid().expect("pid available");
         drop(child);
 
@@ -360,9 +358,7 @@ mod tests {
         if r == 0 {
             return true;
         }
-        let errno = std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(0);
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
         // ESRCH == 3 on Linux/macOS; EPERM == 1.
         errno == libc::EPERM
     }
@@ -375,10 +371,7 @@ mod tests {
     fn build_child_env_includes_required_keys() {
         // PATH is set in every reasonable test environment.
         let env = build_child_env(std::iter::empty::<(String, String)>());
-        let keys: Vec<&str> = env
-            .iter()
-            .map(|(k, _)| k.to_str().unwrap_or(""))
-            .collect();
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.to_str().unwrap_or("")).collect();
         assert!(
             keys.contains(&"PATH"),
             "PATH must be forwarded; got {:?}",

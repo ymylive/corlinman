@@ -660,8 +660,8 @@ mod tests {
     // ----- Iter 8: MCP admin mutations (disable / enable / restart) -----
 
     use corlinman_plugins::manifest::{
-        AllowlistMode, EntryPoint, EnvPassthrough, McpConfig, PluginManifest,
-        ResourcesAllowlist, RestartPolicy, ToolsAllowlist,
+        AllowlistMode, EntryPoint, EnvPassthrough, McpConfig, PluginManifest, ResourcesAllowlist,
+        RestartPolicy, ToolsAllowlist,
     };
 
     fn mcp_manifest(name: &str, command: &str, args: &[&str]) -> Arc<PluginManifest> {
@@ -746,17 +746,16 @@ mod tests {
 
     /// Helper: build an `Arc<McpAdapter>` with `name` registered + started.
     /// Returns the tempdir so the manifest dir survives the test.
-    async fn live_adapter_with(
-        name: &str,
-    ) -> (tempfile::TempDir, Arc<McpAdapter>) {
+    async fn live_adapter_with(name: &str) -> (tempfile::TempDir, Arc<McpAdapter>) {
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_responder();
-        let m = mcp_manifest(name, cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let m = mcp_manifest(
+            name,
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
         let adapter = Arc::new(McpAdapter::new());
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.start_one(name).await.unwrap();
         (tmp, adapter)
     }
@@ -862,10 +861,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let m = mcp_manifest("admin-dis-409", "/no-binary", &[]);
         let adapter = Arc::new(McpAdapter::new());
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.disable_one("admin-dis-409").await.unwrap();
 
         let app = mcp_admin_router(adapter);

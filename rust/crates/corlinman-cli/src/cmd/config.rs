@@ -150,45 +150,6 @@ fn migrate_sub2api(path: Option<PathBuf>, apply: bool) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rewrite_changes_only_kind_sub2api_lines() {
-        let i = r#"
-[providers.subhub]
-kind = "sub2api"
-base_url = "http://127.0.0.1:7980"
-api_key = { env = "SUB2API_KEY" }
-
-[providers.openai]
-kind = "openai"
-api_key = { env = "OPENAI_API_KEY" }
-"#;
-        let o = rewrite_sub2api_to_newapi(i);
-        assert!(o.contains("kind = \"newapi\""));
-        assert!(!o.contains("kind = \"sub2api\""));
-        assert!(o.contains("http://127.0.0.1:7980"));
-        assert!(o.contains("[providers.openai]"));
-        assert!(o.contains("kind = \"openai\""));
-    }
-
-    #[test]
-    fn rewrite_idempotent_when_already_newapi() {
-        let i = "[providers.x]\nkind = \"newapi\"\nbase_url = \"http://x\"\n";
-        let o = rewrite_sub2api_to_newapi(i);
-        assert_eq!(o, i);
-    }
-
-    #[test]
-    fn rewrite_handles_indented_kind_line() {
-        let i = "[providers.x]\n  kind = \"sub2api\"\n";
-        let o = rewrite_sub2api_to_newapi(i);
-        assert!(o.contains("  kind = \"newapi\""));
-    }
-}
-
 fn resolve_path(explicit: Option<PathBuf>) -> PathBuf {
     explicit.unwrap_or_else(Config::default_path)
 }
@@ -315,4 +276,43 @@ fn diff(path: Option<PathBuf>) -> Result<()> {
     println!("# defaults:");
     println!("{def_toml}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_changes_only_kind_sub2api_lines() {
+        let i = r#"
+[providers.subhub]
+kind = "sub2api"
+base_url = "http://127.0.0.1:7980"
+api_key = { env = "SUB2API_KEY" }
+
+[providers.openai]
+kind = "openai"
+api_key = { env = "OPENAI_API_KEY" }
+"#;
+        let o = rewrite_sub2api_to_newapi(i);
+        assert!(o.contains("kind = \"newapi\""));
+        assert!(!o.contains("kind = \"sub2api\""));
+        assert!(o.contains("http://127.0.0.1:7980"));
+        assert!(o.contains("[providers.openai]"));
+        assert!(o.contains("kind = \"openai\""));
+    }
+
+    #[test]
+    fn rewrite_idempotent_when_already_newapi() {
+        let i = "[providers.x]\nkind = \"newapi\"\nbase_url = \"http://x\"\n";
+        let o = rewrite_sub2api_to_newapi(i);
+        assert_eq!(o, i);
+    }
+
+    #[test]
+    fn rewrite_handles_indented_kind_line() {
+        let i = "[providers.x]\n  kind = \"sub2api\"\n";
+        let o = rewrite_sub2api_to_newapi(i);
+        assert!(o.contains("  kind = \"newapi\""));
+    }
 }

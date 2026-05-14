@@ -326,9 +326,7 @@ impl McpStdioClient {
                 .map_err(|_| ClientError::Disconnected("oneshot canceled".into()))?,
             Some(d) => match tokio::time::timeout(d, rx).await {
                 Ok(Ok(r)) => r,
-                Ok(Err(_)) => {
-                    return Err(ClientError::Disconnected("oneshot canceled".into()))
-                }
+                Ok(Err(_)) => return Err(ClientError::Disconnected("oneshot canceled".into())),
                 Err(_) => {
                     // Time out: pull our entry from the pending map so
                     // a late response doesn't try to fire the dropped tx.
@@ -457,10 +455,8 @@ mod tests {
     /// tests in this module and by `adapter` tests in iter 5.
     pub(crate) async fn echo_id_responder() -> McpStdioClient {
         let tmp = tempfile::tempdir().unwrap();
-        let env = crate::runtime::mcp_stdio::build_child_env(std::iter::empty::<(
-            String,
-            String,
-        )>());
+        let env =
+            crate::runtime::mcp_stdio::build_child_env(std::iter::empty::<(String, String)>());
         // Keep child alive across calls but echo each request id back
         // as a result frame. awk works on every BSD/Linux box.
         let mut child = crate::runtime::mcp_stdio::spawn_mcp_child(
@@ -474,7 +470,7 @@ mod tests {
                     printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"echo\":true}}\n", idline);
                     fflush();
                 }'"#
-                    .to_string(),
+                .to_string(),
             ],
             tmp.path(),
             env,
@@ -508,18 +504,11 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let env = crate::runtime::mcp_stdio::build_child_env(std::iter::empty::<(
-            String,
-            String,
-        )>());
+        let env =
+            crate::runtime::mcp_stdio::build_child_env(std::iter::empty::<(String, String)>());
         // sleep never reads stdin; perfect "ignores requests" model.
-        let client = McpStdioClient::connect_stdio(
-            "sleep",
-            &["10".to_string()],
-            tmp.path(),
-            env,
-        )
-        .expect("spawn sleep");
+        let client = McpStdioClient::connect_stdio("sleep", &["10".to_string()], tmp.path(), env)
+            .expect("spawn sleep");
         let err = client
             .call(
                 "initialize",
@@ -544,20 +533,14 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let env = crate::runtime::mcp_stdio::build_child_env(std::iter::empty::<(
-            String,
-            String,
-        )>());
-        let client = McpStdioClient::connect_stdio("true", &[], tmp.path(), env)
-            .expect("spawn true");
+        let env =
+            crate::runtime::mcp_stdio::build_child_env(std::iter::empty::<(String, String)>());
+        let client =
+            McpStdioClient::connect_stdio("true", &[], tmp.path(), env).expect("spawn true");
         // Give the reader a moment to observe EOF.
         tokio::time::sleep(Duration::from_millis(50)).await;
         let err = client
-            .call(
-                "ping",
-                JsonValue::Null,
-                Some(Duration::from_millis(500)),
-            )
+            .call("ping", JsonValue::Null, Some(Duration::from_millis(500)))
             .await
             .expect_err("must surface a typed error rather than hang");
         assert!(

@@ -268,18 +268,19 @@ mod tests {
 
         let module_src = format!(
             "import json\n\ndef runner(spec_json, ctx_json):\n{}\n",
-            body
-                .lines()
+            body.lines()
                 .map(|l| format!("    {l}"))
                 .collect::<Vec<_>>()
                 .join("\n")
         );
         let module_name = format!("bridge_test_runner_{n}");
         let file_name = format!("{module_name}.py");
-        let module =
-            PyModule::from_code_bound(py, &module_src, &file_name, &module_name)
-                .expect("compile inline python");
-        module.getattr("runner").expect("runner callable").into_any()
+        let module = PyModule::from_code_bound(py, &module_src, &file_name, &module_name)
+            .expect("compile inline python");
+        module
+            .getattr("runner")
+            .expect("runner callable")
+            .into_any()
     }
 
     /// Happy path: the inline Python runner echoes back a well-formed
@@ -427,10 +428,7 @@ return json.dumps({
         let task = TaskSpec::new("explodes");
 
         let outcome = Python::with_gil(|py| {
-            let runner = make_runner(
-                py,
-                r#"raise RuntimeError("child blew up mid-flight")"#,
-            );
+            let runner = make_runner(py, r#"raise RuntimeError("child blew up mid-flight")"#);
             spawn_child(&sup, &runner, &ctx, &task)
         });
 
@@ -485,8 +483,7 @@ return json.dumps({
         // that we get DepthCapped without Python complaining tells us
         // the cap check ran first.
         let outcome = Python::with_gil(|py| {
-            let runner =
-                make_runner(py, r#"raise AssertionError("python should NOT execute")"#);
+            let runner = make_runner(py, r#"raise AssertionError("python should NOT execute")"#);
             spawn_child(&sup, &runner, &ctx, &task)
         });
 
@@ -554,5 +551,4 @@ return json.dumps({
             Some("tenant=tenant-a;depth=0;trace=trace-1")
         );
     }
-
 }

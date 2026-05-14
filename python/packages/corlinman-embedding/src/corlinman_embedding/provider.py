@@ -18,19 +18,46 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import Any, ClassVar
+from enum import StrEnum
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 import structlog
-from corlinman_providers import EmbeddingSpec, ProviderKind
 
 logger = structlog.get_logger(__name__)
+
+
+class EmbeddingProviderKind(StrEnum):
+    """Embedding-side mirror of the wire-shape discriminator.
+
+    Kept local to ``corlinman_embedding`` to avoid an upward import of
+    ``corlinman_providers`` (peer package — see the layering contract in
+    ``.importlinter``). The string values intentionally match
+    ``corlinman_providers.ProviderKind`` so config-driven dispatch in the
+    server layer can compare them by value without coupling the two peers.
+    """
+
+    OPENAI_COMPATIBLE = "openai_compatible"
+    GOOGLE = "google"
+
+
+@runtime_checkable
+class EmbeddingSpecLike(Protocol):
+    """Structural shape of an embedding-config entry.
+
+    The full pydantic model lives in ``corlinman_providers.specs.EmbeddingSpec``
+    (peer package) — we only need the ``model`` attribute on the embedding
+    side, so a Protocol keeps the two layers decoupled while remaining duck-
+    type compatible with the canonical pydantic class.
+    """
+
+    model: str
 
 
 class CorlinmanEmbeddingProvider(ABC):
     """Abstract base for every embedding-wire-shape adapter."""
 
     name: ClassVar[str]
-    kind: ClassVar[ProviderKind]
+    kind: ClassVar[EmbeddingProviderKind]
 
     @classmethod
     @abstractmethod
@@ -39,15 +66,17 @@ class CorlinmanEmbeddingProvider(ABC):
 
     @classmethod
     @abstractmethod
-    def build(cls, spec: EmbeddingSpec, *, api_key: str | None, base_url: str | None) -> (
+    def build(cls, spec: EmbeddingSpecLike, *, api_key: str | None, base_url: str | None) -> (
         CorlinmanEmbeddingProvider
     ):
-        """Construct from an :class:`EmbeddingSpec` + resolved provider creds.
+        """Construct from an embedding-spec + resolved provider creds.
 
-        The caller (gateway / registry wrapper) reads the
-        ``[providers.<name>]`` referenced by ``spec.provider`` and passes
-        its resolved ``api_key`` + ``base_url`` here so the embedding
-        provider doesn't re-parse config.
+        ``spec`` is structurally an :class:`EmbeddingSpecLike` — in practice
+        the caller passes ``corlinman_providers.EmbeddingSpec``; we only
+        read ``spec.model`` here. The caller (gateway / registry wrapper)
+        reads the ``[providers.<name>]`` referenced by ``spec.provider``
+        and passes its resolved ``api_key`` + ``base_url`` here so the
+        embedding provider doesn't re-parse config.
         """
 
     @abstractmethod
@@ -106,7 +135,7 @@ class OpenAICompatibleEmbeddingProvider(CorlinmanEmbeddingProvider):
     """
 
     name: ClassVar[str] = "openai_compatible"
-    kind: ClassVar[ProviderKind] = ProviderKind.OPENAI_COMPATIBLE
+    kind: ClassVar[EmbeddingProviderKind] = EmbeddingProviderKind.OPENAI_COMPATIBLE
 
     def __init__(
         self,
@@ -122,7 +151,7 @@ class OpenAICompatibleEmbeddingProvider(CorlinmanEmbeddingProvider):
     @classmethod
     def build(
         cls,
-        spec: EmbeddingSpec,
+        spec: EmbeddingSpecLike,
         *,
         api_key: str | None,
         base_url: str | None,
@@ -203,7 +232,7 @@ class GoogleEmbeddingProvider(CorlinmanEmbeddingProvider):
     """
 
     name: ClassVar[str] = "google"
-    kind: ClassVar[ProviderKind] = ProviderKind.GOOGLE
+    kind: ClassVar[EmbeddingProviderKind] = EmbeddingProviderKind.GOOGLE
 
     def __init__(self, *, model: str, api_key: str | None) -> None:
         self._model = model
@@ -212,7 +241,7 @@ class GoogleEmbeddingProvider(CorlinmanEmbeddingProvider):
     @classmethod
     def build(
         cls,
-        spec: EmbeddingSpec,
+        spec: EmbeddingSpecLike,
         *,
         api_key: str | None,
         base_url: str | None,
@@ -261,6 +290,8 @@ class GoogleEmbeddingProvider(CorlinmanEmbeddingProvider):
 
 __all__ = [
     "CorlinmanEmbeddingProvider",
+    "EmbeddingProviderKind",
+    "EmbeddingSpecLike",
     "GoogleEmbeddingProvider",
     "OpenAICompatibleEmbeddingProvider",
 ]

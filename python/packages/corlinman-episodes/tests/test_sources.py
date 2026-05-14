@@ -14,7 +14,7 @@ from corlinman_episodes import (
     collect_bundles,
 )
 
-from tests._seed import (
+from ._seed import (
     insert_hook_event,
     insert_identity_merge,
     insert_proposal_with_history,

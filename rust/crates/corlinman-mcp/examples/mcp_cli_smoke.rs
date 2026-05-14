@@ -66,7 +66,11 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    eprintln!("upgraded ({} {})", resp.status().as_u16(), resp.status().canonical_reason().unwrap_or(""));
+    eprintln!(
+        "upgraded ({} {})",
+        resp.status().as_u16(),
+        resp.status().canonical_reason().unwrap_or("")
+    );
 
     // initialize
     let init = json!({

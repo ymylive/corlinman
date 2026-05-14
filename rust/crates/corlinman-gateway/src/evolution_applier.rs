@@ -323,7 +323,10 @@ pub struct FederationRebroadcaster {
 
 impl FederationRebroadcaster {
     pub fn new(admin_db: Arc<AdminDb>, tenant_pool: Arc<TenantPool>) -> Self {
-        Self { admin_db, tenant_pool }
+        Self {
+            admin_db,
+            tenant_pool,
+        }
     }
 
     /// Mint a `pending` proposal in each opted-in peer's
@@ -429,10 +432,7 @@ impl FederationRebroadcaster {
                 continue;
             }
 
-            match self
-                .mint_peer_proposal(proposal, source_tenant, peer)
-                .await
-            {
+            match self.mint_peer_proposal(proposal, source_tenant, peer).await {
                 Ok(()) => outcome.minted += 1,
                 Err(e) => {
                     let msg = format!("{e:#}");
@@ -481,9 +481,8 @@ impl FederationRebroadcaster {
         // not unwind a successful source apply.
         let peer_db_path = self.tenant_pool.db_path(peer, "evolution");
         if let Some(parent) = peer_db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                anyhow::anyhow!("create peer dir {parent:?}: {e}")
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("create peer dir {parent:?}: {e}"))?;
         }
         let store = EvolutionStore::open(&peer_db_path)
             .await
@@ -867,10 +866,7 @@ impl EvolutionApplier {
         let mut peer_proposals_minted: usize = 0;
         if let (Some(rb), Some(peers)) = (self.rebroadcaster.as_ref(), share_with.as_ref()) {
             if !peers.is_empty() {
-                match rb
-                    .broadcast(&proposal, &self.source_tenant_id, peers)
-                    .await
-                {
+                match rb.broadcast(&proposal, &self.source_tenant_id, peers).await {
                     Ok(outcome) => {
                         peer_proposals_minted = outcome.minted;
                         peer_failures = outcome.failures;
@@ -2079,10 +2075,8 @@ impl EvolutionApplier {
         let (tenant, _rest) = split_target_with_tenant(target);
         validate_tenant_id(tenant)?;
 
-        let payload: corlinman_evolution::meta::EngineConfigPayload =
-            serde_json::from_str(diff).map_err(|e| {
-                ApplyError::MalformedDiff(format!("engine_config payload parse: {e}"))
-            })?;
+        let payload: corlinman_evolution::meta::EngineConfigPayload = serde_json::from_str(diff)
+            .map_err(|e| ApplyError::MalformedDiff(format!("engine_config payload parse: {e}")))?;
         validate_dotted_config_path(&payload.config_path)?;
 
         let (engine_dir, path) = self.engine_state_path(tenant, "config.toml").await?;
@@ -2096,7 +2090,9 @@ impl EvolutionApplier {
         // its own drift case so a stale proposal can't silently install
         // a "default" value the operator never reviewed.
         let actual_value = get_toml_dotted_path(&doc, &payload.config_path);
-        let actual_json = actual_value.map(toml_to_json).unwrap_or(serde_json::Value::Null);
+        let actual_json = actual_value
+            .map(toml_to_json)
+            .unwrap_or(serde_json::Value::Null);
         if actual_json != payload.previous_value {
             return Err(ApplyError::DriftMismatch {
                 target: payload.config_path.clone(),
@@ -2118,7 +2114,13 @@ impl EvolutionApplier {
                 "engine/config.toml serialize: {e}"
             )))
         })?;
-        atomic_write(&engine_dir, &path, new_text.as_bytes(), &self.tenants_root_dir()).await?;
+        atomic_write(
+            &engine_dir,
+            &path,
+            new_text.as_bytes(),
+            &self.tenants_root_dir(),
+        )
+        .await?;
 
         let before_sha = sha256_hex(prior_text.as_bytes());
         let after_sha = sha256_hex(new_text.as_bytes());
@@ -2155,10 +2157,8 @@ impl EvolutionApplier {
         let (tenant, _rest) = split_target_with_tenant(target);
         validate_tenant_id(tenant)?;
 
-        let payload: corlinman_evolution::meta::EnginePromptPayload =
-            serde_json::from_str(diff).map_err(|e| {
-                ApplyError::MalformedDiff(format!("engine_prompt payload parse: {e}"))
-            })?;
+        let payload: corlinman_evolution::meta::EnginePromptPayload = serde_json::from_str(diff)
+            .map_err(|e| ApplyError::MalformedDiff(format!("engine_prompt payload parse: {e}")))?;
         validate_prompt_segment_id(&payload.prompt_id)?;
 
         let tenants_root = self.tenants_root_dir();
@@ -2239,24 +2239,25 @@ impl EvolutionApplier {
         let (tenant, _rest) = split_target_with_tenant(target);
         validate_tenant_id(tenant)?;
 
-        let payload: corlinman_evolution::meta::ObserverFilterPayload =
-            serde_json::from_str(diff).map_err(|e| {
+        let payload: corlinman_evolution::meta::ObserverFilterPayload = serde_json::from_str(diff)
+            .map_err(|e| {
                 ApplyError::MalformedDiff(format!("observer_filter payload parse: {e}"))
             })?;
         validate_event_kind_pattern(&payload.event_kind_pattern)?;
 
-        let (engine_dir, path) = self.engine_state_path(tenant, "observer_filter.toml").await?;
+        let (engine_dir, path) = self
+            .engine_state_path(tenant, "observer_filter.toml")
+            .await?;
         let prior_text = read_or_empty(&path).await?;
         let mut doc: toml::Table = parse_toml_table(&prior_text, "engine/observer_filter.toml")?;
 
         // Read current filter for this pattern. Stored as a JSON-encoded
         // string under `[filters.<pattern>].rule`; absent → null.
-        let actual_filter =
-            read_filter_rule(&doc, &payload.event_kind_pattern).map_err(|e| {
-                ApplyError::TenantStateIo(anyhow::Error::msg(format!(
-                    "observer_filter.toml read: {e}"
-                )))
-            })?;
+        let actual_filter = read_filter_rule(&doc, &payload.event_kind_pattern).map_err(|e| {
+            ApplyError::TenantStateIo(anyhow::Error::msg(format!(
+                "observer_filter.toml read: {e}"
+            )))
+        })?;
         if actual_filter != payload.previous_filter {
             return Err(ApplyError::DriftMismatch {
                 target: payload.event_kind_pattern.clone(),
@@ -2265,14 +2266,24 @@ impl EvolutionApplier {
             });
         }
 
-        write_filter_rule(&mut doc, &payload.event_kind_pattern, &payload.proposed_filter);
+        write_filter_rule(
+            &mut doc,
+            &payload.event_kind_pattern,
+            &payload.proposed_filter,
+        );
 
         let new_text = toml::to_string_pretty(&doc).map_err(|e| {
             ApplyError::TenantStateIo(anyhow::Error::msg(format!(
                 "observer_filter.toml serialize: {e}"
             )))
         })?;
-        atomic_write(&engine_dir, &path, new_text.as_bytes(), &self.tenants_root_dir()).await?;
+        atomic_write(
+            &engine_dir,
+            &path,
+            new_text.as_bytes(),
+            &self.tenants_root_dir(),
+        )
+        .await?;
 
         let before_sha = sha256_hex(prior_text.as_bytes());
         let after_sha = sha256_hex(new_text.as_bytes());
@@ -2355,7 +2366,13 @@ impl EvolutionApplier {
                 "cluster_thresholds.toml serialize: {e}"
             )))
         })?;
-        atomic_write(&engine_dir, &path, new_text.as_bytes(), &self.tenants_root_dir()).await?;
+        atomic_write(
+            &engine_dir,
+            &path,
+            new_text.as_bytes(),
+            &self.tenants_root_dir(),
+        )
+        .await?;
 
         let before_sha = sha256_hex(prior_text.as_bytes());
         let after_sha = sha256_hex(new_text.as_bytes());
@@ -3250,9 +3267,8 @@ fn parse_toml_table(text: &str, ctx: &'static str) -> Result<toml::Table, ApplyE
     if text.is_empty() {
         return Ok(toml::Table::new());
     }
-    text.parse::<toml::Table>().map_err(|e| {
-        ApplyError::TenantStateIo(anyhow::Error::msg(format!("{ctx} parse: {e}")))
-    })
+    text.parse::<toml::Table>()
+        .map_err(|e| ApplyError::TenantStateIo(anyhow::Error::msg(format!("{ctx} parse: {e}"))))
 }
 
 /// Atomic tmp + rename, with a re-canonicalise of `dir` against
@@ -3345,9 +3361,7 @@ fn toml_to_json(v: &toml::Value) -> serde_json::Value {
             .unwrap_or(serde_json::Value::Null),
         toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
         toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
-        toml::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(toml_to_json).collect())
-        }
+        toml::Value::Array(arr) => serde_json::Value::Array(arr.iter().map(toml_to_json).collect()),
         toml::Value::Table(t) => serde_json::Value::Object(
             t.iter()
                 .map(|(k, v)| (k.clone(), toml_to_json(v)))
@@ -5831,10 +5845,7 @@ mod tests {
         let history = applier.apply(&pid).await.unwrap();
         assert_eq!(history.kind, EvolutionKind::EnginePrompt);
         assert_ne!(history.before_sha, history.after_sha);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "new engine prompt"
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new engine prompt");
 
         let inv: serde_json::Value = serde_json::from_str(&history.inverse_diff).unwrap();
         assert_eq!(inv["op"], "engine_prompt");
@@ -5933,7 +5944,10 @@ mod tests {
             .as_str()
             .unwrap();
         let rule: serde_json::Value = serde_json::from_str(rule_str).unwrap();
-        assert_eq!(rule, serde_json::json!({"action": "deny", "until_ms": 1000}));
+        assert_eq!(
+            rule,
+            serde_json::json!({"action": "deny", "until_ms": 1000})
+        );
 
         let inv: serde_json::Value = serde_json::from_str(&history.inverse_diff).unwrap();
         assert_eq!(inv["op"], "observer_filter");
@@ -5943,7 +5957,10 @@ mod tests {
             inv["previous_filter"],
             serde_json::json!({"action": "deny", "until_ms": 1000})
         );
-        assert_eq!(inv["proposed_filter"], serde_json::json!({"action": "allow"}));
+        assert_eq!(
+            inv["proposed_filter"],
+            serde_json::json!({"action": "allow"})
+        );
     }
 
     #[tokio::test]
@@ -6237,10 +6254,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let rb = Arc::new(FederationRebroadcaster::new(
-            admin_db.clone(),
-            pool.clone(),
-        ));
+        let rb = Arc::new(FederationRebroadcaster::new(admin_db.clone(), pool.clone()));
         let applier = EvolutionApplier::new(
             evol.clone(),
             kb,
@@ -6299,13 +6313,9 @@ mod tests {
             .add_federation_peer(&bravo, &TenantId::new("acme").unwrap(), "operator")
             .await
             .unwrap();
-        let pid = seed_approved_skill_update(
-            &tmp,
-            &evol,
-            "evol-fed-no-share",
-            "skills/web_search.md",
-        )
-        .await;
+        let pid =
+            seed_approved_skill_update(&tmp, &evol, "evol-fed-no-share", "skills/web_search.md")
+                .await;
 
         let res = applier.apply_with_share_with(&pid, None).await.unwrap();
         assert_eq!(res.peer_proposals_minted, 0);
@@ -6352,19 +6362,17 @@ mod tests {
             let path = pool.db_path(peer, "evolution");
             let store = EvolutionStore::open(&path).await.unwrap();
             let repo = ProposalsRepo::new(store.pool().clone());
-            let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-                "SELECT id, kind, status, metadata FROM evolution_proposals",
-            )
-            .fetch_all(store.pool())
-            .await
-            .unwrap();
+            let rows: Vec<(String, String, String, Option<String>)> =
+                sqlx::query_as("SELECT id, kind, status, metadata FROM evolution_proposals")
+                    .fetch_all(store.pool())
+                    .await
+                    .unwrap();
             assert_eq!(rows.len(), 1, "peer {peer} must have one federated row");
             let (peer_pid, kind, status, metadata) = &rows[0];
             assert_eq!(kind, "skill_update");
             assert_eq!(status, "pending");
             assert!(peer_pid.starts_with("evol-fed-"));
-            let md: serde_json::Value =
-                serde_json::from_str(metadata.as_ref().unwrap()).unwrap();
+            let md: serde_json::Value = serde_json::from_str(metadata.as_ref().unwrap()).unwrap();
             assert_eq!(md["federated_from"]["tenant"], "acme");
             assert_eq!(md["federated_from"]["source_proposal_id"], "evol-fed-001");
             assert_eq!(md["federated_from"]["hop"], 1);
@@ -6388,8 +6396,7 @@ mod tests {
         // Note: we do NOT register bravo in `tenant_federation_peers`.
 
         let pid =
-            seed_approved_skill_update(&tmp, &evol, "evol-fed-noopt", "skills/web_search.md")
-                .await;
+            seed_approved_skill_update(&tmp, &evol, "evol-fed-noopt", "skills/web_search.md").await;
         let res = applier
             .apply_with_share_with(&pid, Some(vec![bravo.clone()]))
             .await
@@ -6412,8 +6419,7 @@ mod tests {
         let acme = TenantId::new("acme").unwrap();
 
         let pid =
-            seed_approved_skill_update(&tmp, &evol, "evol-fed-self", "skills/web_search.md")
-                .await;
+            seed_approved_skill_update(&tmp, &evol, "evol-fed-self", "skills/web_search.md").await;
         let res = applier
             .apply_with_share_with(&pid, Some(vec![acme.clone()]))
             .await

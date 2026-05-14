@@ -286,9 +286,10 @@ impl ResourcesAdapter {
                         json!({"uri": params.uri}),
                     )
                 })?;
-                let hit = host_arc.get(id).await.map_err(|e| {
-                    McpError::Internal(format!("memory host get: {e}"))
-                })?;
+                let hit = host_arc
+                    .get(id)
+                    .await
+                    .map_err(|e| McpError::Internal(format!("memory host get: {e}")))?;
                 let hit = hit.ok_or_else(|| {
                     McpError::invalid_params_with(
                         format!("unknown memory id '{id}'"),
@@ -319,9 +320,11 @@ impl ResourcesAdapter {
                 })
             }
             ParsedUri::Persona { user_id } => {
-                let snap = self.persona.read_snapshot(user_id).await.map_err(|e| {
-                    McpError::Internal(format!("persona snapshot: {e}"))
-                })?;
+                let snap = self
+                    .persona
+                    .read_snapshot(user_id)
+                    .await
+                    .map_err(|e| McpError::Internal(format!("persona snapshot: {e}")))?;
                 let snap = snap.ok_or_else(|| {
                     McpError::invalid_params_with(
                         format!("unknown persona user '{user_id}'"),
@@ -362,18 +365,16 @@ impl CapabilityAdapter for ResourcesAdapter {
                     })?
                 };
                 let list = self.list_resources(parsed, ctx).await?;
-                serde_json::to_value(list).map_err(|e| {
-                    McpError::Internal(format!("resources/list: serialize: {e}"))
-                })
+                serde_json::to_value(list)
+                    .map_err(|e| McpError::Internal(format!("resources/list: serialize: {e}")))
             }
             METHOD_READ => {
                 let parsed: ReadParams = serde_json::from_value(params).map_err(|e| {
                     McpError::invalid_params(format!("resources/read: bad params: {e}"))
                 })?;
                 let result = self.read_resource(parsed, ctx).await?;
-                serde_json::to_value(result).map_err(|e| {
-                    McpError::Internal(format!("resources/read: serialize: {e}"))
-                })
+                serde_json::to_value(result)
+                    .map_err(|e| McpError::Internal(format!("resources/read: serialize: {e}")))
             }
             other => Err(McpError::MethodNotFound(other.to_string())),
         }
@@ -464,7 +465,7 @@ mod tests {
     }
 
     impl StubMemoryHost {
-        fn new(name: &str, seed: &[(&str, &str)]) -> Arc<dyn MemoryHost> {
+        fn make(name: &str, seed: &[(&str, &str)]) -> Arc<dyn MemoryHost> {
             let m: std::collections::BTreeMap<String, String> = seed
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -533,9 +534,7 @@ mod tests {
         for (name, desc, body) in skills {
             let path = tmp.path().join(format!("{name}.md"));
             let mut f = std::fs::File::create(&path).unwrap();
-            let frontmatter = format!(
-                "---\nname: {name}\ndescription: {desc}\n---\n{body}"
-            );
+            let frontmatter = format!("---\nname: {name}\ndescription: {desc}\n---\n{body}");
             f.write_all(frontmatter.as_bytes()).unwrap();
         }
         let reg = SkillRegistry::load_from_dir(tmp.path()).expect("skill registry load");
@@ -556,7 +555,7 @@ mod tests {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
         hosts.insert(
             "kb".into(),
-            StubMemoryHost::new("kb", &[("1", "first"), ("2", "second")]),
+            StubMemoryHost::make("kb", &[("1", "first"), ("2", "second")]),
         );
         let (skills, _tmp) = make_skills(&[("foo", "foo desc", "Body F")]);
         let adapter = make_adapter(hosts, skills);
@@ -577,11 +576,9 @@ mod tests {
         let seed: Vec<(String, String)> = (0..150)
             .map(|i| (format!("{i:03}"), format!("doc-{i}")))
             .collect();
-        let seed_refs: Vec<(&str, &str)> = seed.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-        hosts.insert(
-            "kb".into(),
-            StubMemoryHost::new("kb", &seed_refs),
-        );
+        let seed_refs: Vec<(&str, &str)> =
+            seed.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        hosts.insert("kb".into(), StubMemoryHost::make("kb", &seed_refs));
         let (skills, _tmp) = make_skills(&[]);
         let adapter = ResourcesAdapter::new(hosts, skills)
             .with_page_size(50)
@@ -643,12 +640,14 @@ mod tests {
     #[tokio::test]
     async fn list_filters_by_scheme_allowlist() {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
-        hosts.insert("kb".into(), StubMemoryHost::new("kb", &[("1", "x")]));
+        hosts.insert("kb".into(), StubMemoryHost::make("kb", &[("1", "x")]));
         let (skills, _tmp) = make_skills(&[("foo", "stub desc", "body")]);
         let adapter = make_adapter(hosts, skills);
 
-        let mut ctx = SessionContext::default();
-        ctx.resources_allowed = vec!["skill".into()];
+        let ctx = SessionContext {
+            resources_allowed: vec!["skill".into()],
+            ..Default::default()
+        };
         let res = adapter
             .list_resources(ListParams { cursor: None }, &ctx)
             .await
@@ -689,7 +688,7 @@ mod tests {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
         hosts.insert(
             "kb".into(),
-            StubMemoryHost::new("kb", &[("42", "memory body")]),
+            StubMemoryHost::make("kb", &[("42", "memory body")]),
         );
         let (skills, _tmp) = make_skills(&[]);
         let adapter = make_adapter(hosts, skills);
@@ -731,7 +730,9 @@ mod tests {
             .await
             .unwrap();
         match &res.contents[0] {
-            ResourceContent::Text { text, mime_type, .. } => {
+            ResourceContent::Text {
+                text, mime_type, ..
+            } => {
                 let parsed: JsonValue = serde_json::from_str(text).unwrap();
                 assert_eq!(parsed, json!({"trait": "curious"}));
                 assert_eq!(mime_type.as_deref(), Some("application/json"));
@@ -760,7 +761,7 @@ mod tests {
     #[tokio::test]
     async fn read_unknown_memory_id_returns_invalid_params() {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
-        hosts.insert("kb".into(), StubMemoryHost::new("kb", &[("1", "x")]));
+        hosts.insert("kb".into(), StubMemoryHost::make("kb", &[("1", "x")]));
         let (skills, _tmp) = make_skills(&[]);
         let adapter = make_adapter(hosts, skills);
         let err = adapter
@@ -778,12 +779,14 @@ mod tests {
     #[tokio::test]
     async fn read_disallowed_scheme_returns_invalid_params() {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
-        hosts.insert("kb".into(), StubMemoryHost::new("kb", &[("1", "x")]));
+        hosts.insert("kb".into(), StubMemoryHost::make("kb", &[("1", "x")]));
         let (skills, _tmp) = make_skills(&[]);
         let adapter = make_adapter(hosts, skills);
 
-        let mut ctx = SessionContext::default();
-        ctx.resources_allowed = vec!["skill".into()];
+        let ctx = SessionContext {
+            resources_allowed: vec!["skill".into()],
+            ..Default::default()
+        };
         let err = adapter
             .read_resource(
                 ReadParams {
@@ -808,8 +811,14 @@ mod tests {
         // content even if ids collide. This is the "tenant isolation"
         // surrogate at the adapter layer — full tenant ACL is iter 8.
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
-        hosts.insert("alpha".into(), StubMemoryHost::new("alpha", &[("1", "ALPHA")]));
-        hosts.insert("beta".into(), StubMemoryHost::new("beta", &[("1", "BETA")]));
+        hosts.insert(
+            "alpha".into(),
+            StubMemoryHost::make("alpha", &[("1", "ALPHA")]),
+        );
+        hosts.insert(
+            "beta".into(),
+            StubMemoryHost::make("beta", &[("1", "BETA")]),
+        );
         let (skills, _tmp) = make_skills(&[]);
         let adapter = make_adapter(hosts, skills);
 
@@ -832,10 +841,7 @@ mod tests {
             .await
             .unwrap();
         match (&alpha.contents[0], &beta.contents[0]) {
-            (
-                ResourceContent::Text { text: a, .. },
-                ResourceContent::Text { text: b, .. },
-            ) => {
+            (ResourceContent::Text { text: a, .. }, ResourceContent::Text { text: b, .. }) => {
                 assert_eq!(a, "ALPHA");
                 assert_eq!(b, "BETA");
             }
@@ -848,20 +854,28 @@ mod tests {
     #[tokio::test]
     async fn handle_routes_through_capability_adapter_trait() {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
-        hosts.insert("kb".into(), StubMemoryHost::new("kb", &[("1", "x")]));
+        hosts.insert("kb".into(), StubMemoryHost::make("kb", &[("1", "x")]));
         let (skills, _tmp) = make_skills(&[("foo", "stub desc", "body")]);
         let adapter = make_adapter(hosts, skills);
         assert_eq!(adapter.capability_name(), "resources");
 
         let value = adapter
-            .handle("resources/list", JsonValue::Null, &SessionContext::permissive())
+            .handle(
+                "resources/list",
+                JsonValue::Null,
+                &SessionContext::permissive(),
+            )
             .await
             .unwrap();
         let parsed: ListResult = serde_json::from_value(value).unwrap();
         assert!(!parsed.resources.is_empty());
 
         let err = adapter
-            .handle("resources/bogus", JsonValue::Null, &SessionContext::permissive())
+            .handle(
+                "resources/bogus",
+                JsonValue::Null,
+                &SessionContext::permissive(),
+            )
             .await
             .expect_err("unknown method");
         assert!(matches!(err, McpError::MethodNotFound(_)));

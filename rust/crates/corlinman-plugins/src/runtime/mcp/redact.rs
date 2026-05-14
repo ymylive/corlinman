@@ -153,7 +153,8 @@ pub fn compile_deny_set(patterns: &[String]) -> Result<GlobSet, RedactError> {
         })?;
         b.add(glob);
     }
-    b.build().map_err(|e| RedactError::DenySetCompile { source: e })
+    b.build()
+        .map_err(|e| RedactError::DenySetCompile { source: e })
 }
 
 /// Errors surfaced by [`compile_deny_set`].
@@ -187,7 +188,10 @@ pub enum RedactError {
 ///      - else if `lookup(name) == None` => record in `missing`, skip.
 ///      - else push `(name, value)` to `forwarded`.
 ///   2. Returns the partition; never panics, never logs.
-pub fn apply_env_passthrough<F>(policy: &EnvPassthrough, lookup: F) -> Result<AppliedEnv, RedactError>
+pub fn apply_env_passthrough<F>(
+    policy: &EnvPassthrough,
+    lookup: F,
+) -> Result<AppliedEnv, RedactError>
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -246,10 +250,7 @@ mod tests {
 
         let names: Vec<&str> = applied.forwarded.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(names, vec!["GITHUB_TOKEN"]);
-        let aws_present = applied
-            .forwarded
-            .iter()
-            .any(|(k, _)| k.starts_with("AWS_"));
+        let aws_present = applied.forwarded.iter().any(|(k, _)| k.starts_with("AWS_"));
         assert!(!aws_present, "AWS_* must not leak to child env");
     }
 
@@ -280,8 +281,7 @@ mod tests {
             allow: vec!["NEVER_SET_C2_ITER3".into()],
             deny: vec![],
         };
-        let applied =
-            apply_env_passthrough(&policy, lookup_from(&[("PATH", "/usr/bin")])).unwrap();
+        let applied = apply_env_passthrough(&policy, lookup_from(&[("PATH", "/usr/bin")])).unwrap();
         assert!(applied.forwarded.is_empty());
         assert!(applied.missing.contains("NEVER_SET_C2_ITER3"));
     }

@@ -148,10 +148,7 @@ impl SessionState {
     /// The matching [`InitializeResult`] is *not* constructed here —
     /// that lives in the dispatcher, which knows the configured
     /// server capabilities. This method only mutates state.
-    pub fn observe_initialize(
-        &mut self,
-        params: &InitializeParams,
-    ) -> Result<(), McpError> {
+    pub fn observe_initialize(&mut self, params: &InitializeParams) -> Result<(), McpError> {
         if self.phase != SessionPhase::Connected {
             return Err(McpError::InvalidRequest(format!(
                 "duplicate `initialize`; session already in {:?}",
@@ -168,9 +165,7 @@ impl SessionState {
     /// Apply the client's `notifications/initialized`. Advances
     /// `Initializing → Initialized`. Returns
     /// `SessionNotInitialized` if called before `initialize`.
-    pub fn observe_initialized_notification(
-        &mut self,
-    ) -> Result<(), McpError> {
+    pub fn observe_initialized_notification(&mut self) -> Result<(), McpError> {
         match self.phase {
             SessionPhase::Connected => Err(McpError::SessionNotInitialized),
             SessionPhase::Initializing => {
@@ -197,11 +192,9 @@ impl SessionState {
         //   - Connected & non-initialize → SessionNotInitialized
         //   - Initializing & anything    → SessionNotInitialized
         //   - Initialized & duplicate `initialize` → InvalidRequest
-        if self.phase == SessionPhase::Initialized && method == INITIALIZE_METHOD
-        {
+        if self.phase == SessionPhase::Initialized && method == INITIALIZE_METHOD {
             Err(McpError::InvalidRequest(
-                "session already initialized; duplicate `initialize` not supported"
-                    .into(),
+                "session already initialized; duplicate `initialize` not supported".into(),
             ))
         } else {
             Err(McpError::SessionNotInitialized)
@@ -209,10 +202,7 @@ impl SessionState {
     }
 
     /// Pre-flight a notification frame.
-    pub fn check_notification_allowed(
-        &self,
-        method: &str,
-    ) -> Result<(), McpError> {
+    pub fn check_notification_allowed(&self, method: &str) -> Result<(), McpError> {
         if self.phase.accepts_notification(method) {
             Ok(())
         } else {
@@ -410,11 +400,7 @@ mod tests {
 
     #[test]
     fn initialize_reply_pins_protocol_version_and_server_info() {
-        let result = initialize_reply(
-            ServerCapabilities::default(),
-            "corlinman",
-            "0.1.0",
-        );
+        let result = initialize_reply(ServerCapabilities::default(), "corlinman", "0.1.0");
         assert_eq!(result.protocol_version, "2024-11-05");
         assert_eq!(result.server_info.name, "corlinman");
         assert_eq!(result.server_info.version, "0.1.0");

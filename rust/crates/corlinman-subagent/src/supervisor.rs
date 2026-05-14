@@ -146,7 +146,10 @@ impl Supervisor {
     /// depth → per-parent concurrency → per-tenant quota. Order matters
     /// because depth is the cheapest check and the "wrong tenant"
     /// telemetry the operator wants is closer to the bottom.
-    pub fn try_acquire(self: &Arc<Self>, parent_ctx: &ParentContext) -> Result<Slot, AcquireReject> {
+    pub fn try_acquire(
+        self: &Arc<Self>,
+        parent_ctx: &ParentContext,
+    ) -> Result<Slot, AcquireReject> {
         // Depth gate is purely on the caller's snapshot — no map writes.
         if parent_ctx.depth >= self.policy.max_depth {
             // Iter 9: emit DepthCapped so the operator UI / evolution
@@ -380,7 +383,11 @@ mod tests {
         // Fourth refused with the per-parent reason.
         let err = sup.try_acquire(&ctx).expect_err("fourth");
         assert_eq!(err, AcquireReject::ParentConcurrencyExceeded);
-        assert_eq!(sup.parent_count("session-A"), 3, "rejected acquire must not increment");
+        assert_eq!(
+            sup.parent_count("session-A"),
+            3,
+            "rejected acquire must not increment"
+        );
 
         // Releasing one frees the slot for another.
         drop(s1);
@@ -495,9 +502,7 @@ mod tests {
     use corlinman_hooks::{HookBus, HookEvent};
     use std::time::Duration;
 
-    fn drain_events(
-        sub: &mut corlinman_hooks::HookSubscription,
-    ) -> Vec<HookEvent> {
+    fn drain_events(sub: &mut corlinman_hooks::HookSubscription) -> Vec<HookEvent> {
         let mut out = Vec::new();
         // try_recv loop with a tight bound — the supervisor emits
         // synchronously from `try_acquire`, so by the time the test

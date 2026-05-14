@@ -507,15 +507,14 @@ pub async fn build_runtime_full_with_evolution(
             > = std::collections::BTreeMap::new();
             let skills_dir = resolve_data_dir().join(&snapshot.skills.dir);
             let skills = Arc::new(
-                corlinman_skills::SkillRegistry::load_from_dir(&skills_dir)
-                    .unwrap_or_else(|err| {
-                        tracing::warn!(
-                            error = %err,
-                            dir = %skills_dir.display(),
-                            "mcp: skill registry load failed; mounting with empty skills",
-                        );
-                        corlinman_skills::SkillRegistry::default()
-                    }),
+                corlinman_skills::SkillRegistry::load_from_dir(&skills_dir).unwrap_or_else(|err| {
+                    tracing::warn!(
+                        error = %err,
+                        dir = %skills_dir.display(),
+                        "mcp: skill registry load failed; mounting with empty skills",
+                    );
+                    corlinman_skills::SkillRegistry::default()
+                }),
             );
             match crate::mcp::build_router(&snapshot.mcp, registry.clone(), skills, memory_hosts) {
                 Some(mcp_router) => {

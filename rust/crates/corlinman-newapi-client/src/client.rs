@@ -60,9 +60,7 @@ impl NewapiClient {
         user_token: impl Into<String>,
         admin_token: Option<String>,
     ) -> Result<Self, NewapiError> {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(8))
-            .build()?;
+        let http = Client::builder().timeout(Duration::from_secs(8)).build()?;
         Ok(Self {
             base_url: Url::parse(base_url.as_ref())?,
             user_token: user_token.into(),
@@ -83,7 +81,7 @@ impl NewapiClient {
     /// succeeds with the supplied token, and (b) the host exposes
     /// `/api/status` (new-api signature). Returns the resolved user
     /// + server version. Used by both onboard step 2 and the
-    /// `/admin/newapi` PATCH revalidation hook.
+    ///   `/admin/newapi` PATCH revalidation hook.
     pub async fn probe(&self) -> Result<ProbeResult, NewapiError> {
         let user = self.get_user_self().await?;
 
@@ -128,7 +126,10 @@ impl NewapiClient {
     /// List channels of a given type. Filters on the server side via
     /// the integer type code; corlinman re-projects to its own
     /// ChannelType enum for type safety.
-    pub async fn list_channels(&self, channel_type: ChannelType) -> Result<Vec<Channel>, NewapiError> {
+    pub async fn list_channels(
+        &self,
+        channel_type: ChannelType,
+    ) -> Result<Vec<Channel>, NewapiError> {
         let mut url = self.base_url.join("/api/channel/")?;
         url.query_pairs_mut()
             .append_pair("type", &channel_type.as_int().to_string());

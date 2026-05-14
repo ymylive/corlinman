@@ -515,7 +515,7 @@ fn truncate_summary(text: &str) -> String {
         return text.to_string();
     }
     let mut out: String = text.chars().take(SUMMARY_CHAR_CAP).collect();
-    out.push_str("…");
+    out.push('…');
     out
 }
 
@@ -713,7 +713,10 @@ CREATE TABLE IF NOT EXISTS episodes (
         .await;
 
         let resolver = EpisodesResolver::new(&h.root_path).with_fixed_now_ms(now);
-        let out = resolver.resolve("last_week", &ctx_for("default")).await.unwrap();
+        let out = resolver
+            .resolve("last_week", &ctx_for("default"))
+            .await
+            .unwrap();
 
         // Top 5 by importance: 0.99, 0.9, 0.8, 0.5, 0.4 → episodes 5, 1, 3, 6, 2.
         let bullets: Vec<_> = out.lines().collect();
@@ -753,7 +756,10 @@ CREATE TABLE IF NOT EXISTS episodes (
         .await;
 
         let resolver = EpisodesResolver::new(&h.root_path).with_fixed_now_ms(now);
-        let out = resolver.resolve("last_24h", &ctx_for("default")).await.unwrap();
+        let out = resolver
+            .resolve("last_24h", &ctx_for("default"))
+            .await
+            .unwrap();
 
         assert!(out.contains("fresh chat"));
         assert!(!out.contains("stale chat"));
@@ -767,8 +773,16 @@ CREATE TABLE IF NOT EXISTS episodes (
 
         // Low-score recent vs high-score older: `recent` must surface
         // the recent one first.
-        insert_row(&pool, "low-recent", "default", "conversation", now, 0.1, "low recent")
-            .await;
+        insert_row(
+            &pool,
+            "low-recent",
+            "default",
+            "conversation",
+            now,
+            0.1,
+            "low recent",
+        )
+        .await;
         insert_row(
             &pool,
             "high-old",
@@ -781,7 +795,10 @@ CREATE TABLE IF NOT EXISTS episodes (
         .await;
 
         let resolver = EpisodesResolver::new(&h.root_path).with_fixed_now_ms(now);
-        let out = resolver.resolve("recent", &ctx_for("default")).await.unwrap();
+        let out = resolver
+            .resolve("recent", &ctx_for("default"))
+            .await
+            .unwrap();
         let lines: Vec<_> = out.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("low recent"));
@@ -812,8 +829,16 @@ CREATE TABLE IF NOT EXISTS episodes (
     async fn about_id_returns_single_episode() {
         let h = Harness::new().await;
         let pool = h.open_tenant("default").await;
-        insert_row(&pool, "ep-cite", "default", "conversation", 1, 0.5, "cite-me")
-            .await;
+        insert_row(
+            &pool,
+            "ep-cite",
+            "default",
+            "conversation",
+            1,
+            0.5,
+            "cite-me",
+        )
+        .await;
 
         let resolver = EpisodesResolver::new(&h.root_path);
         let out = resolver
@@ -853,17 +878,37 @@ CREATE TABLE IF NOT EXISTS episodes (
         let now = 1_700_000_000_000;
 
         let pool_a = h.open_tenant("acme").await;
-        insert_row(&pool_a, "ep-a", "acme", "conversation", now, 0.9, "secret-a").await;
+        insert_row(
+            &pool_a,
+            "ep-a",
+            "acme",
+            "conversation",
+            now,
+            0.9,
+            "secret-a",
+        )
+        .await;
         let pool_b = h.open_tenant("globex").await;
-        insert_row(&pool_b, "ep-b", "globex", "conversation", now, 0.9, "secret-b")
-            .await;
+        insert_row(
+            &pool_b,
+            "ep-b",
+            "globex",
+            "conversation",
+            now,
+            0.9,
+            "secret-b",
+        )
+        .await;
 
         let resolver = EpisodesResolver::new(&h.root_path).with_fixed_now_ms(now);
         let out_a = resolver.resolve("recent", &ctx_for("acme")).await.unwrap();
         assert!(out_a.contains("secret-a"));
         assert!(!out_a.contains("secret-b"));
 
-        let out_b = resolver.resolve("recent", &ctx_for("globex")).await.unwrap();
+        let out_b = resolver
+            .resolve("recent", &ctx_for("globex"))
+            .await
+            .unwrap();
         assert!(out_b.contains("secret-b"));
         assert!(!out_b.contains("secret-a"));
     }
@@ -873,26 +918,36 @@ CREATE TABLE IF NOT EXISTS episodes (
         let h = Harness::new().await;
         let pool = h.open_tenant("default").await;
         let now = 1_700_000_000_000;
-        insert_row(&pool, "stamp-me", "default", "conversation", now, 0.5, "hit").await;
+        insert_row(
+            &pool,
+            "stamp-me",
+            "default",
+            "conversation",
+            now,
+            0.5,
+            "hit",
+        )
+        .await;
 
         // Pre-render: column is NULL.
-        let pre: Option<i64> = sqlx::query_scalar(
-            "SELECT last_referenced_at FROM episodes WHERE id = 'stamp-me'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let pre: Option<i64> =
+            sqlx::query_scalar("SELECT last_referenced_at FROM episodes WHERE id = 'stamp-me'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(pre.is_none());
 
         let resolver = EpisodesResolver::new(&h.root_path).with_fixed_now_ms(now + 5_000);
-        let _ = resolver.resolve("recent", &ctx_for("default")).await.unwrap();
+        let _ = resolver
+            .resolve("recent", &ctx_for("default"))
+            .await
+            .unwrap();
 
-        let post: Option<i64> = sqlx::query_scalar(
-            "SELECT last_referenced_at FROM episodes WHERE id = 'stamp-me'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let post: Option<i64> =
+            sqlx::query_scalar("SELECT last_referenced_at FROM episodes WHERE id = 'stamp-me'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(post, Some(now + 5_000));
     }
 
@@ -903,7 +958,10 @@ CREATE TABLE IF NOT EXISTS episodes (
         // prompts assemble cleanly.
         let h = Harness::new().await;
         let resolver = EpisodesResolver::new(&h.root_path);
-        let out = resolver.resolve("recent", &ctx_for("never-existed")).await.unwrap();
+        let out = resolver
+            .resolve("recent", &ctx_for("never-existed"))
+            .await
+            .unwrap();
         assert_eq!(out, "");
     }
 
@@ -914,7 +972,10 @@ CREATE TABLE IF NOT EXISTS episodes (
         // even if the DB is missing.
         let h = Harness::new().await;
         let resolver = EpisodesResolver::new(&h.root_path);
-        let out = resolver.resolve("gibberish", &ctx_for("never-existed")).await.unwrap();
+        let out = resolver
+            .resolve("gibberish", &ctx_for("never-existed"))
+            .await
+            .unwrap();
         assert_eq!(out, "{{episodes.gibberish}}");
     }
 

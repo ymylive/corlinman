@@ -283,8 +283,7 @@ impl VoiceProvider for MockEchoProvider {
             mpsc::channel::<Vec<u8>>(DEFAULT_PROVIDER_CHANNEL_CAPACITY);
         let (control_in_tx, mut control_in_rx) =
             mpsc::channel::<ProviderCommand>(DEFAULT_PROVIDER_CHANNEL_CAPACITY);
-        let (events_tx, events_rx) =
-            mpsc::channel::<VoiceEvent>(DEFAULT_PROVIDER_CHANNEL_CAPACITY);
+        let (events_tx, events_rx) = mpsc::channel::<VoiceEvent>(DEFAULT_PROVIDER_CHANNEL_CAPACITY);
 
         let session_id = params.session_id.clone();
 
@@ -427,7 +426,9 @@ mod tests {
         let mut s = p.open(params("voice-1")).await.expect("open");
         let ev = s.events_rx.recv().await.expect("first event");
         match ev {
-            VoiceEvent::Ready { provider_session_id } => {
+            VoiceEvent::Ready {
+                provider_session_id,
+            } => {
                 assert!(provider_session_id.contains("voice-1"));
             }
             other => panic!("expected Ready first; got {other:?}"),
@@ -562,10 +563,7 @@ mod tests {
         let p = MockEchoProvider::new("mock");
         let mut s = p.open(params("voice-5")).await.expect("open");
         let _ = s.events_rx.recv().await; // Ready
-        s.control_in_tx
-            .send(ProviderCommand::Close)
-            .await
-            .unwrap();
+        s.control_in_tx.send(ProviderCommand::Close).await.unwrap();
         let ev = tokio::time::timeout(Duration::from_secs(1), s.events_rx.recv())
             .await
             .unwrap()

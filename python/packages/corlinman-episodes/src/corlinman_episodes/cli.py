@@ -670,15 +670,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "embed-pending":
-        provider, dim = _resolve_embedding_provider(
+        embed_provider, dim = _resolve_embedding_provider(
             config, stub_dim=args.stub_embedding_dim
         )
         try:
-            summary = asyncio.run(
+            embed_summary = asyncio.run(
                 run_embed_pending(
                     config=config,
                     episodes_db=args.episodes_db,
-                    embedding_provider=provider,
+                    embedding_provider=embed_provider,
                     embedding_dim=dim,
                     tenant_id=args.tenant,
                     batch_size=args.batch_size,
@@ -689,7 +689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             logger.error("episodes: embed-pending failed", exc_info=exc)
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        _print_embed_summary(summary, as_json=args.json)
+        _print_embed_summary(embed_summary, as_json=args.json)
         return 0
 
     if args.command == "archive-sweep":

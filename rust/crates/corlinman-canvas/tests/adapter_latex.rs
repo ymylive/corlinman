@@ -13,7 +13,10 @@ fn render_latex(tex: &str, display: bool) -> corlinman_canvas::RenderedArtifact 
     Renderer::new()
         .render(&CanvasPresentPayload {
             artifact_kind: ArtifactKind::Latex,
-            body: ArtifactBody::Latex { tex: tex.into(), display },
+            body: ArtifactBody::Latex {
+                tex: tex.into(),
+                display,
+            },
             idempotency_key: "art_latex_test".into(),
             theme_hint: Some(ThemeClass::TpLight),
         })
@@ -109,7 +112,10 @@ fn latex_macro_blacklist() {
                 rendered.html_fragment,
             );
         }
-        Err(CanvasError::Adapter { kind: ArtifactKind::Latex, .. }) => {
+        Err(CanvasError::Adapter {
+            kind: ArtifactKind::Latex,
+            ..
+        }) => {
             // Also acceptable — strict-mode could reject outright.
         }
         Err(other) => panic!("unexpected error variant: {other}"),
@@ -164,8 +170,12 @@ fn latex_unicode_passthrough() {
 fn latex_tidepool_wrapper_always_present() {
     let inline = render_latex("1+1", false);
     let display = render_latex("1+1", true);
-    assert!(inline.html_fragment.starts_with("<span class=\"cn-canvas-katex"));
-    assert!(display.html_fragment.starts_with("<span class=\"cn-canvas-katex"));
+    assert!(inline
+        .html_fragment
+        .starts_with("<span class=\"cn-canvas-katex"));
+    assert!(display
+        .html_fragment
+        .starts_with("<span class=\"cn-canvas-katex"));
 }
 
 /// Garbled TeX surfaces as `CanvasError::Adapter` for the gateway to
@@ -182,7 +192,13 @@ fn latex_garbled_input_returns_adapter_error() {
         theme_hint: None,
     });
     let err = result.expect_err("garbled TeX must error");
-    assert!(matches!(err, CanvasError::Adapter { kind: ArtifactKind::Latex, .. }));
+    assert!(matches!(
+        err,
+        CanvasError::Adapter {
+            kind: ArtifactKind::Latex,
+            ..
+        }
+    ));
 }
 
 /// `theme_hint` echoes onto the rendered artifact so non-CSS-var
@@ -191,10 +207,15 @@ fn latex_garbled_input_returns_adapter_error() {
 fn latex_theme_class_echoed() {
     let payload_dark = CanvasPresentPayload {
         artifact_kind: ArtifactKind::Latex,
-        body: ArtifactBody::Latex { tex: "x".into(), display: false },
+        body: ArtifactBody::Latex {
+            tex: "x".into(),
+            display: false,
+        },
         idempotency_key: "art_theme".into(),
         theme_hint: Some(ThemeClass::TpDark),
     };
-    let out = Renderer::new().render(&payload_dark).expect("dark must render");
+    let out = Renderer::new()
+        .render(&payload_dark)
+        .expect("dark must render");
     assert_eq!(out.theme_class, ThemeClass::TpDark);
 }

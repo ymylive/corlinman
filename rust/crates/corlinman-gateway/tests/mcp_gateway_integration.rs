@@ -69,9 +69,7 @@ fn make_test_config(enabled: bool, tokens: Vec<McpTokenConfig>) -> Config {
     cfg
 }
 
-async fn spawn_with_router(
-    router: axum::Router,
-) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+async fn spawn_with_router(router: axum::Router) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router.into_make_service_with_connect_info::<SocketAddr>();
@@ -91,10 +89,8 @@ fn build_router_returns_none_when_mcp_disabled() {
     let cfg = make_test_config(false, vec![]);
     let plugins = Arc::new(PluginRegistry::default());
     let skills = Arc::new(SkillRegistry::default());
-    let hosts: BTreeMap<String, Arc<dyn corlinman_memory_host::MemoryHost>> =
-        BTreeMap::new();
-    let r =
-        corlinman_gateway::mcp::build_router(&cfg.mcp, plugins, skills, hosts);
+    let hosts: BTreeMap<String, Arc<dyn corlinman_memory_host::MemoryHost>> = BTreeMap::new();
+    let r = corlinman_gateway::mcp::build_router(&cfg.mcp, plugins, skills, hosts);
     assert!(r.is_none(), "disabled mcp must yield no /mcp router");
 }
 
@@ -104,8 +100,7 @@ async fn empty_tokens_list_rejects_all_upgrades_pre_upgrade() {
     let cfg = make_test_config(true, vec![]);
     let plugins = Arc::new(PluginRegistry::default());
     let skills = Arc::new(SkillRegistry::default());
-    let hosts: BTreeMap<String, Arc<dyn corlinman_memory_host::MemoryHost>> =
-        BTreeMap::new();
+    let hosts: BTreeMap<String, Arc<dyn corlinman_memory_host::MemoryHost>> = BTreeMap::new();
     let runtime: Arc<dyn PluginRuntime> = Arc::new(InertRuntime);
     let router = corlinman_gateway::mcp::build_router_with_runtime(
         &cfg.mcp, plugins, skills, hosts, runtime,
@@ -141,8 +136,7 @@ async fn handshake_then_tools_list_succeeds_through_gateway_router() {
     );
     let plugins = Arc::new(PluginRegistry::default());
     let skills = Arc::new(SkillRegistry::default());
-    let hosts: BTreeMap<String, Arc<dyn corlinman_memory_host::MemoryHost>> =
-        BTreeMap::new();
+    let hosts: BTreeMap<String, Arc<dyn corlinman_memory_host::MemoryHost>> = BTreeMap::new();
     let runtime: Arc<dyn PluginRuntime> = Arc::new(InertRuntime);
     let router = corlinman_gateway::mcp::build_router_with_runtime(
         &cfg.mcp, plugins, skills, hosts, runtime,
