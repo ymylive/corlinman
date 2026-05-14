@@ -302,6 +302,18 @@ impl SqliteStore {
             .await
             .context("apply TENANT_INDEXES_SQL")?;
 
+        // Flush every migration write from WAL into the main DB file
+        // before any caller can acquire a *different* connection from
+        // the pool. CI on Linux occasionally surfaced "no such table:
+        // chunks" from a connection that opened the file before the
+        // migration's WAL frames had been merged — TRUNCATE checkpoint
+        // collapses that window by guaranteeing the schema is in the
+        // main file the moment `open` returns.
+        sqlx::raw_sql("PRAGMA wal_checkpoint(TRUNCATE);")
+            .execute(&pool)
+            .await
+            .context("checkpoint WAL after migration")?;
+
         Ok(Self { pool })
     }
 
