@@ -284,9 +284,7 @@ impl SqliteStore {
                 .min_connections(1)
                 .connect_with(options.clone())
                 .await
-                .with_context(|| {
-                    format!("connect sqlite (migration) '{}'", path.display())
-                })?;
+                .with_context(|| format!("connect sqlite (migration) '{}'", path.display()))?;
 
             sqlx::raw_sql(SCHEMA_SQL)
                 .execute(&migrate_pool)
