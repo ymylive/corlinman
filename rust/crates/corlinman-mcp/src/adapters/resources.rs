@@ -815,7 +815,10 @@ mod tests {
             "alpha".into(),
             StubMemoryHost::make("alpha", &[("1", "ALPHA")]),
         );
-        hosts.insert("beta".into(), StubMemoryHost::make("beta", &[("1", "BETA")]));
+        hosts.insert(
+            "beta".into(),
+            StubMemoryHost::make("beta", &[("1", "BETA")]),
+        );
         let (skills, _tmp) = make_skills(&[]);
         let adapter = make_adapter(hosts, skills);
 
