@@ -90,21 +90,13 @@ ignore = [
     # Each of these has a safe upgrade but bumping requires touching
     # Cargo.toml of multiple crates and re-resolving the lock; that
     # work is sequenced separately so this CI safety-net stays green.
-    # idna 0.5.0 → 1.x — transitive via url; needs reqwest/url bump.
-    { id = "RUSTSEC-2024-0421", reason = "idna pre-1.0 Punycode bug; transitive via url, upgrade tracked in M7" },
     # protobuf 2.28.0 → 3.7.2 — transitive via prometheus 0.13.
     # Requires bumping prometheus, which is a breaking-API jump.
-    { id = "RUSTSEC-2024-0437", reason = "protobuf 2.x recursion crash; transitive via prometheus, bump tracked in M7" },
-    # pyo3 0.22 → 0.24 — minor breaking changes across the
-    # python-binding crates; sequenced separately.
-    { id = "RUSTSEC-2025-0020", reason = "pyo3 PyString overflow; bump to 0.24 tracked in M7" },
-    # rustls-webpki 0.103.12 → 0.103.13 — should land via cargo update
-    # after dep refresh; deferring here so deny.toml is the only file
-    # this CI fix touches.
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL panic; patch-version bump deferred to dep-refresh PR" },
+    { id = "RUSTSEC-2024-0437", reason = "protobuf 2.x recursion crash; transitive via prometheus 0.13 which has no release pulling protobuf 3.x — bump tracked in M7" },
     # sqlx 0.7.4 → 0.8.x — used by corlinman-auto-rollback. 0.8 is a
-    # breaking upgrade for the offline-query / macros API.
-    { id = "RUSTSEC-2024-0363", reason = "sqlx <0.8.1 protocol-cast bug; 0.8 upgrade is breaking, tracked in M7" },
+    # breaking upgrade for the offline-query / macros API across 11
+    # workspace crates; sequenced separately in M7.
+    { id = "RUSTSEC-2024-0363", reason = "sqlx <0.8.1 protocol-cast bug; 0.8 upgrade is breaking across 11 workspace crates, tracked in M7" },
 ]
 
 [sources]

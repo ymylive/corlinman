@@ -138,7 +138,7 @@ pub fn spawn_child(
         // The runner callable lives in a `Bound` from the caller's GIL
         // frame; we reuse the same `py` token for argument construction
         // so PyO3's lifetime checker doesn't reject the call.
-        let args = PyTuple::new_bound(py, [spec_json.as_str(), parent_ctx_json.as_str()]);
+        let args = PyTuple::new(py, [spec_json.as_str(), parent_ctx_json.as_str()])?;
         let ret = runner_callable.call1(args)?;
         ret.extract::<String>()
     });
@@ -275,8 +275,13 @@ mod tests {
         );
         let module_name = format!("bridge_test_runner_{n}");
         let file_name = format!("{module_name}.py");
-        let module = PyModule::from_code_bound(py, &module_src, &file_name, &module_name)
-            .expect("compile inline python");
+        let module = PyModule::from_code(
+            py,
+            std::ffi::CString::new(module_src).unwrap().as_c_str(),
+            std::ffi::CString::new(file_name).unwrap().as_c_str(),
+            std::ffi::CString::new(module_name).unwrap().as_c_str(),
+        )
+        .expect("compile inline python");
         module
             .getattr("runner")
             .expect("runner callable")

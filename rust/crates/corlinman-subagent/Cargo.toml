@@ -36,7 +36,7 @@ dashmap = { workspace = true }
 corlinman-hooks = { path = "../corlinman-hooks" }
 
 # Optional Python bridge — see [features]. Pinned to a recent stable.
-pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
+pyo3 = { version = "0.24", features = ["auto-initialize"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
