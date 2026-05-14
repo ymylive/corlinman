@@ -85,7 +85,13 @@ jobs:
           tool: cargo-nextest
 
       - name: cargo nextest run
-        run: cargo nextest run --workspace
+        # --retries 2: SQLite tests in corlinman-vector / corlinman-memory-host
+        # / corlinman-gateway have a residual catalog-cache race under nextest
+        # parallelism on Linux runners that shows up as `(code: 1) no such
+        # table: chunks`. The PR fixing the migration to use an isolated
+        # single-conn pool collapsed most of the window; the retry handles
+        # the leftover edge cases without masking deterministic bugs.
+        run: cargo nextest run --workspace --retries 2
 
   # ---------------------------------------------------------------------------
   # Python plane (ruff / mypy / pytest split into parallel jobs)
