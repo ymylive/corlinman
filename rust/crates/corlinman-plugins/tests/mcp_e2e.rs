@@ -241,10 +241,7 @@ async fn e2e_full_round_trip_python_fixture() {
             let parsed: serde_json::Value =
                 serde_json::from_slice(&content).expect("must be valid JSON");
             assert_eq!(parsed["isError"], false);
-            assert_eq!(
-                parsed["content"][0]["type"], "text",
-                "content[0] type"
-            );
+            assert_eq!(parsed["content"][0]["type"], "text", "content[0] type");
             assert_eq!(
                 parsed["content"][0]["text"], "echo: hello-iter-10",
                 "echo payload mismatch"
@@ -322,10 +319,7 @@ async fn e2e_full_round_trip_python_fixture() {
                 plugin: "echo-mcp".into(),
                 tool: "echo".into(),
                 args_json: Bytes::from(
-                    serde_json::to_vec(
-                        &serde_json::json!({"text": format!("mux-{i}")}),
-                    )
-                    .unwrap(),
+                    serde_json::to_vec(&serde_json::json!({"text": format!("mux-{i}")})).unwrap(),
                 ),
                 call_id: format!("mux-{i}"),
                 session_key: String::new(),
@@ -373,9 +367,7 @@ async fn e2e_full_round_trip_python_fixture() {
 #[tokio::test]
 async fn e2e_optional_npx_filesystem_server() {
     if std::env::var("CORLINMAN_C2_E2E_USE_NPX").ok().as_deref() != Some("1") {
-        eprintln!(
-            "CORLINMAN_C2_E2E_USE_NPX != 1; skipping optional npx round-trip"
-        );
+        eprintln!("CORLINMAN_C2_E2E_USE_NPX != 1; skipping optional npx round-trip");
         return;
     }
     let (manifest, tmp) = match build_npx_filesystem_manifest() {
@@ -421,10 +413,7 @@ async fn e2e_optional_npx_filesystem_server() {
             "list_directory",
             serde_json::json!({"path": tmp.path().to_string_lossy()}),
         ),
-        (
-            "list_allowed_directories",
-            serde_json::json!({}),
-        ),
+        ("list_allowed_directories", serde_json::json!({})),
     ];
     let mut hit = false;
     for (tool, args) in candidates {

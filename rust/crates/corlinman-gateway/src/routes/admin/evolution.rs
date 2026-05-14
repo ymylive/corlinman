@@ -1649,7 +1649,11 @@ mod tests {
     /// Insert a fresh `pending` proposal of `kind` so the route layer
     /// can run its load → gate → set_decision pipeline. Sibling of the
     /// existing `proposal()` helper which is locked to MemoryOp.
-    fn proposal_of_kind(id: &str, kind: EvolutionKind, status: EvolutionStatus) -> EvolutionProposal {
+    fn proposal_of_kind(
+        id: &str,
+        kind: EvolutionKind,
+        status: EvolutionStatus,
+    ) -> EvolutionProposal {
         let mut p = proposal(id, status);
         p.kind = kind;
         // Engine config payload isn't validated by the route — keep

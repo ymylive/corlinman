@@ -157,10 +157,7 @@ pub struct BridgeOutcome {
 ///    - 1-Hz budget tick → emit warn / terminate as configured.
 /// 4. On exit, finalise the budget, persist `voice_sessions.row` end,
 ///    and return the [`BridgeOutcome`] for the caller.
-pub async fn run_bridge<Io: BridgeIo>(
-    mut io: Io,
-    mut ctx: BridgeContext,
-) -> BridgeOutcome {
+pub async fn run_bridge<Io: BridgeIo>(mut io: Io, mut ctx: BridgeContext) -> BridgeOutcome {
     // ---- 1. open provider session --------------------------------
     let params = VoiceSessionStartParams {
         session_id: ctx.session_id.clone(),
@@ -212,16 +209,20 @@ pub async fn run_bridge<Io: BridgeIo>(
 
     // The start row insert can race the first frame emission, so we
     // wait for `Ready` (or an early End/Error) before writing.
-    if let Err(end) = wait_for_ready_and_persist(
-        &mut events_rx,
-        &mut io,
-        &ctx,
-        &mut session_row_persisted,
-    )
-    .await
+    if let Err(end) =
+        wait_for_ready_and_persist(&mut events_rx, &mut io, &ctx, &mut session_row_persisted).await
     {
         // Close cleanly; budget already at zero.
-        return finalise(&mut ctx, end, transcript_buf, session_row_persisted, audio_in_tx, control_in_tx, provider_task).await;
+        return finalise(
+            &mut ctx,
+            end,
+            transcript_buf,
+            session_row_persisted,
+            audio_in_tx,
+            control_in_tx,
+            provider_task,
+        )
+        .await;
     }
 
     // ---- 3. pump loop -------------------------------------------
@@ -375,9 +376,15 @@ async fn handle_client_text(
             let _ = control_in_tx.send(ProviderCommand::Interrupt).await;
             ClientFrameAction::Continue
         }
-        Ok(ClientControl::ApproveTool { approval_id, approve }) => {
+        Ok(ClientControl::ApproveTool {
+            approval_id,
+            approve,
+        }) => {
             let _ = control_in_tx
-                .send(ProviderCommand::ApproveTool { approval_id, approve })
+                .send(ProviderCommand::ApproveTool {
+                    approval_id,
+                    approve,
+                })
                 .await;
             ClientFrameAction::Continue
         }
@@ -449,7 +456,11 @@ async fn handle_provider_event<Io: BridgeIo>(
                 .await;
             ProviderFrameAction::Continue
         }
-        VoiceEvent::ToolCall { call_id, tool, args } => {
+        VoiceEvent::ToolCall {
+            call_id,
+            tool,
+            args,
+        } => {
             // Iter 7 bridge — fire approval, route outcome.
             let outcome = ctx
                 .approval_bridge
@@ -660,17 +671,20 @@ impl BridgeIo for InMemoryIo {
         self.inbound_rx.recv().await
     }
     async fn send(&mut self, frame: BridgeOutFrame) -> Result<(), BridgeIoError> {
-        self.outbound_tx.send(frame).await.map_err(|_| BridgeIoError)
+        self.outbound_tx
+            .send(frame)
+            .await
+            .map_err(|_| BridgeIoError)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::approval::VoiceApprovalBridge;
     use super::super::cost::{InMemoryVoiceSpend, VoiceSpend};
     use super::super::persistence::{MemoryTranscriptSink, SqliteVoiceSessionStore};
     use super::super::provider::{MockBehaviour, MockEchoProvider};
+    use super::*;
     use corlinman_core::config::VoiceConfig;
     use std::sync::Arc;
 
@@ -773,13 +787,8 @@ mod tests {
         let store: SharedVoiceSessionStore =
             Arc::new(SqliteVoiceSessionStore::open_in_memory().await.unwrap());
         let spend: Arc<dyn VoiceSpend> = Arc::new(InMemoryVoiceSpend::new());
-        let (ctx, _cancel) = ctx_with_provider(
-            provider,
-            cfg(30, 600),
-            Some(store.clone()),
-            None,
-            spend,
-        );
+        let (ctx, _cancel) =
+            ctx_with_provider(provider, cfg(30, 600), Some(store.clone()), None, spend);
         let (io, mut handle) = InMemoryIo::new();
 
         // Spawn the bridge then end the session via client `end`.
@@ -929,7 +938,8 @@ mod tests {
             .unwrap();
         // Drain a few outbound frames so the transcript event hits.
         for _ in 0..5 {
-            let _ = tokio::time::timeout(Duration::from_millis(200), handle.outbound_rx.recv()).await;
+            let _ =
+                tokio::time::timeout(Duration::from_millis(200), handle.outbound_rx.recv()).await;
         }
 
         handle
@@ -949,7 +959,11 @@ mod tests {
 
         // voice_sessions row has transcript_text populated.
         let row = store.fetch("voice-test").await.unwrap().unwrap();
-        assert!(row.transcript_text.as_deref().unwrap_or("").contains("hello"));
+        assert!(row
+            .transcript_text
+            .as_deref()
+            .unwrap_or("")
+            .contains("hello"));
     }
 
     #[tokio::test]
@@ -1167,13 +1181,8 @@ mod tests {
         let store: SharedVoiceSessionStore =
             Arc::new(SqliteVoiceSessionStore::open_in_memory().await.unwrap());
         let spend: Arc<dyn VoiceSpend> = Arc::new(InMemoryVoiceSpend::new());
-        let (ctx, _cancel) = ctx_with_provider(
-            provider,
-            cfg(30, 600),
-            Some(store.clone()),
-            None,
-            spend,
-        );
+        let (ctx, _cancel) =
+            ctx_with_provider(provider, cfg(30, 600), Some(store.clone()), None, spend);
         // ctx.audio_path defaults to None via ctx_with_provider.
         assert!(ctx.audio_path.is_none(), "fixture default = None");
         let (io, mut handle) = InMemoryIo::new();
@@ -1209,8 +1218,7 @@ mod tests {
         let sink_concrete = Arc::new(MemoryTranscriptSink::new());
         let sink: SharedTranscriptSink = sink_concrete.clone();
         let spend: Arc<dyn VoiceSpend> = Arc::new(InMemoryVoiceSpend::new());
-        let (mut ctx, _cancel) =
-            ctx_with_provider(provider, cfg(30, 600), None, Some(sink), spend);
+        let (mut ctx, _cancel) = ctx_with_provider(provider, cfg(30, 600), None, Some(sink), spend);
         // Simulate the handler extracting a non-default session_key
         // out of the `start` control frame.
         ctx.session_key = "client-supplied-key".into();
@@ -1226,8 +1234,8 @@ mod tests {
             .unwrap();
         // Drain a few outbound frames so the transcript event lands.
         for _ in 0..5 {
-            let _ = tokio::time::timeout(Duration::from_millis(150), handle.outbound_rx.recv())
-                .await;
+            let _ =
+                tokio::time::timeout(Duration::from_millis(150), handle.outbound_rx.recv()).await;
         }
         handle
             .inbound_tx
@@ -1321,7 +1329,6 @@ mod tests {
 
 #[cfg(test)]
 mod e2e_tests {
-    use super::*;
     use super::super::approval::VoiceApprovalBridge;
     use super::super::cost::{InMemoryVoiceSpend, VoiceSpend};
     use super::super::persistence::{
@@ -1333,6 +1340,7 @@ mod e2e_tests {
         VoiceProvider, VoiceProviderSession, VoiceSessionStartParams,
         DEFAULT_PROVIDER_CHANNEL_CAPACITY,
     };
+    use super::*;
     use crate::middleware::approval::ApprovalGate;
     use corlinman_core::config::{ApprovalMode, ApprovalRule, VoiceConfig};
     use corlinman_vector::SqliteStore;
@@ -1582,10 +1590,11 @@ mod e2e_tests {
         let bridge_handle = tokio::spawn(run_bridge(io, ctx));
 
         // 1. Drain the `started` ack.
-        let started_frame = tokio::time::timeout(Duration::from_millis(500), handle.outbound_rx.recv())
-            .await
-            .expect("started arrives within 500ms")
-            .expect("Some");
+        let started_frame =
+            tokio::time::timeout(Duration::from_millis(500), handle.outbound_rx.recv())
+                .await
+                .expect("started arrives within 500ms")
+                .expect("Some");
         match started_frame {
             BridgeOutFrame::Text(t) => {
                 let v: serde_json::Value = serde_json::from_str(&t).unwrap();
@@ -1618,7 +1627,8 @@ mod e2e_tests {
         // frame to drive the tool-call branch.
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
-            match tokio::time::timeout(Duration::from_millis(150), handle.outbound_rx.recv()).await {
+            match tokio::time::timeout(Duration::from_millis(150), handle.outbound_rx.recv()).await
+            {
                 Ok(Some(BridgeOutFrame::Text(t))) => {
                     let v: serde_json::Value = serde_json::from_str(&t).unwrap();
                     match v["type"].as_str().unwrap_or_default() {

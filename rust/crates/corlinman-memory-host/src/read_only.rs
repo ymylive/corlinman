@@ -222,11 +222,8 @@ mod tests {
             vec![hit("b-1", "kb-b", 0.95), hit("a-1", "kb-b", 0.4)],
         );
 
-        let federated = FederatedMemoryHost::new(
-            "fed",
-            vec![host_a, host_b],
-            FusionStrategy::Rrf { k: 60.0 },
-        );
+        let federated =
+            FederatedMemoryHost::new("fed", vec![host_a, host_b], FusionStrategy::Rrf { k: 60.0 });
         let ro = ReadOnlyMemoryHost::new(Arc::new(federated));
 
         let hits = ro.query(query("anything")).await.unwrap();
@@ -235,7 +232,10 @@ mod tests {
         // host. Document `a-1` appears in both hosts so RRF should rank it
         // ahead of `a-2` (only in host A) despite a-1's lower per-host score
         // in B.
-        assert!(!hits.is_empty(), "RRF should produce hits through the wrapper");
+        assert!(
+            !hits.is_empty(),
+            "RRF should produce hits through the wrapper"
+        );
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
         assert!(ids.contains(&"a-1"));
 

@@ -58,12 +58,7 @@ pub fn token_config_to_acl(t: &corlinman_core::config::McpTokenConfig) -> TokenA
 /// Build an [`McpServerConfig`] from the gateway's [`McpConfig`].
 pub fn build_server_config(cfg: &McpConfig) -> McpServerConfig {
     McpServerConfig {
-        tokens: cfg
-            .server
-            .tokens
-            .iter()
-            .map(token_config_to_acl)
-            .collect(),
+        tokens: cfg.server.tokens.iter().map(token_config_to_acl).collect(),
         max_frame_bytes: cfg.server.max_frame_bytes as usize,
     }
 }
@@ -80,8 +75,8 @@ pub fn build_dispatcher(
     memory_hosts: BTreeMap<String, Arc<dyn MemoryHost>>,
     runtime: Arc<dyn PluginRuntime>,
 ) -> AdapterDispatcher {
-    let tools = Arc::new(ToolsAdapter::with_runtime(plugins, runtime))
-        as Arc<dyn CapabilityAdapter>;
+    let tools =
+        Arc::new(ToolsAdapter::with_runtime(plugins, runtime)) as Arc<dyn CapabilityAdapter>;
     let resources =
         Arc::new(ResourcesAdapter::new(memory_hosts, skills.clone())) as Arc<dyn CapabilityAdapter>;
     let prompts = Arc::new(corlinman_mcp::adapters::PromptsAdapter::new(skills))

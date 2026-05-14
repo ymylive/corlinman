@@ -19,7 +19,9 @@ use corlinman_canvas::{
 fn render_mermaid(diagram: &str) -> Result<corlinman_canvas::RenderedArtifact, CanvasError> {
     Renderer::new().render(&CanvasPresentPayload {
         artifact_kind: ArtifactKind::Mermaid,
-        body: ArtifactBody::Mermaid { diagram: diagram.into() },
+        body: ArtifactBody::Mermaid {
+            diagram: diagram.into(),
+        },
         idempotency_key: "art_mermaid_test".into(),
         theme_hint: Some(ThemeClass::TpLight),
     })
@@ -34,7 +36,10 @@ fn render_mermaid(diagram: &str) -> Result<corlinman_canvas::RenderedArtifact, C
 fn mermaid_default_build_returns_feature_disabled_error() {
     let err = render_mermaid("graph LR; A-->B").expect_err("default build must error");
     match err {
-        CanvasError::Adapter { kind: ArtifactKind::Mermaid, message } => {
+        CanvasError::Adapter {
+            kind: ArtifactKind::Mermaid,
+            message,
+        } => {
             assert!(
                 message.contains("--features mermaid")
                     || message.to_lowercase().contains("not enabled"),
@@ -55,7 +60,10 @@ fn mermaid_oversized_input_rejected_before_dispatch() {
     let huge = "x".repeat(256 * 1024 + 1);
     let err = render_mermaid(&huge).expect_err("oversized must error");
     match err {
-        CanvasError::BodyTooLarge { kind: ArtifactKind::Mermaid, max_bytes } => {
+        CanvasError::BodyTooLarge {
+            kind: ArtifactKind::Mermaid,
+            max_bytes,
+        } => {
             assert_eq!(max_bytes, 256 * 1024);
         }
         other => panic!("expected BodyTooLarge, got {other:?}"),
@@ -82,7 +90,9 @@ fn mermaid_dispatch_never_returns_unimplemented() {
 fn mermaid_theme_hint_round_trips_via_protocol() {
     let payload = CanvasPresentPayload {
         artifact_kind: ArtifactKind::Mermaid,
-        body: ArtifactBody::Mermaid { diagram: "graph LR; A-->B".into() },
+        body: ArtifactBody::Mermaid {
+            diagram: "graph LR; A-->B".into(),
+        },
         idempotency_key: "art_mermaid_theme".into(),
         theme_hint: Some(ThemeClass::TpDark),
     };

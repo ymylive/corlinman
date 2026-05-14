@@ -128,8 +128,8 @@ async fn spawn_server(
     skills: Arc<SkillRegistry>,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let runtime: Arc<dyn PluginRuntime> = Arc::new(KbSearchRuntime);
-    let tools = Arc::new(ToolsAdapter::with_runtime(plugins, runtime))
-        as Arc<dyn CapabilityAdapter>;
+    let tools =
+        Arc::new(ToolsAdapter::with_runtime(plugins, runtime)) as Arc<dyn CapabilityAdapter>;
     let memory_hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
     let resources =
         Arc::new(ResourcesAdapter::new(memory_hosts, skills.clone())) as Arc<dyn CapabilityAdapter>;
@@ -243,7 +243,8 @@ fn assert_frames_match(label: &str, recorded: &Value, live: &Value, ignore: &[St
     rec = strip_id(rec);
     got = strip_id(got);
     assert_eq!(
-        rec, got,
+        rec,
+        got,
         "fixture mismatch at step '{label}'\nrecorded: {}\nlive:     {}",
         serde_json::to_string_pretty(&rec).unwrap(),
         serde_json::to_string_pretty(&got).unwrap()

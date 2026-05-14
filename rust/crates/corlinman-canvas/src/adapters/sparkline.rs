@@ -90,10 +90,7 @@ pub fn render(
     if values.len() < 2 {
         return Err(CanvasError::Adapter {
             kind: ArtifactKind::Sparkline,
-            message: format!(
-                "sparkline requires at least 2 points, got {}",
-                values.len()
-            ),
+            message: format!("sparkline requires at least 2 points, got {}", values.len()),
         });
     }
     if values.len() > MAX_POINTS {

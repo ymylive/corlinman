@@ -42,8 +42,7 @@ pub mod protocol;
 
 pub use cache::{key_for as cache_key_for, key_to_hex, CacheKey, RenderCache, RENDERER_VERSION};
 pub use protocol::{
-    ArtifactBody, ArtifactKind, CanvasError, CanvasPresentPayload,
-    RenderedArtifact, ThemeClass,
+    ArtifactBody, ArtifactKind, CanvasError, CanvasPresentPayload, RenderedArtifact, ThemeClass,
 };
 
 /// Renderer entry point. Dispatches on
@@ -102,10 +101,7 @@ impl Renderer {
     /// result is inserted before being returned to the caller. The
     /// `Arc<RenderedArtifact>` form is cheap-clone on subsequent
     /// hits.
-    pub fn render(
-        &self,
-        payload: &CanvasPresentPayload,
-    ) -> Result<RenderedArtifact, CanvasError> {
+    pub fn render(&self, payload: &CanvasPresentPayload) -> Result<RenderedArtifact, CanvasError> {
         let theme = payload.theme_hint.unwrap_or_default();
         let key = cache::key_for(payload.artifact_kind, &payload.body, theme);
         if let Some(hit) = self.cache.get(&key) {
@@ -119,21 +115,13 @@ impl Renderer {
                 adapters::code::render(language, source, theme)
             }
             ArtifactBody::Table { markdown, csv } => {
-                adapters::table::render(
-                    markdown.as_deref(),
-                    csv.as_deref(),
-                    theme,
-                )
+                adapters::table::render(markdown.as_deref(), csv.as_deref(), theme)
             }
-            ArtifactBody::Latex { tex, display } => {
-                adapters::latex::render(tex, *display, theme)
-            }
+            ArtifactBody::Latex { tex, display } => adapters::latex::render(tex, *display, theme),
             ArtifactBody::Sparkline { values, unit } => {
                 adapters::sparkline::render(values, unit.as_deref(), theme)
             }
-            ArtifactBody::Mermaid { diagram } => {
-                adapters::mermaid::render(diagram, theme)
-            }
+            ArtifactBody::Mermaid { diagram } => adapters::mermaid::render(diagram, theme),
         }?;
 
         // Stamp the content hash so clients can dedup network
@@ -219,4 +207,3 @@ mod tests {
         assert_eq!(r.cache().len(), 2);
     }
 }
-

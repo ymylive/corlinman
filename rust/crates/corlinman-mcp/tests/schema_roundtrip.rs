@@ -68,7 +68,10 @@ fn jsonrpc_response_result_round_trip_keeps_jsonrpc_literal() {
     assert_eq!(wire["jsonrpc"], "2.0");
     assert_eq!(wire["id"], "req-1");
     assert_eq!(wire["result"], json!({"ok": true}));
-    assert!(wire.get("error").is_none(), "result+error are mutually exclusive");
+    assert!(
+        wire.get("error").is_none(),
+        "result+error are mutually exclusive"
+    );
     let back: JsonRpcResponse = serde_json::from_value(wire).unwrap();
     assert_eq!(back, resp);
 }

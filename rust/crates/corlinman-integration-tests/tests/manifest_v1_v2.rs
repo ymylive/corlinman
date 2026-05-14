@@ -38,7 +38,10 @@ command = "true"
     // the new `[mcp]` table; both v1 and v2 manifests now migrate
     // forward to v3 in-memory. Test renamed only in spirit — the
     // round-trip target is the latest manifest version in tree.
-    assert_eq!(m.manifest_version, 3, "v1 must migrate to current manifest version in-memory");
+    assert_eq!(
+        m.manifest_version, 3,
+        "v1 must migrate to current manifest version in-memory"
+    );
     assert_eq!(m.protocols, vec!["openai_function".to_string()]);
     assert!(m.hooks.is_empty());
     assert!(m.skill_refs.is_empty());

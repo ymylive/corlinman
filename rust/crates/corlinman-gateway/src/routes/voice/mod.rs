@@ -46,6 +46,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::middleware::approval::ApprovalGate;
 use approval::VoiceApprovalBridge;
 use bridge::{run_bridge, BridgeContext, BridgeInFrame, BridgeIo, BridgeIoError, BridgeOutFrame};
 use budget::BudgetEnforcer;
@@ -53,7 +54,6 @@ use cost::{
     evaluate_budget, next_utc_midnight, utc_day_epoch, BudgetDecision, BudgetDenyReason,
     InMemoryVoiceSpend, VoiceSpend,
 };
-use crate::middleware::approval::ApprovalGate;
 use framing::{
     accept_subprotocol, encode_server_control, parse_client_control, ClientControl, ServerControl,
     SubprotocolDecision,
@@ -237,11 +237,7 @@ async fn voice_handler(
     ws: Option<WebSocketUpgrade>,
 ) -> Response {
     let snap = state.config.load();
-    let enabled = snap
-        .voice
-        .as_ref()
-        .map(|v| v.enabled)
-        .unwrap_or(false);
+    let enabled = snap.voice.as_ref().map(|v| v.enabled).unwrap_or(false);
 
     if !enabled {
         return voice_disabled_response();
@@ -400,55 +396,55 @@ async fn run_voice_session(
     // (session_key = session_id) and stash the offending frame so the
     // bridge can react to it. Either way, downstream construction is
     // unblocked.
-    let (start_session_key, start_agent_id, start_sample_rate, replay_first) = match tokio::time::timeout(
-        Duration::from_secs(5),
-        socket.recv(),
-    )
-    .await
-    {
-        Ok(Some(Ok(Message::Text(t)))) => match parse_client_control(&t) {
-            Ok(ClientControl::Start {
-                session_key,
-                agent_id,
-                sample_rate_hz,
-                ..
-            }) => (Some(session_key), agent_id, Some(sample_rate_hz), None),
-            Ok(_other) => {
-                // Non-start text frame: keep the iter-9 fallback.
-                // Replay the original text so the bridge sees it.
-                (None, None, None, Some(BridgeInFrame::Text(t)))
+    let (start_session_key, start_agent_id, start_sample_rate, replay_first) =
+        match tokio::time::timeout(Duration::from_secs(5), socket.recv()).await {
+            Ok(Some(Ok(Message::Text(t)))) => match parse_client_control(&t) {
+                Ok(ClientControl::Start {
+                    session_key,
+                    agent_id,
+                    sample_rate_hz,
+                    ..
+                }) => (Some(session_key), agent_id, Some(sample_rate_hz), None),
+                Ok(_other) => {
+                    // Non-start text frame: keep the iter-9 fallback.
+                    // Replay the original text so the bridge sees it.
+                    (None, None, None, Some(BridgeInFrame::Text(t)))
+                }
+                Err(err) => {
+                    // Parse failure: surface to the client and keep going
+                    // with the fallback so the bridge's tolerant
+                    // protocol-error path can decide whether to terminate.
+                    debug!(
+                        target: "voice", session_id, err = %err,
+                        "first text frame failed to parse; falling back to session_id"
+                    );
+                    (None, None, None, Some(BridgeInFrame::Text(t)))
+                }
+            },
+            Ok(Some(Ok(Message::Binary(b)))) => {
+                // Audio before start. Same fallback — bridge's binary path
+                // will rate-limit / validate as normal.
+                (None, None, None, Some(BridgeInFrame::Binary(b)))
             }
-            Err(err) => {
-                // Parse failure: surface to the client and keep going
-                // with the fallback so the bridge's tolerant
-                // protocol-error path can decide whether to terminate.
-                debug!(
-                    target: "voice", session_id, err = %err,
-                    "first text frame failed to parse; falling back to session_id"
-                );
-                (None, None, None, Some(BridgeInFrame::Text(t)))
+            Ok(Some(Ok(Message::Close(_))))
+            | Ok(Some(Ok(Message::Ping(_))))
+            | Ok(Some(Ok(Message::Pong(_))))
+            | Ok(Some(Err(_)))
+            | Ok(None)
+            | Err(_) => {
+                // Client hung up / errored / didn't send anything within
+                // 5s. We still need to drive the bridge so the session row
+                // gets a `start_failed`-style end reason — but with no
+                // start frame the safest action is to close immediately
+                // before opening a provider session.
+                let close = CloseFrame {
+                    code: 1002,
+                    reason: "missing start frame".into(),
+                };
+                let _ = socket.send(Message::Close(Some(close))).await;
+                return;
             }
-        },
-        Ok(Some(Ok(Message::Binary(b)))) => {
-            // Audio before start. Same fallback — bridge's binary path
-            // will rate-limit / validate as normal.
-            (None, None, None, Some(BridgeInFrame::Binary(b)))
-        }
-        Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Ok(Message::Ping(_))))
-        | Ok(Some(Ok(Message::Pong(_)))) | Ok(Some(Err(_))) | Ok(None) | Err(_) => {
-            // Client hung up / errored / didn't send anything within
-            // 5s. We still need to drive the bridge so the session row
-            // gets a `start_failed`-style end reason — but with no
-            // start frame the safest action is to close immediately
-            // before opening a provider session.
-            let close = CloseFrame {
-                code: 1002,
-                reason: "missing start frame".into(),
-            };
-            let _ = socket.send(Message::Close(Some(close))).await;
-            return;
-        }
-    };
+        };
 
     // Per-session cancel token; signals graceful shutdown to the
     // bridge if the gateway-level lifecycle cancels (e.g. process
@@ -534,13 +530,7 @@ async fn run_voice_session(
     // I/O that yields the buffered frame once before falling through
     // to the live socket.
     let outcome = match replay_first {
-        Some(first) => {
-            run_bridge(
-                ReplayWebSocketBridgeIo::new(socket, first),
-                ctx,
-            )
-            .await
-        }
+        Some(first) => run_bridge(ReplayWebSocketBridgeIo::new(socket, first), ctx).await,
         None => run_bridge(WebSocketBridgeIo::new(socket), ctx).await,
     };
     debug!(
@@ -1013,10 +1003,7 @@ mod tests {
 
         // Build the router once and reuse — both tenants hit the same
         // shared spend store via the X-Tenant-Id header.
-        let state = VoiceState::with_spend(
-            Arc::new(ArcSwap::from_pointee(enabled_cfg(30))),
-            spend,
-        );
+        let state = VoiceState::with_spend(Arc::new(ArcSwap::from_pointee(enabled_cfg(30))), spend);
         let router = router_with_state(state);
 
         let mut req_a = ws_upgrade_request(Some("corlinman.voice.v1"));
@@ -1099,7 +1086,9 @@ mod tests {
         assert_eq!(row.id, "voice-state-seam");
 
         // Transcript sink seam likewise functional.
-        sink.append_turn("default", "k", "user", "hi").await.unwrap();
+        sink.append_turn("default", "k", "user", "hi")
+            .await
+            .unwrap();
         assert_eq!(sink.snapshot().await.len(), 1);
     }
 

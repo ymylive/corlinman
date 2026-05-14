@@ -75,11 +75,9 @@ pub const APPROVAL_RESUME_TEXT: &str = "Approved, continuing.";
 /// going silent. iter 9's bridge follows this with a
 /// `ProviderCommand::Interrupt` to make sure no half-emitted TTS
 /// leaks through.
-pub const APPROVAL_DENIED_TEXT: &str =
-    "Sorry, I'm not allowed to use that tool right now.";
+pub const APPROVAL_DENIED_TEXT: &str = "Sorry, I'm not allowed to use that tool right now.";
 
-pub const APPROVAL_TIMEOUT_TEXT: &str =
-    "Sorry, I didn't get approval in time to use that tool.";
+pub const APPROVAL_TIMEOUT_TEXT: &str = "Sorry, I didn't get approval in time to use that tool.";
 
 /// One end of the gate handoff. Iter 9's run_voice_session calls
 /// [`VoiceApprovalBridge::handle_tool_call`] once per `VoiceEvent
@@ -319,7 +317,10 @@ mod tests {
         }
     }
 
-    async fn fresh_gate(rules: Vec<ApprovalRule>, timeout: Duration) -> (Arc<ApprovalGate>, TempDir) {
+    async fn fresh_gate(
+        rules: Vec<ApprovalRule>,
+        timeout: Duration,
+    ) -> (Arc<ApprovalGate>, TempDir) {
         let tmp = TempDir::new().unwrap();
         let store = SqliteStore::open(&tmp.path().join("kb.sqlite"))
             .await
@@ -351,7 +352,9 @@ mod tests {
             ServerControl::ToolApprovalRequired { .. }
         ));
         match &outcome.server_frames[0] {
-            ServerControl::ToolApprovalRequired { approval_id, tool, .. } => {
+            ServerControl::ToolApprovalRequired {
+                approval_id, tool, ..
+            } => {
                 assert_eq!(approval_id, "ap-1");
                 assert_eq!(tool, "web_search");
             }
@@ -364,7 +367,10 @@ mod tests {
         // Approve command goes upstream; no Interrupt on the happy path.
         assert_eq!(outcome.provider_commands.len(), 1);
         match &outcome.provider_commands[0] {
-            ProviderCommand::ApproveTool { approval_id, approve } => {
+            ProviderCommand::ApproveTool {
+                approval_id,
+                approve,
+            } => {
                 assert_eq!(approval_id, "ap-1");
                 assert!(*approve);
             }
@@ -377,9 +383,11 @@ mod tests {
         // `Auto` mode: gate returns Approved without writing a row.
         // Bridge produces the same shape as no_gate but routes through
         // the real ApprovalGate API.
-        let (gate, _tmp) =
-            fresh_gate(vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Auto)], Duration::from_millis(200))
-                .await;
+        let (gate, _tmp) = fresh_gate(
+            vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Auto)],
+            Duration::from_millis(200),
+        )
+        .await;
         let bridge = VoiceApprovalBridge::with_gate(gate.clone(), "sk-2");
         let outcome = bridge
             .handle_tool_call(
@@ -391,7 +399,11 @@ mod tests {
             .await;
         assert_eq!(outcome.decision, ApprovalDecision::Approved);
         // No row persisted under Auto.
-        let rows = gate.store_arc_public().list_pending_approvals(true).await.unwrap();
+        let rows = gate
+            .store_arc_public()
+            .list_pending_approvals(true)
+            .await
+            .unwrap();
         assert!(rows.is_empty(), "Auto must not persist; got {rows:?}");
     }
 
@@ -401,9 +413,11 @@ mod tests {
         //   - emit pause frame + apology agent_text
         //   - send ApproveTool{false} + Interrupt upstream
         //   - return Denied(_)
-        let (gate, _tmp) =
-            fresh_gate(vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Deny)], Duration::from_millis(200))
-                .await;
+        let (gate, _tmp) = fresh_gate(
+            vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Deny)],
+            Duration::from_millis(200),
+        )
+        .await;
         let bridge = VoiceApprovalBridge::with_gate(gate, "sk-3");
         let outcome = bridge
             .handle_tool_call(
@@ -438,9 +452,11 @@ mod tests {
         // gate.resolve(id, Approved). The bridge unblocks and returns
         // an Approved outcome. Mirrors the design's "ping admin UI"
         // path end-to-end.
-        let (gate, _tmp) =
-            fresh_gate(vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Prompt)], Duration::from_secs(5))
-                .await;
+        let (gate, _tmp) = fresh_gate(
+            vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Prompt)],
+            Duration::from_secs(5),
+        )
+        .await;
         let bridge = VoiceApprovalBridge::with_gate(gate.clone(), "sk-4");
         let cancel = CancellationToken::new();
 
@@ -459,7 +475,11 @@ mod tests {
 
         // Wait for the row, then resolve as Approved.
         let id = loop {
-            let rows = gate.store_arc_public().list_pending_approvals(false).await.unwrap();
+            let rows = gate
+                .store_arc_public()
+                .list_pending_approvals(false)
+                .await
+                .unwrap();
             if let Some(r) = rows.first() {
                 break r.id.clone();
             }
@@ -476,9 +496,11 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_then_operator_denies_emits_interrupt() {
-        let (gate, _tmp) =
-            fresh_gate(vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Prompt)], Duration::from_secs(5))
-                .await;
+        let (gate, _tmp) = fresh_gate(
+            vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Prompt)],
+            Duration::from_secs(5),
+        )
+        .await;
         let bridge = VoiceApprovalBridge::with_gate(gate.clone(), "sk-5");
 
         let bridge_clone = bridge.clone();
@@ -494,7 +516,11 @@ mod tests {
         });
 
         let id = loop {
-            let rows = gate.store_arc_public().list_pending_approvals(false).await.unwrap();
+            let rows = gate
+                .store_arc_public()
+                .list_pending_approvals(false)
+                .await
+                .unwrap();
             if let Some(r) = rows.first() {
                 break r.id.clone();
             }
@@ -517,9 +543,11 @@ mod tests {
         // it to a denial pattern (deny upstream + interrupt) so the user
         // hears a "didn't get approval in time" message instead of
         // silent assistant.
-        let (gate, _tmp) =
-            fresh_gate(vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Prompt)], Duration::from_millis(60))
-                .await;
+        let (gate, _tmp) = fresh_gate(
+            vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Prompt)],
+            Duration::from_millis(60),
+        )
+        .await;
         let bridge = VoiceApprovalBridge::with_gate(gate, "sk-6");
         let outcome = bridge
             .handle_tool_call(
@@ -546,9 +574,11 @@ mod tests {
         // gate translates that to a Cancelled error; the bridge must
         // surface a synthetic `Error` server frame and still tell
         // upstream to deny + flush.
-        let (gate, _tmp) =
-            fresh_gate(vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Prompt)], Duration::from_secs(5))
-                .await;
+        let (gate, _tmp) = fresh_gate(
+            vec![rule(VOICE_TOOL_PLUGIN, ApprovalMode::Prompt)],
+            Duration::from_secs(5),
+        )
+        .await;
         let bridge = VoiceApprovalBridge::with_gate(gate, "sk-7");
         let cancel = CancellationToken::new();
 
@@ -556,12 +586,7 @@ mod tests {
         let cancel_clone = cancel.clone();
         let handle = tokio::spawn(async move {
             bridge_clone
-                .handle_tool_call(
-                    "ap-7",
-                    "web_search",
-                    serde_json::json!({}),
-                    cancel_clone,
-                )
+                .handle_tool_call("ap-7", "web_search", serde_json::json!({}), cancel_clone)
                 .await
         });
 
@@ -591,7 +616,12 @@ mod tests {
         let bridge = VoiceApprovalBridge::no_gate("sk-args");
         let args = serde_json::json!({"q": "blob", "n": 3});
         let outcome = bridge
-            .handle_tool_call("ap-args", "web_search", args.clone(), CancellationToken::new())
+            .handle_tool_call(
+                "ap-args",
+                "web_search",
+                args.clone(),
+                CancellationToken::new(),
+            )
             .await;
         match &outcome.server_frames[0] {
             ServerControl::ToolApprovalRequired { args: got, .. } => {
@@ -624,7 +654,11 @@ mod tests {
             )
             .await;
         assert_eq!(outcome.decision, ApprovalDecision::Approved);
-        let rows = gate.store_arc_public().list_pending_approvals(true).await.unwrap();
+        let rows = gate
+            .store_arc_public()
+            .list_pending_approvals(true)
+            .await
+            .unwrap();
         assert!(rows.is_empty(), "whitelist must skip persistence");
     }
 }

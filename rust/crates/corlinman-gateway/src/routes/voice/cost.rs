@@ -82,7 +82,9 @@ impl VoiceSpend for InMemoryVoiceSpend {
     fn snapshot(&self, tenant: &str, day_epoch: u64) -> DaySpend {
         let key = (tenant.to_string(), day_epoch);
         let map = self.inner.lock().expect("voice spend mutex poisoned");
-        map.get(&key).copied().unwrap_or_else(|| DaySpend::fresh(day_epoch))
+        map.get(&key)
+            .copied()
+            .unwrap_or_else(|| DaySpend::fresh(day_epoch))
     }
 
     fn record_session_start(&self, tenant: &str, day_epoch: u64) -> DaySpend {
@@ -115,16 +117,16 @@ pub enum BudgetDecision {
     Allow { seconds_remaining: u64 },
     /// Session refused at start. Maps to HTTP 429 with the supplied
     /// `reset_at` UNIX timestamp (next UTC midnight).
-    Deny { reason: BudgetDenyReason, reset_at: u64 },
+    Deny {
+        reason: BudgetDenyReason,
+        reset_at: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BudgetDenyReason {
     /// Tenant has used >= the daily cap.
-    DayBudgetExhausted {
-        used_seconds: u64,
-        cap_seconds: u64,
-    },
+    DayBudgetExhausted { used_seconds: u64, cap_seconds: u64 },
     /// `budget_minutes_per_tenant_per_day = 0` — operator explicitly
     /// disabled voice for this tenant by zeroing the cap.
     BudgetIsZero,
@@ -273,10 +275,8 @@ impl SessionMeter {
             if let Some(t) = self.warn_at_elapsed {
                 if elapsed >= t {
                     self.warn_fired = true;
-                    let minutes_remaining = self
-                        .cap_seconds
-                        .saturating_sub(day_used)
-                        .div_ceil(60) as u32;
+                    let minutes_remaining =
+                        self.cap_seconds.saturating_sub(day_used).div_ceil(60) as u32;
                     return MeterTick::BudgetWarn { minutes_remaining };
                 }
             }
@@ -414,7 +414,11 @@ mod tests {
         let d = evaluate_budget(&cfg, today, 999);
         match d {
             BudgetDecision::Deny {
-                reason: BudgetDenyReason::DayBudgetExhausted { used_seconds, cap_seconds },
+                reason:
+                    BudgetDenyReason::DayBudgetExhausted {
+                        used_seconds,
+                        cap_seconds,
+                    },
                 reset_at,
             } => {
                 assert_eq!(used_seconds, 1800);

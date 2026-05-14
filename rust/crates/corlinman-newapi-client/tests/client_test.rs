@@ -35,8 +35,7 @@ async fn probe_returns_user_when_200() {
         .mount(&server)
         .await;
 
-    let client =
-        NewapiClient::new(server.uri(), "user-tok", Some("admin-tok".into())).unwrap();
+    let client = NewapiClient::new(server.uri(), "user-tok", Some("admin-tok".into())).unwrap();
     let result = client.probe().await.unwrap();
     assert_eq!(result.user.username, "root");
     assert_eq!(result.server_version.as_deref(), Some("v0.4.0"));
@@ -203,8 +202,7 @@ async fn get_user_self_uses_admin_token_when_present() {
         })))
         .mount(&server)
         .await;
-    let client =
-        NewapiClient::new(server.uri(), "user-x", Some("admin-special".into())).unwrap();
+    let client = NewapiClient::new(server.uri(), "user-x", Some("admin-special".into())).unwrap();
     let u = client.get_user_self().await.unwrap();
     assert_eq!(u.username, "ops");
 }

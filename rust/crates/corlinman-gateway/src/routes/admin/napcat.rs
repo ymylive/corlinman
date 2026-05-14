@@ -211,10 +211,7 @@ impl NapcatContext {
         // already dead at QQ, so scanning shows "expired". Best-effort;
         // older napcat builds without this route just log a warn and we
         // fall through to whatever `GetQQLoginQrcode` returns.
-        if let Err(err) = self
-            .post("/api/QQLogin/RefreshQRcode", json!({}))
-            .await
-        {
+        if let Err(err) = self.post("/api/QQLogin/RefreshQRcode", json!({})).await {
             // `NapcatError` only derives `Debug` (no `Display`) so use `?`
             // not `%` in the tracing macro.
             tracing::warn!(

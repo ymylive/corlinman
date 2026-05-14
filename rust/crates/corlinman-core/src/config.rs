@@ -2374,10 +2374,7 @@ slot. Set `kind = \"...\"` explicitly. Valid kinds: {}",
                         message: "voice.enabled = true but provider_alias is empty".into(),
                         level: IssueLevel::Error,
                     });
-                } else if !self
-                    .providers
-                    .contains_key(voice.provider_alias.as_str())
-                {
+                } else if !self.providers.contains_key(voice.provider_alias.as_str()) {
                     issues.push(ValidationIssue {
                         path: "voice.provider_alias".into(),
                         code: "voice_provider_alias_missing".into(),
@@ -3937,9 +3934,7 @@ enabled = true
         });
         let issues = cfg.validate_report();
         assert!(
-            issues
-                .iter()
-                .all(|i| !i.code.starts_with("voice_")),
+            issues.iter().all(|i| !i.code.starts_with("voice_")),
             "no voice_* issues when disabled; got: {issues:?}"
         );
     }

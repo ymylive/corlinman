@@ -103,10 +103,7 @@ impl McpError {
 
     /// Convenience constructor for `InvalidParams` with a JSON `data`
     /// payload — typically the offending field echoed back.
-    pub fn invalid_params_with(
-        message: impl Into<String>,
-        data: JsonValue,
-    ) -> Self {
+    pub fn invalid_params_with(message: impl Into<String>, data: JsonValue) -> Self {
         Self::InvalidParams {
             message: message.into(),
             data: Some(data),
@@ -124,9 +121,7 @@ impl McpError {
             Self::InvalidParams { .. } => error_codes::INVALID_PARAMS,
             Self::ToolNotAllowed(_) => error_codes::TOOL_NOT_ALLOWED,
             Self::SessionNotInitialized => error_codes::SESSION_NOT_INITIALIZED,
-            Self::Transport(_)
-            | Self::Auth(_)
-            | Self::Internal(_) => error_codes::INTERNAL_ERROR,
+            Self::Transport(_) | Self::Auth(_) | Self::Internal(_) => error_codes::INTERNAL_ERROR,
         }
     }
 }
@@ -177,16 +172,14 @@ mod tests {
 
     #[test]
     fn invalid_request_maps_to_negative_32600() {
-        let rpc: JsonRpcError =
-            McpError::InvalidRequest("missing method".into()).into();
+        let rpc: JsonRpcError = McpError::InvalidRequest("missing method".into()).into();
         assert_eq!(rpc.code, error_codes::INVALID_REQUEST);
         assert_eq!(rpc.code, -32600);
     }
 
     #[test]
     fn method_not_found_maps_to_negative_32601_and_carries_method_name() {
-        let rpc: JsonRpcError =
-            McpError::MethodNotFound("tools/bogus".into()).into();
+        let rpc: JsonRpcError = McpError::MethodNotFound("tools/bogus".into()).into();
         assert_eq!(rpc.code, error_codes::METHOD_NOT_FOUND);
         assert_eq!(rpc.code, -32601);
         assert!(
@@ -198,8 +191,7 @@ mod tests {
 
     #[test]
     fn invalid_params_maps_to_negative_32602_without_data() {
-        let rpc: JsonRpcError =
-            McpError::invalid_params("unknown resource uri").into();
+        let rpc: JsonRpcError = McpError::invalid_params("unknown resource uri").into();
         assert_eq!(rpc.code, error_codes::INVALID_PARAMS);
         assert_eq!(rpc.code, -32602);
         assert_eq!(rpc.message, "unknown resource uri");
@@ -208,16 +200,11 @@ mod tests {
 
     #[test]
     fn invalid_params_preserves_data_payload() {
-        let rpc: JsonRpcError = McpError::invalid_params_with(
-            "unknown prompt name",
-            json!({"name": "missing-skill"}),
-        )
-        .into();
+        let rpc: JsonRpcError =
+            McpError::invalid_params_with("unknown prompt name", json!({"name": "missing-skill"}))
+                .into();
         assert_eq!(rpc.code, error_codes::INVALID_PARAMS);
-        assert_eq!(
-            rpc.data,
-            Some(json!({"name": "missing-skill"}))
-        );
+        assert_eq!(rpc.data, Some(json!({"name": "missing-skill"})));
     }
 
     #[test]
@@ -238,8 +225,7 @@ mod tests {
 
     #[test]
     fn tool_not_allowed_uses_corlinman_extension_code() {
-        let rpc: JsonRpcError =
-            McpError::ToolNotAllowed("kb:search".into()).into();
+        let rpc: JsonRpcError = McpError::ToolNotAllowed("kb:search".into()).into();
         assert_eq!(rpc.code, error_codes::TOOL_NOT_ALLOWED);
         assert_eq!(rpc.code, -32001);
         assert!(rpc.message.contains("kb:search"));
@@ -279,11 +265,8 @@ mod tests {
         // Lift through the wire envelope to confirm the data field
         // round-trips when serialized.
         use crate::schema::JsonRpcResponse;
-        let rpc: JsonRpcError = McpError::invalid_params_with(
-            "bad arg",
-            json!({"field": "limit"}),
-        )
-        .into();
+        let rpc: JsonRpcError =
+            McpError::invalid_params_with("bad arg", json!({"field": "limit"})).into();
         let resp = JsonRpcResponse::err(json!("req-1"), rpc);
         let wire = serde_json::to_value(&resp).unwrap();
         assert_eq!(wire["error"]["code"], -32602);

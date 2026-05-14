@@ -160,10 +160,7 @@ impl ToolsAdapter {
     }
 
     /// Convenience — build with the no-op progress bridge.
-    pub fn with_runtime(
-        registry: Arc<PluginRegistry>,
-        runtime: Arc<dyn PluginRuntime>,
-    ) -> Self {
+    pub fn with_runtime(registry: Arc<PluginRegistry>, runtime: Arc<dyn PluginRuntime>) -> Self {
         Self::new(registry, runtime, Arc::new(NullProgressBridge))
     }
 
@@ -247,9 +244,10 @@ impl ToolsAdapter {
         } else {
             params.arguments
         };
-        let args_bytes = Bytes::from(serde_json::to_vec(&args).map_err(|e| {
-            McpError::Internal(format!("tools/call: serialize args: {e}"))
-        })?);
+        let args_bytes = Bytes::from(
+            serde_json::to_vec(&args)
+                .map_err(|e| McpError::Internal(format!("tools/call: serialize args: {e}")))?,
+        );
 
         let cwd = entry.plugin_dir();
         let input = PluginInput {
@@ -290,24 +288,26 @@ impl ToolsAdapter {
             .timeout_ms
             .unwrap_or(DEFAULT_DEADLINE_MS);
         let exec = self.runtime.execute(input, sink, cancel.clone());
-        let outcome = match tokio::time::timeout(
-            Duration::from_millis(timeout.saturating_add(500)),
-            exec,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => {
-                cancel.cancel();
-                warn!(plugin = plugin_name, tool = tool_name, "tools/call: deadline exceeded");
-                return Ok(CallResult {
-                    content: vec![Content::text(format!(
-                        "tools/call: deadline exceeded after {timeout}ms"
-                    ))],
-                    is_error: true,
-                });
-            }
-        };
+        let outcome =
+            match tokio::time::timeout(Duration::from_millis(timeout.saturating_add(500)), exec)
+                .await
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    cancel.cancel();
+                    warn!(
+                        plugin = plugin_name,
+                        tool = tool_name,
+                        "tools/call: deadline exceeded"
+                    );
+                    return Ok(CallResult {
+                        content: vec![Content::text(format!(
+                            "tools/call: deadline exceeded after {timeout}ms"
+                        ))],
+                        is_error: true,
+                    });
+                }
+            };
 
         match outcome {
             Ok(PluginOutput::Success { content, .. }) => {
@@ -319,7 +319,12 @@ impl ToolsAdapter {
                 })
             }
             Ok(PluginOutput::Error { code, message, .. }) => {
-                debug!(plugin = plugin_name, tool = tool_name, code, "tools/call: runtime error");
+                debug!(
+                    plugin = plugin_name,
+                    tool = tool_name,
+                    code,
+                    "tools/call: runtime error"
+                );
                 Ok(CallResult {
                     content: vec![Content::text(format!("[code {code}] {message}"))],
                     is_error: true,
@@ -363,9 +368,8 @@ impl CapabilityAdapter for ToolsAdapter {
         match method {
             METHOD_LIST => {
                 let list = self.list_tools(ctx);
-                serde_json::to_value(list).map_err(|e| {
-                    McpError::Internal(format!("tools/list: serialize result: {e}"))
-                })
+                serde_json::to_value(list)
+                    .map_err(|e| McpError::Internal(format!("tools/list: serialize result: {e}")))
             }
             METHOD_CALL => {
                 // Pull progressToken out of `_meta` if present (MCP
@@ -379,9 +383,8 @@ impl CapabilityAdapter for ToolsAdapter {
                     McpError::invalid_params(format!("tools/call: bad params: {e}"))
                 })?;
                 let result = self.call_tool(parsed, ctx, progress_token).await?;
-                serde_json::to_value(result).map_err(|e| {
-                    McpError::Internal(format!("tools/call: serialize result: {e}"))
-                })
+                serde_json::to_value(result)
+                    .map_err(|e| McpError::Internal(format!("tools/call: serialize result: {e}")))
             }
             other => Err(McpError::MethodNotFound(other.to_string())),
         }
@@ -450,11 +453,11 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
+    use corlinman_plugins::discovery::Origin;
     use corlinman_plugins::manifest::{
         Capabilities, Communication, EntryPoint, PluginManifest, PluginType, Tool,
     };
     use corlinman_plugins::registry::{PluginEntry, PluginRegistry};
-    use corlinman_plugins::discovery::Origin;
 
     /// Build a stub registry holding a single plugin/tool combo.
     fn make_registry(plugin: &str, tools: &[(&str, &str)]) -> Arc<PluginRegistry> {
@@ -594,7 +597,11 @@ mod tests {
     #[tokio::test]
     async fn list_returns_one_descriptor_per_manifest_tool() {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = make_registry_from_disk(&tmp, "kb", &[("search", "find stuff"), ("get", "fetch by id")]);
+        let reg = make_registry_from_disk(
+            &tmp,
+            "kb",
+            &[("search", "find stuff"), ("get", "fetch by id")],
+        );
         let runtime = make_runtime(PluginOutput::success(Bytes::from_static(b"{}"), 1));
         let adapter = ToolsAdapter::with_runtime(reg, runtime);
 
@@ -754,8 +761,7 @@ mod tests {
                 .with_progress("halfway", Some(0.5)),
         );
         let bridge = Arc::new(CollectingProgressBridge::new());
-        let adapter =
-            ToolsAdapter::new(reg, runtime, bridge.clone() as Arc<dyn ProgressBridge>);
+        let adapter = ToolsAdapter::new(reg, runtime, bridge.clone() as Arc<dyn ProgressBridge>);
 
         let res = adapter
             .call_tool(
@@ -789,7 +795,11 @@ mod tests {
         let runtime = make_runtime(PluginOutput::success(Bytes::new(), 0));
         let adapter = ToolsAdapter::with_runtime(reg, runtime);
         let err = adapter
-            .handle("tools/bogus", JsonValue::Null, &SessionContext::permissive())
+            .handle(
+                "tools/bogus",
+                JsonValue::Null,
+                &SessionContext::permissive(),
+            )
             .await
             .expect_err("must error");
         assert!(matches!(err, McpError::MethodNotFound(_)));

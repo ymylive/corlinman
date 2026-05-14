@@ -293,9 +293,7 @@ impl VoiceSessionStore for SqliteVoiceSessionStore {
         .await
         .map_err(sql)?;
         if res.rows_affected() == 0 {
-            return Err(VoiceStoreError::RowMissing {
-                id: end.id.clone(),
-            });
+            return Err(VoiceStoreError::RowMissing { id: end.id.clone() });
         }
         Ok(())
     }
@@ -520,10 +518,7 @@ mod tests {
     #[test]
     fn audio_path_for_resolves_under_tenant_tree() {
         let p = audio_path_for(Path::new("/data"), "t-1", "voice-abc");
-        assert_eq!(
-            p.to_string_lossy(),
-            "/data/tenants/t-1/voice/voice-abc.pcm"
-        );
+        assert_eq!(p.to_string_lossy(), "/data/tenants/t-1/voice/voice-abc.pcm");
     }
 
     #[test]
@@ -619,7 +614,10 @@ mod tests {
         .await
         .unwrap();
         let row = s.fetch("voice-3").await.unwrap().unwrap();
-        assert!(row.audio_path.is_none(), "audio_path must be NULL not empty");
+        assert!(
+            row.audio_path.is_none(),
+            "audio_path must be NULL not empty"
+        );
         assert_eq!(row.transcript_text.as_deref(), Some("transcript"));
     }
 
@@ -666,7 +664,9 @@ mod tests {
     async fn memory_sink_captures_appended_turns_in_order() {
         let sink = MemoryTranscriptSink::new();
         sink.append_turn("t", "k", "user", "hi").await.unwrap();
-        sink.append_turn("t", "k", "assistant", "hello").await.unwrap();
+        sink.append_turn("t", "k", "assistant", "hello")
+            .await
+            .unwrap();
         let snap = sink.snapshot().await;
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0].role, "user");

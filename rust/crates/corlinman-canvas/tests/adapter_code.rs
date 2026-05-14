@@ -3,9 +3,7 @@
 //! Asserts the wire-level outputs the gateway and UI bind to. Goldens
 //! deferred to iter 8 (full E2E); these are shape-and-class checks.
 
-use corlinman_canvas::{
-    ArtifactBody, ArtifactKind, CanvasPresentPayload, Renderer, ThemeClass,
-};
+use corlinman_canvas::{ArtifactBody, ArtifactKind, CanvasPresentPayload, Renderer, ThemeClass};
 
 fn render_code(language: &str, source: &str) -> corlinman_canvas::RenderedArtifact {
     Renderer::new()
@@ -30,7 +28,8 @@ fn code_round_trip_rust() {
     assert_eq!(out.render_kind, ArtifactKind::Code);
     assert_eq!(out.theme_class, ThemeClass::TpDark);
     assert!(
-        out.html_fragment.starts_with("<pre class=\"cn-canvas-code\">"),
+        out.html_fragment
+            .starts_with("<pre class=\"cn-canvas-code\">"),
         "expected wrapper, got {}",
         out.html_fragment
     );
@@ -45,7 +44,11 @@ fn code_round_trip_rust() {
         out.html_fragment
     );
     // Recognised → no warning footer.
-    assert!(out.warnings.is_empty(), "unexpected warnings: {:?}", out.warnings);
+    assert!(
+        out.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        out.warnings
+    );
 }
 
 /// Common producer pattern: `language: "rs"` instead of `"rust"`.
@@ -53,7 +56,11 @@ fn code_round_trip_rust() {
 #[test]
 fn code_language_extension_alias_works() {
     let out = render_code("rs", "fn main(){}");
-    assert!(out.warnings.is_empty(), "expected `rs` to resolve, got warnings: {:?}", out.warnings);
+    assert!(
+        out.warnings.is_empty(),
+        "expected `rs` to resolve, got warnings: {:?}",
+        out.warnings
+    );
     assert!(out.html_fragment.contains("cn-canvas-code-"));
 }
 
@@ -73,7 +80,12 @@ fn code_unsupported_language_fallback() {
     );
     // Source survives unaltered.
     assert!(out.html_fragment.contains("qaplaH&#39;a&#39;"));
-    assert_eq!(out.warnings.len(), 1, "expected one warning, got {:?}", out.warnings);
+    assert_eq!(
+        out.warnings.len(),
+        1,
+        "expected one warning, got {:?}",
+        out.warnings
+    );
     assert!(out.warnings[0].contains("klingon"));
 }
 
@@ -89,8 +101,7 @@ fn code_html_escape_syntect_path() {
         out.html_fragment
     );
     assert!(
-        out.html_fragment.contains("&lt;script&gt;")
-            || out.html_fragment.contains("&lt;script"),
+        out.html_fragment.contains("&lt;script&gt;") || out.html_fragment.contains("&lt;script"),
         "expected HTML-escaped script tag, got {}",
         out.html_fragment
     );

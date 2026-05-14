@@ -48,10 +48,7 @@ use super::AdminState;
 
 pub fn router(state: AdminState) -> Router {
     Router::new()
-        .route(
-            "/admin/newapi",
-            get(get_summary).patch(patch_connection),
-        )
+        .route("/admin/newapi", get(get_summary).patch(patch_connection))
         .route("/admin/newapi/channels", get(get_channels))
         .route("/admin/newapi/probe", post(post_probe))
         .route("/admin/newapi/test", post(post_test))
@@ -67,7 +64,10 @@ pub fn router(state: AdminState) -> Router {
 /// surface that as 503 `no_newapi_provider`.
 fn find_newapi(cfg: &Config) -> Option<(String, ProviderEntry)> {
     for (name, entry) in cfg.providers.iter() {
-        let kind = cfg.providers.kind_for(name, entry).unwrap_or(ProviderKind::OpenaiCompatible);
+        let kind = cfg
+            .providers
+            .kind_for(name, entry)
+            .unwrap_or(ProviderKind::OpenaiCompatible);
         if kind == ProviderKind::Newapi && entry.enabled {
             return Some((name.to_string(), entry.clone()));
         }
@@ -192,10 +192,7 @@ pub struct ChannelsQuery {
     pub channel_type: String,
 }
 
-async fn get_channels(
-    State(state): State<AdminState>,
-    Query(q): Query<ChannelsQuery>,
-) -> Response {
+async fn get_channels(State(state): State<AdminState>, Query(q): Query<ChannelsQuery>) -> Response {
     let cfg = state.config.load_full();
     let Some((_name, entry)) = find_newapi(&cfg) else {
         return (

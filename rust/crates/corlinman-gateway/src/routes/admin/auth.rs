@@ -952,10 +952,7 @@ mod tests {
         // lock isn't actually serialising the critical section.
         let codes = [r1.status(), r2.status()];
         let oks = codes.iter().filter(|s| **s == StatusCode::OK).count();
-        let conflicts = codes
-            .iter()
-            .filter(|s| **s == StatusCode::CONFLICT)
-            .count();
+        let conflicts = codes.iter().filter(|s| **s == StatusCode::CONFLICT).count();
         assert_eq!(
             oks, 1,
             "expected exactly one OK across concurrent onboard calls; got {codes:?}",

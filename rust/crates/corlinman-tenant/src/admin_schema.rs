@@ -647,13 +647,12 @@ impl AdminDb {
         // but does not deny verification — the operator's chat request
         // shouldn't fail on a stats column.
         let now = unix_now_ms();
-        if let Err(err) = sqlx::query(
-            "UPDATE tenant_api_keys SET last_used_at_ms = ?1 WHERE key_id = ?2",
-        )
-        .bind(now)
-        .bind(&key_id)
-        .execute(&self.pool)
-        .await
+        if let Err(err) =
+            sqlx::query("UPDATE tenant_api_keys SET last_used_at_ms = ?1 WHERE key_id = ?2")
+                .bind(now)
+                .bind(&key_id)
+                .execute(&self.pool)
+                .await
         {
             tracing::warn!(error = %err, key_id = %key_id, "tenant_api_keys: last_used_at_ms bump failed");
         }
@@ -1010,13 +1009,22 @@ mod tests {
         let acme = TenantId::new("acme").unwrap();
         db.create_tenant(&acme, "Acme", 1).await.unwrap();
 
-        let k1 = db.mint_api_key(&acme, "alice", "chat", Some("first")).await.unwrap();
+        let k1 = db
+            .mint_api_key(&acme, "alice", "chat", Some("first"))
+            .await
+            .unwrap();
         // Sleep 2ms so created_at_ms advances; with millisecond precision
         // back-to-back inserts can land in the same tick.
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        let k2 = db.mint_api_key(&acme, "bob", "chat", Some("second")).await.unwrap();
+        let k2 = db
+            .mint_api_key(&acme, "bob", "chat", Some("second"))
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        let k3 = db.mint_api_key(&acme, "carol", "chat", Some("third")).await.unwrap();
+        let k3 = db
+            .mint_api_key(&acme, "carol", "chat", Some("third"))
+            .await
+            .unwrap();
 
         // Most recent first.
         let listed = db.list_api_keys(&acme).await.unwrap();
@@ -1044,10 +1052,7 @@ mod tests {
         let (db, _tmp) = fresh().await;
         let acme = TenantId::new("acme").unwrap();
         db.create_tenant(&acme, "Acme", 1).await.unwrap();
-        let minted = db
-            .mint_api_key(&acme, "alice", "chat", None)
-            .await
-            .unwrap();
+        let minted = db.mint_api_key(&acme, "alice", "chat", None).await.unwrap();
 
         // Sentinel value before verify so we can assert the bump moved it.
         assert!(minted.row.last_used_at_ms.is_none());

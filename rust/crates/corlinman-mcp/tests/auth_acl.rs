@@ -371,9 +371,13 @@ async fn cross_tenant_read_returns_empty_or_unknown_host() {
         .unwrap();
     let lparsed: ResListResult = serde_json::from_value(lvalue).unwrap();
     let uris: Vec<_> = lparsed.resources.iter().map(|r| r.uri.clone()).collect();
-    assert!(uris.iter().any(|u| u.starts_with("corlinman://memory/alpha/")));
+    assert!(uris
+        .iter()
+        .any(|u| u.starts_with("corlinman://memory/alpha/")));
     assert!(
-        !uris.iter().any(|u| u.starts_with("corlinman://memory/beta/")),
+        !uris
+            .iter()
+            .any(|u| u.starts_with("corlinman://memory/beta/")),
         "beta must not leak; got {uris:?}"
     );
 }
@@ -417,7 +421,10 @@ async fn empty_acl_lists_fail_closed_at_adapter_layer() {
         .await
         .unwrap();
     let parsed: ToolsListResult = serde_json::from_value(value).unwrap();
-    assert!(parsed.tools.is_empty(), "empty allowlist must yield empty list");
+    assert!(
+        parsed.tools.is_empty(),
+        "empty allowlist must yield empty list"
+    );
 
     // And calling kb:search is rejected (unallowed under empty list).
     let err = adapter

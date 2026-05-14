@@ -306,9 +306,7 @@ where
     let current = state.config.load_full();
     new_cfg.merge_redacted_secrets_from(&current);
     if new_cfg.has_redacted_sentinel() {
-        tracing::error!(
-            "admin/embedding: refusing to write config containing redaction sentinel",
-        );
+        tracing::error!("admin/embedding: refusing to write config containing redaction sentinel",);
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({

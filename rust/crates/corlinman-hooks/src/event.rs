@@ -283,14 +283,18 @@ impl HookEvent {
             // it for the spawn-message expansion. Pre-spawn rejections
             // (DepthCapped) have no child session yet, so report the
             // parent's instead so the parent's row still highlights.
-            Self::SubagentSpawned { child_session_key, .. }
-            | Self::SubagentCompleted { child_session_key, .. }
-            | Self::SubagentTimedOut { child_session_key, .. } => {
-                Some(child_session_key.as_str())
+            Self::SubagentSpawned {
+                child_session_key, ..
             }
-            Self::SubagentDepthCapped { parent_session_key, .. } => {
-                Some(parent_session_key.as_str())
+            | Self::SubagentCompleted {
+                child_session_key, ..
             }
+            | Self::SubagentTimedOut {
+                child_session_key, ..
+            } => Some(child_session_key.as_str()),
+            Self::SubagentDepthCapped {
+                parent_session_key, ..
+            } => Some(parent_session_key.as_str()),
             Self::GatewayStartup { .. }
             | Self::ConfigChanged { .. }
             | Self::ToolCalled { .. }

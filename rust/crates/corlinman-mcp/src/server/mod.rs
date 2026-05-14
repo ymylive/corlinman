@@ -14,8 +14,7 @@ pub mod transport;
 pub use auth::{resolve_token, TokenAcl, DEFAULT_TENANT_ID};
 pub use dispatch::{AdapterDispatcher, ServerInfo};
 pub use session::{
-    initialize_reply, SessionPhase, SessionState, INITIALIZED_NOTIFICATION,
-    INITIALIZE_METHOD,
+    initialize_reply, SessionPhase, SessionState, INITIALIZED_NOTIFICATION, INITIALIZE_METHOD,
 };
 pub use transport::{
     FrameHandler, McpServer, McpServerConfig, StubMethodNotFoundHandler,

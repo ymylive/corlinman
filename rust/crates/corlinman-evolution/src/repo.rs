@@ -892,12 +892,14 @@ impl HistoryRepo {
         // reader can tell "operator approved with no peers" apart from
         // "legacy / unfederated apply" without ambiguity.
         let share_with = match &h.share_with {
-            Some(v) => Some(serde_json::to_string(v).map_err(|source| {
-                RepoError::MalformedJson {
-                    column: "share_with",
-                    source,
-                }
-            })?),
+            Some(v) => {
+                Some(
+                    serde_json::to_string(v).map_err(|source| RepoError::MalformedJson {
+                        column: "share_with",
+                        source,
+                    })?,
+                )
+            }
             None => None,
         };
         let row = sqlx::query(
@@ -1764,7 +1766,10 @@ mod tests {
         // inside `latest_for_proposal`; this layer doesn't capture it
         // (operator-facing surfaces hook on the warn separately).
         let got = history.latest_for_proposal(&pid).await.unwrap();
-        assert!(got.share_with.is_none(), "corrupt share_with decodes as None");
+        assert!(
+            got.share_with.is_none(),
+            "corrupt share_with decodes as None"
+        );
         assert_eq!(got.proposal_id, pid, "rest of the row still loads cleanly");
         assert_eq!(got.kind, EvolutionKind::SkillUpdate);
         assert_eq!(got.target, "skills/web_search.md");

@@ -30,9 +30,9 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::manifest::RestartPolicy;
-use crate::runtime::mcp::adapter::McpAdapter;
 #[cfg(test)]
 use crate::runtime::mcp::adapter::AdapterStatus;
+use crate::runtime::mcp::adapter::McpAdapter;
 
 /// Production backoff schedule. Identical to
 /// `crate::supervisor::BACKOFF_SCHEDULE` — keep these in lockstep.
@@ -72,9 +72,7 @@ pub struct SupervisorPolicy {
 
 impl SupervisorPolicy {
     /// Build the production policy from a manifest's `[mcp]` block.
-    pub fn from_manifest(
-        cfg: &crate::manifest::McpConfig,
-    ) -> Self {
+    pub fn from_manifest(cfg: &crate::manifest::McpConfig) -> Self {
         Self {
             crash_loop_max: cfg.crash_loop_max,
             window: Duration::from_secs(cfg.crash_loop_window_secs),
@@ -226,9 +224,7 @@ async fn run_watcher(
                 // to backoff branch.
                 if matches!(policy.restart_policy, RestartPolicy::Never) {
                     let mut s = stats.write().await;
-                    s.failed_at = Some(format!(
-                        "start_one failed and restart_policy=never: {err}"
-                    ));
+                    s.failed_at = Some(format!("start_one failed and restart_policy=never: {err}"));
                     s.stopped = true;
                     return;
                 }
@@ -256,10 +252,7 @@ async fn run_watcher(
         // (or cancel). We need to fish the client out of the slot;
         // the adapter doesn't expose it directly so we use the
         // status poll + `is_alive` cheap probe + a re-fetch trick.
-        let client = match adapter
-            .live_client_for_supervisor(&name)
-            .await
-        {
+        let client = match adapter.live_client_for_supervisor(&name).await {
             Ok(c) => c,
             Err(_) => {
                 // Slot vanished (admin removed it) → exit cleanly.
@@ -471,13 +464,22 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_responder();
-        let m = manifest("crash-respawn", &cmd, args, RestartPolicy::OnCrash, 5, 5_000);
+        let m = manifest(
+            "crash-respawn",
+            &cmd,
+            args,
+            RestartPolicy::OnCrash,
+            5,
+            5_000,
+        );
         let adapter = Arc::new(McpAdapter::new());
-        adapter.register(m.clone(), tmp.path().to_path_buf()).await.unwrap();
+        adapter
+            .register(m.clone(), tmp.path().to_path_buf())
+            .await
+            .unwrap();
 
         let policy = fast_policy(RestartPolicy::OnCrash, 5);
-        let mut sup = spawn_supervisor(Arc::clone(&adapter), "crash-respawn".into(), policy)
-            .await;
+        let mut sup = spawn_supervisor(Arc::clone(&adapter), "crash-respawn".into(), policy).await;
 
         // Wait for the first start to complete.
         for _ in 0..200 {
@@ -545,8 +547,7 @@ mod tests {
         adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
 
         let policy = fast_policy(RestartPolicy::Never, 5);
-        let mut sup = spawn_supervisor(Arc::clone(&adapter), "never-respawn".into(), policy)
-            .await;
+        let mut sup = spawn_supervisor(Arc::clone(&adapter), "never-respawn".into(), policy).await;
 
         // Wait for the first start.
         for _ in 0..200 {
@@ -606,8 +607,7 @@ mod tests {
             backoff: vec![Duration::from_millis(10), Duration::from_millis(10)],
             restart_policy: RestartPolicy::OnCrash,
         };
-        let mut sup =
-            spawn_supervisor(Arc::clone(&adapter), "ever-broken".into(), policy).await;
+        let mut sup = spawn_supervisor(Arc::clone(&adapter), "ever-broken".into(), policy).await;
 
         sup.join().await;
         let s = sup.stats().await;

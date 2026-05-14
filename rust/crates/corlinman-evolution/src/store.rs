@@ -421,11 +421,9 @@ mod tests {
             .connect(&url)
             .await
             .unwrap();
-        assert!(
-            !column_exists(&pool, "evolution_history", "share_with")
-                .await
-                .unwrap()
-        );
+        assert!(!column_exists(&pool, "evolution_history", "share_with")
+            .await
+            .unwrap());
         pool.close().await;
 
         // Open through the production path → migration applies.

@@ -209,12 +209,8 @@ pub fn terminate_reason_to_end_reason(r: TerminateReason) -> &'static str {
 /// handler emits this verbatim in the final `error` server frame.
 pub fn terminate_reason_to_message(r: TerminateReason) -> &'static str {
     match r {
-        TerminateReason::DayBudgetExhausted => {
-            "daily voice budget exhausted; session terminated"
-        }
-        TerminateReason::MaxSessionSeconds => {
-            "session length cap reached; session terminated"
-        }
+        TerminateReason::DayBudgetExhausted => "daily voice budget exhausted; session terminated",
+        TerminateReason::MaxSessionSeconds => "session length cap reached; session terminated",
     }
 }
 
@@ -400,7 +396,10 @@ mod tests {
         let _ = e.tick(started + Duration::from_secs(30));
 
         let snap = spend.snapshot("t1", 100);
-        assert_eq!(snap.seconds_used, 630, "must add to prior usage, not overwrite");
+        assert_eq!(
+            snap.seconds_used, 630,
+            "must add to prior usage, not overwrite"
+        );
     }
 
     #[test]

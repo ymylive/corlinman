@@ -134,12 +134,9 @@ impl PluginRuntime for McpRuntime {
         // 2. Race the call against the cancel token. The call itself
         //    enforces its own deadline; cancel is a separate cooperative
         //    short-circuit (e.g. client disconnect upstream).
-        let call_fut = self.adapter.call_tool(
-            &input.plugin,
-            &input.tool,
-            arguments,
-            deadline,
-        );
+        let call_fut = self
+            .adapter
+            .call_tool(&input.plugin, &input.tool, arguments, deadline);
 
         let result = tokio::select! {
             biased;
@@ -379,7 +376,12 @@ mod tests {
         })
     }
 
-    fn input_for(plugin: &str, tool: &str, args_json: &[u8], deadline_ms: Option<u64>) -> PluginInput {
+    fn input_for(
+        plugin: &str,
+        tool: &str,
+        args_json: &[u8],
+        deadline_ms: Option<u64>,
+    ) -> PluginInput {
         PluginInput {
             plugin: plugin.into(),
             tool: tool.into(),
@@ -480,10 +482,7 @@ mod tests {
 
     #[test]
     fn adapter_error_translates_unknown_plugin() {
-        let err = adapter_error_to_corlinman(
-            AdapterError::UnknownPlugin("ghost".into()),
-            "ghost",
-        );
+        let err = adapter_error_to_corlinman(AdapterError::UnknownPlugin("ghost".into()), "ghost");
         match err {
             CorlinmanError::PluginRuntime { plugin, message } => {
                 assert_eq!(plugin, "ghost");
@@ -537,13 +536,14 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_responder();
-        let m = manifest_for_dispatch("disp", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let m = manifest_for_dispatch(
+            "disp",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
 
         let adapter = Arc::new(McpAdapter::new());
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.start_one("disp").await.unwrap();
 
         let runtime = McpRuntime::new(adapter);
@@ -571,13 +571,14 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_responder();
-        let m = manifest_for_dispatch("disp-err", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let m = manifest_for_dispatch(
+            "disp-err",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
 
         let adapter = Arc::new(McpAdapter::new());
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.start_one("disp-err").await.unwrap();
 
         let runtime = McpRuntime::new(adapter);
@@ -623,13 +624,14 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_responder();
-        let m = manifest_for_dispatch("disp-bad-args", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let m = manifest_for_dispatch(
+            "disp-bad-args",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
 
         let adapter = Arc::new(McpAdapter::new());
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.start_one("disp-bad-args").await.unwrap();
 
         let runtime = McpRuntime::new(adapter);
@@ -654,13 +656,14 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (cmd, args) = awk_responder();
-        let m = manifest_for_dispatch("disp-empty", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let m = manifest_for_dispatch(
+            "disp-empty",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
 
         let adapter = Arc::new(McpAdapter::new());
-        adapter
-            .register(m, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        adapter.register(m, tmp.path().to_path_buf()).await.unwrap();
         adapter.start_one("disp-empty").await.unwrap();
 
         let runtime = McpRuntime::new(adapter);
@@ -690,7 +693,11 @@ mod tests {
         // that's pre-cancelled.
         let _ = m;
         let (cmd, args) = awk_responder();
-        let m2 = manifest_for_dispatch("disp-cancel2", cmd, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let m2 = manifest_for_dispatch(
+            "disp-cancel2",
+            cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
 
         let adapter = Arc::new(McpAdapter::new());
         adapter

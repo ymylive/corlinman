@@ -97,11 +97,10 @@ impl VoiceProvider for OpenAIRealtimeAdapter {
         params: VoiceSessionStartParams,
     ) -> Result<VoiceProviderSession, ProviderOpenError> {
         // Env-gate: no key → no session. Keeps tests off the network.
-        let api_key = env::var("OPENAI_API_KEY").map_err(|_| {
-            ProviderOpenError::MissingCredentials {
+        let api_key =
+            env::var("OPENAI_API_KEY").map_err(|_| ProviderOpenError::MissingCredentials {
                 detail: "OPENAI_API_KEY env var unset".into(),
-            }
-        })?;
+            })?;
         let model = env::var("OPENAI_REALTIME_MODEL")
             .unwrap_or_else(|_| DEFAULT_OPENAI_REALTIME_MODEL.into());
 
@@ -174,8 +173,7 @@ async fn spawn_session(
         mpsc::channel::<Vec<u8>>(DEFAULT_PROVIDER_CHANNEL_CAPACITY);
     let (control_in_tx, mut control_in_rx) =
         mpsc::channel::<ProviderCommand>(DEFAULT_PROVIDER_CHANNEL_CAPACITY);
-    let (events_tx, events_rx) =
-        mpsc::channel::<VoiceEvent>(DEFAULT_PROVIDER_CHANNEL_CAPACITY);
+    let (events_tx, events_rx) = mpsc::channel::<VoiceEvent>(DEFAULT_PROVIDER_CHANNEL_CAPACITY);
 
     // Initial session.update: declare the audio formats + voice id so
     // the provider knows what we're sending and what to send back.
@@ -379,7 +377,9 @@ pub fn classify_upstream_event(json_text: &str) -> Vec<VoiceEvent> {
                 return vec![];
             };
             match B64.decode(delta) {
-                Ok(bytes) => vec![VoiceEvent::AudioOut { pcm_le_bytes: bytes }],
+                Ok(bytes) => vec![VoiceEvent::AudioOut {
+                    pcm_le_bytes: bytes,
+                }],
                 Err(_) => vec![],
             }
         }
@@ -390,7 +390,9 @@ pub fn classify_upstream_event(json_text: &str) -> Vec<VoiceEvent> {
             let Some(t) = v.get("delta").and_then(|d| d.as_str()) else {
                 return vec![];
             };
-            vec![VoiceEvent::AgentText { text: t.to_string() }]
+            vec![VoiceEvent::AgentText {
+                text: t.to_string(),
+            }]
         }
         // User ASR — provider's transcription of inbound audio.
         "conversation.item.input_audio_transcription.delta" => {
@@ -431,7 +433,11 @@ pub fn classify_upstream_event(json_text: &str) -> Vec<VoiceEvent> {
                 .and_then(|a| a.as_str())
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
                 .unwrap_or(Value::Null);
-            vec![VoiceEvent::ToolCall { call_id, tool, args }]
+            vec![VoiceEvent::ToolCall {
+                call_id,
+                tool,
+                args,
+            }]
         }
         // Provider error. The gateway closes the session afterwards.
         "error" => {
@@ -610,7 +616,11 @@ mod tests {
         .to_string();
         let evs = classify_upstream_event(&upstream);
         match &evs[0] {
-            VoiceEvent::ToolCall { call_id, tool, args } => {
+            VoiceEvent::ToolCall {
+                call_id,
+                tool,
+                args,
+            } => {
                 assert_eq!(call_id, "call_abc");
                 assert_eq!(tool, "web_search");
                 assert_eq!(args["query"], "corlinman");
@@ -740,9 +750,10 @@ mod tests {
         // the smoke test bounded in cost (single connection, no audio
         // frames billed).
         drop(session.audio_in_tx);
-        let _ = session.control_in_tx.send(
-            super::super::provider::ProviderCommand::Close
-        ).await;
+        let _ = session
+            .control_in_tx
+            .send(super::super::provider::ProviderCommand::Close)
+            .await;
         let _ = session.task.await;
     }
 }

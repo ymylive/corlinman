@@ -3,9 +3,7 @@
 //! GFM markdown and CSV → `<table>` with `cn-canvas-table`,
 //! `cn-canvas-table-row`, `cn-canvas-table-cell` class scaffolding.
 
-use corlinman_canvas::{
-    ArtifactBody, ArtifactKind, CanvasPresentPayload, Renderer, ThemeClass,
-};
+use corlinman_canvas::{ArtifactBody, ArtifactKind, CanvasPresentPayload, Renderer, ThemeClass};
 
 fn render_table(body: ArtifactBody) -> corlinman_canvas::RenderedArtifact {
     Renderer::new()
@@ -74,7 +72,10 @@ Tokyo,13000000,bigger
     assert!(html.contains("<td class=\"cn-canvas-table-cell\">New York, NY</td>"));
     assert!(html.contains("<td class=\"cn-canvas-table-cell\">London, UK</td>"));
     // 1 header + 3 data = 4 rows.
-    assert_eq!(html.matches("<tr class=\"cn-canvas-table-row\">").count(), 4);
+    assert_eq!(
+        html.matches("<tr class=\"cn-canvas-table-row\">").count(),
+        4
+    );
 }
 
 /// `table_markdown_with_inline_code` — backtick spans inside cells

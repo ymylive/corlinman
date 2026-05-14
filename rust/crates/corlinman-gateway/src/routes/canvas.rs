@@ -410,9 +410,7 @@ async fn post_frame(State(state): State<CanvasState>, Json(body): Json<PostFrame
         // Speculative: only attempt enrichment if the payload parses
         // as the C3 schema. Anything else is a Phase-1 / legacy
         // a2ui-style frame and passes through verbatim.
-        if let Ok(payload) =
-            serde_json::from_value::<CanvasPresentPayload>(body.payload.clone())
-        {
+        if let Ok(payload) = serde_json::from_value::<CanvasPresentPayload>(body.payload.clone()) {
             present_idempotency_key = Some(payload.idempotency_key.clone());
             // Body cap parity with `/canvas/render`: bigger bodies are
             // rejected before invoking the adapter.
@@ -441,7 +439,10 @@ async fn post_frame(State(state): State<CanvasState>, Json(body): Json<PostFrame
                         render_warnings = Some(art.warnings.clone());
                     }
                     if let Value::Object(map) = &mut enriched_payload {
-                        map.insert("rendered".into(), serde_json::to_value(&art).unwrap_or(Value::Null));
+                        map.insert(
+                            "rendered".into(),
+                            serde_json::to_value(&art).unwrap_or(Value::Null),
+                        );
                     }
                 }
                 Err(err) => {
@@ -735,17 +736,23 @@ async fn render_artifact(State(state): State<CanvasState>, body: axum::body::Byt
 /// off `code` to pick its lucide icon and messaging.
 fn render_error_response(err: CanvasError) -> Response {
     let (status, code, kind) = match &err {
-        CanvasError::Unimplemented { kind } => (StatusCode::BAD_REQUEST, "unimplemented", Some(kind)),
-        CanvasError::UnknownKind(_) => (StatusCode::BAD_REQUEST, "unknown_kind", None),
-        CanvasError::BodyTooLarge { kind, .. } => {
-            (StatusCode::UNPROCESSABLE_ENTITY, "body_too_large", Some(kind))
+        CanvasError::Unimplemented { kind } => {
+            (StatusCode::BAD_REQUEST, "unimplemented", Some(kind))
         }
+        CanvasError::UnknownKind(_) => (StatusCode::BAD_REQUEST, "unknown_kind", None),
+        CanvasError::BodyTooLarge { kind, .. } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "body_too_large",
+            Some(kind),
+        ),
         CanvasError::Timeout { kind, .. } => {
             (StatusCode::UNPROCESSABLE_ENTITY, "timeout", Some(kind))
         }
-        CanvasError::Adapter { kind, .. } => {
-            (StatusCode::UNPROCESSABLE_ENTITY, "adapter_error", Some(kind))
-        }
+        CanvasError::Adapter { kind, .. } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "adapter_error",
+            Some(kind),
+        ),
     };
     let mut body = json!({
         "error": "render_failed",

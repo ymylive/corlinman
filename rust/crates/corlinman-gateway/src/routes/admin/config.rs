@@ -257,9 +257,7 @@ async fn post_config(
     // literal value of `"***REDACTED***"`) — refusing to write avoids
     // pinning the placeholder string on disk.
     if new_config.has_redacted_sentinel() {
-        tracing::error!(
-            "admin/config: refusing to write config containing redaction sentinel",
-        );
+        tracing::error!("admin/config: refusing to write config containing redaction sentinel",);
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
