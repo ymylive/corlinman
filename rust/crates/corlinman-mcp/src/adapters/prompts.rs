@@ -199,8 +199,10 @@ mod tests {
             ("other-thing", "x", "x"),
         ]);
         let adapter = PromptsAdapter::new(reg);
-        let mut ctx = SessionContext::default();
-        ctx.prompts_allowed = vec!["kb-*".to_string()];
+        let ctx = SessionContext {
+            prompts_allowed: vec!["kb-*".to_string()],
+            ..Default::default()
+        };
         let result = adapter.list_prompts(&ctx);
         let names: Vec<_> = result.prompts.iter().map(|p| p.name.clone()).collect();
         assert_eq!(
@@ -260,8 +262,10 @@ mod tests {
     async fn get_disallowed_name_returns_invalid_params_with_distinct_message() {
         let (reg, _tmp) = make_registry(&[("foo", "x", "x")]);
         let adapter = PromptsAdapter::new(reg);
-        let mut ctx = SessionContext::default();
-        ctx.prompts_allowed = vec!["other-*".to_string()];
+        let ctx = SessionContext {
+            prompts_allowed: vec!["other-*".to_string()],
+            ..Default::default()
+        };
         let err = adapter
             .get_prompt(
                 GetParams {

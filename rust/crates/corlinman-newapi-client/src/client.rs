@@ -81,7 +81,7 @@ impl NewapiClient {
     /// succeeds with the supplied token, and (b) the host exposes
     /// `/api/status` (new-api signature). Returns the resolved user
     /// + server version. Used by both onboard step 2 and the
-    /// `/admin/newapi` PATCH revalidation hook.
+    ///   `/admin/newapi` PATCH revalidation hook.
     pub async fn probe(&self) -> Result<ProbeResult, NewapiError> {
         let user = self.get_user_self().await?;
 

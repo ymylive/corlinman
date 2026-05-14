@@ -623,8 +623,10 @@ mod tests {
         let runtime = make_runtime(PluginOutput::success(Bytes::from_static(b"{}"), 1));
         let adapter = ToolsAdapter::with_runtime(reg, runtime);
 
-        let mut ctx = SessionContext::default();
-        ctx.tools_allowlist = vec!["kb:s*".to_string()];
+        let ctx = SessionContext {
+            tools_allowlist: vec!["kb:s*".to_string()],
+            ..Default::default()
+        };
         let result = adapter.list_tools(&ctx);
         let names: Vec<_> = result.tools.iter().map(|t| t.name.clone()).collect();
         assert_eq!(names, vec!["kb:search".to_string()]);
@@ -733,8 +735,10 @@ mod tests {
         let runtime = make_runtime(PluginOutput::success(Bytes::new(), 0));
         let adapter = ToolsAdapter::with_runtime(reg, runtime);
 
-        let mut ctx = SessionContext::default();
-        ctx.tools_allowlist = vec!["other:*".to_string()];
+        let ctx = SessionContext {
+            tools_allowlist: vec!["other:*".to_string()],
+            ..Default::default()
+        };
         let err = adapter
             .call_tool(
                 CallParams {

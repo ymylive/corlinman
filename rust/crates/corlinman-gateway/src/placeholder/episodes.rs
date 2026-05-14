@@ -515,7 +515,7 @@ fn truncate_summary(text: &str) -> String {
         return text.to_string();
     }
     let mut out: String = text.chars().take(SUMMARY_CHAR_CAP).collect();
-    out.push_str("…");
+    out.push('…');
     out
 }
 

@@ -105,7 +105,7 @@ fn sparkline_empty_rejected() {
     let one = renderer.render(&CanvasPresentPayload {
         artifact_kind: ArtifactKind::Sparkline,
         body: ArtifactBody::Sparkline {
-            values: vec![3.14],
+            values: vec![3.15],
             unit: None,
         },
         idempotency_key: "art_spark_one".into(),

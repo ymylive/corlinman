@@ -268,24 +268,19 @@ impl CanvasPresentPayload {
 /// Theme tag for non-CSS-var consumers (Swift / mobile, future
 /// static export). Web admins resolve `--tp-*` tokens directly and
 /// can ignore this field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ThemeClass {
     /// Daytime / light surface.
+    #[default]
     TpLight,
     /// Nighttime / dark surface.
     TpDark,
 }
 
-impl Default for ThemeClass {
-    fn default() -> Self {
-        Self::TpLight
-    }
-}
-
 /// Renderer output. Self-contained: callers need only the fragment
 /// + theme class to surface the artifact. Hash and warnings are
-/// optional UX/diagnostics extras.
+///   optional UX/diagnostics extras.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenderedArtifact {
     /// Sanitised HTML fragment ready to drop inside a transcript

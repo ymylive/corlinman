@@ -67,6 +67,7 @@ pub type CacheKey = [u8; 32];
 pub struct RenderCache {
     /// `None` ↔ disabled (capacity 0). Constructed once at
     /// `RenderCache::new`; never flips at runtime.
+    #[allow(clippy::type_complexity)]
     inner: Option<Arc<Mutex<LruCache<CacheKey, Arc<RenderedArtifact>>>>>,
 }
 

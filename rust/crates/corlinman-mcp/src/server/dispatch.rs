@@ -170,9 +170,7 @@ impl FrameHandler for AdapterDispatcher {
         // Lifecycle gate (requests).
         {
             let s = session.lock().await;
-            if let Err(err) = s.check_request_allowed(&req.method) {
-                return Err(err);
-            }
+            s.check_request_allowed(&req.method)?
         }
 
         // Built-in `initialize` reply.

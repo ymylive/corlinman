@@ -300,7 +300,7 @@ mod tests {
 
         let resp = app
             .oneshot(json_req(
-                &format!("/v1/chat/completions/turn_42/approve"),
+                &"/v1/chat/completions/turn_42/approve".to_string(),
                 serde_json::json!({
                     "call_id": call_id,
                     "approved": true,

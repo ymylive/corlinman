@@ -465,7 +465,7 @@ mod tests {
     }
 
     impl StubMemoryHost {
-        fn new(name: &str, seed: &[(&str, &str)]) -> Arc<dyn MemoryHost> {
+        fn make(name: &str, seed: &[(&str, &str)]) -> Arc<dyn MemoryHost> {
             let m: std::collections::BTreeMap<String, String> = seed
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -555,7 +555,7 @@ mod tests {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
         hosts.insert(
             "kb".into(),
-            StubMemoryHost::new("kb", &[("1", "first"), ("2", "second")]),
+            StubMemoryHost::make("kb", &[("1", "first"), ("2", "second")]),
         );
         let (skills, _tmp) = make_skills(&[("foo", "foo desc", "Body F")]);
         let adapter = make_adapter(hosts, skills);
@@ -578,7 +578,7 @@ mod tests {
             .collect();
         let seed_refs: Vec<(&str, &str)> =
             seed.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-        hosts.insert("kb".into(), StubMemoryHost::new("kb", &seed_refs));
+        hosts.insert("kb".into(), StubMemoryHost::make("kb", &seed_refs));
         let (skills, _tmp) = make_skills(&[]);
         let adapter = ResourcesAdapter::new(hosts, skills)
             .with_page_size(50)
@@ -640,12 +640,14 @@ mod tests {
     #[tokio::test]
     async fn list_filters_by_scheme_allowlist() {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
-        hosts.insert("kb".into(), StubMemoryHost::new("kb", &[("1", "x")]));
+        hosts.insert("kb".into(), StubMemoryHost::make("kb", &[("1", "x")]));
         let (skills, _tmp) = make_skills(&[("foo", "stub desc", "body")]);
         let adapter = make_adapter(hosts, skills);
 
-        let mut ctx = SessionContext::default();
-        ctx.resources_allowed = vec!["skill".into()];
+        let ctx = SessionContext {
+            resources_allowed: vec!["skill".into()],
+            ..Default::default()
+        };
         let res = adapter
             .list_resources(ListParams { cursor: None }, &ctx)
             .await
@@ -686,7 +688,7 @@ mod tests {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
         hosts.insert(
             "kb".into(),
-            StubMemoryHost::new("kb", &[("42", "memory body")]),
+            StubMemoryHost::make("kb", &[("42", "memory body")]),
         );
         let (skills, _tmp) = make_skills(&[]);
         let adapter = make_adapter(hosts, skills);
@@ -759,7 +761,7 @@ mod tests {
     #[tokio::test]
     async fn read_unknown_memory_id_returns_invalid_params() {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
-        hosts.insert("kb".into(), StubMemoryHost::new("kb", &[("1", "x")]));
+        hosts.insert("kb".into(), StubMemoryHost::make("kb", &[("1", "x")]));
         let (skills, _tmp) = make_skills(&[]);
         let adapter = make_adapter(hosts, skills);
         let err = adapter
@@ -777,12 +779,14 @@ mod tests {
     #[tokio::test]
     async fn read_disallowed_scheme_returns_invalid_params() {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
-        hosts.insert("kb".into(), StubMemoryHost::new("kb", &[("1", "x")]));
+        hosts.insert("kb".into(), StubMemoryHost::make("kb", &[("1", "x")]));
         let (skills, _tmp) = make_skills(&[]);
         let adapter = make_adapter(hosts, skills);
 
-        let mut ctx = SessionContext::default();
-        ctx.resources_allowed = vec!["skill".into()];
+        let ctx = SessionContext {
+            resources_allowed: vec!["skill".into()],
+            ..Default::default()
+        };
         let err = adapter
             .read_resource(
                 ReadParams {
@@ -809,9 +813,9 @@ mod tests {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
         hosts.insert(
             "alpha".into(),
-            StubMemoryHost::new("alpha", &[("1", "ALPHA")]),
+            StubMemoryHost::make("alpha", &[("1", "ALPHA")]),
         );
-        hosts.insert("beta".into(), StubMemoryHost::new("beta", &[("1", "BETA")]));
+        hosts.insert("beta".into(), StubMemoryHost::make("beta", &[("1", "BETA")]));
         let (skills, _tmp) = make_skills(&[]);
         let adapter = make_adapter(hosts, skills);
 
@@ -847,7 +851,7 @@ mod tests {
     #[tokio::test]
     async fn handle_routes_through_capability_adapter_trait() {
         let mut hosts: BTreeMap<String, Arc<dyn MemoryHost>> = BTreeMap::new();
-        hosts.insert("kb".into(), StubMemoryHost::new("kb", &[("1", "x")]));
+        hosts.insert("kb".into(), StubMemoryHost::make("kb", &[("1", "x")]));
         let (skills, _tmp) = make_skills(&[("foo", "stub desc", "body")]);
         let adapter = make_adapter(hosts, skills);
         assert_eq!(adapter.capability_name(), "resources");

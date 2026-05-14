@@ -150,11 +150,9 @@ impl Drop for SupervisorHandle {
 ///      already `Initialized` — this is the first-attempt boot,
 ///   2. waits for the live client to disconnect,
 ///   3. honours `restart_policy`:
-///        - `Never`: marks `failed_at = "child exited; restart_policy=never"`
-///                   and returns,
-///        - `OnCrash` / `Always`: counts the crash, applies the next
-///                   backoff entry, then respawns (modulo
-///                   `crash_loop_max` ceiling).
+///      `Never` marks `failed_at = "child exited; restart_policy=never"`
+///      and returns; `OnCrash` / `Always` count the crash, apply the next
+///      backoff entry, then respawn (modulo `crash_loop_max` ceiling).
 ///
 /// Returns a [`SupervisorHandle`]; drop or `stop()` to end the loop.
 pub async fn spawn_supervisor(

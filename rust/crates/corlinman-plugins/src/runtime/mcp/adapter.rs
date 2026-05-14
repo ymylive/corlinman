@@ -525,7 +525,7 @@ impl McpAdapter {
                 }
             })?;
         let env: Vec<(std::ffi::OsString, std::ffi::OsString)> =
-            build_child_env(applied.forwarded.into_iter().map(|(k, v)| (k, v)));
+            build_child_env(applied.forwarded);
 
         // 2. Spawn the child + wire the framing layer.
         let client = McpStdioClient::connect_stdio(
