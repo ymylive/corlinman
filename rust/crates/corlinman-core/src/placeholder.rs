@@ -177,6 +177,18 @@ impl PlaceholderEngine {
         self.max_depth
     }
 
+    /// Clone this engine's registrations with a different recursion ceiling.
+    ///
+    /// Dynamic resolvers are stored behind `Arc`, so this preserves the same
+    /// resolver instances without forcing callers to rebuild the registry.
+    pub fn clone_with_max_depth(&self, max_depth: u32) -> Self {
+        Self {
+            values: self.values.clone(),
+            dynamic: self.dynamic.clone(),
+            max_depth,
+        }
+    }
+
     /// Register a static `namespace.name` entry (or bare `name`).
     pub fn with_static(mut self, key: &str, value: impl Into<String>) -> Self {
         self.values.insert(key.to_string(), value.into());

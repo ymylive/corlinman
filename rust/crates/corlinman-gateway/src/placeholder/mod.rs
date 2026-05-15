@@ -31,5 +31,7 @@
 //! returns the literal token for a forward-compatible round-trip.
 
 pub mod episodes;
+pub mod memory;
 
 pub use episodes::EpisodesResolver;
+pub use memory::{MemoryResolver, DEFAULT_MEMORY_NAMESPACE, DEFAULT_TOP_K};

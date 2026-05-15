@@ -108,7 +108,7 @@ async fn main() {
     // Build router + keep a handle on the shared backend + registry.
     // The log broadcast sender threads through so `/admin/logs/stream`
     // can subscribe fresh receivers per request.
-    let (router, backend, plugin_registry, _cfg_handle, _cfg_path) =
+    let (router, backend, plugin_registry, _cfg_handle, _cfg_path, memory_host) =
         server::build_runtime_full_with_evolution(
             Some(log_tx),
             Some(Arc::new(hook_bus.clone())),
@@ -236,7 +236,11 @@ async fn main() {
         std::env::var(ENV_RUST_SOCKET).unwrap_or_else(|_| DEFAULT_RUST_SOCKET.to_string());
     let placeholder_cancel = root.clone();
     let placeholder_handle = tokio::spawn(async move {
-        let svc = PlaceholderService::with_empty_engine();
+        let engine = corlinman_gateway::grpc::placeholder::build_engine(
+            server::resolve_data_dir(),
+            memory_host,
+        );
+        let svc = PlaceholderService::new(Arc::new(engine));
         let shutdown_fut = {
             let token = placeholder_cancel.clone();
             async move { token.cancelled().await }

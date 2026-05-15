@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import quote as url_quote
 
+import httpx
+
 from corlinman_agent_brain.models import (
     KnowledgeNode,
     KnowledgeNodeFrontmatter,
@@ -56,6 +58,44 @@ class HttpTransport(Protocol):
     ) -> tuple[int, dict[str, Any]]:
         """POST JSON, return (status_code, response_json)."""
         ...
+
+
+class HttpxTransport:
+    """Production transport backed by ``httpx.AsyncClient``."""
+
+    def __init__(self, *, timeout_ms: int = 5000) -> None:
+        self._client = httpx.AsyncClient(timeout=timeout_ms / 1000.0)
+
+    async def post(
+        self, url: str, *, json_body: dict[str, Any], headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        resp = await self._client.post(url, json=json_body, headers=headers)
+        return resp.status_code, _json_or_empty(resp)
+
+    async def delete(
+        self, url: str, *, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        resp = await self._client.delete(url, headers=headers)
+        return resp.status_code, _json_or_empty(resp)
+
+    async def get(
+        self, url: str, *, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        resp = await self._client.get(url, headers=headers)
+        return resp.status_code, _json_or_empty(resp)
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
+def _json_or_empty(resp: httpx.Response) -> dict[str, Any]:
+    if not resp.content:
+        return {}
+    try:
+        data = resp.json()
+    except ValueError:
+        return {"error": resp.text}
+    return data if isinstance(data, dict) else {"value": data}
 
     async def delete(
         self, url: str, *, headers: dict[str, str]
@@ -402,6 +442,10 @@ class IndexSyncClient:
     # Query (implements RetrievalProvider contract)
     # ------------------------------------------------------------------
 
+    async def __call__(self, query: str, *, limit: int = 5) -> list[KnowledgeNode]:
+        """Delegate to :meth:`query` so this client satisfies ``RetrievalProvider``."""
+        return await self.query(query, limit=limit)
+
     async def query(self, text: str, *, limit: int = 5) -> list[KnowledgeNode]:
         """Query the vector index for nodes similar to the given text.
 
@@ -504,6 +548,7 @@ class IndexSyncClient:
 __all__ = [
     "BatchSyncReport",
     "HttpTransport",
+    "HttpxTransport",
     "IndexSyncClient",
     "IndexSyncConfig",
     "SyncResult",

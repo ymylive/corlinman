@@ -22,10 +22,15 @@ import contextlib
 import json
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 import grpc
 import structlog
+from corlinman_agent.agents import AgentCardRegistry
+from corlinman_agent.context_assembler import ContextAssembler, PlaceholderError
+from corlinman_agent.hooks import LoggingHookEmitter
+from corlinman_agent.placeholder_client import PlaceholderClient
 from corlinman_agent.reasoning_loop import (
     Attachment as AgentAttachment,
 )
@@ -40,6 +45,8 @@ from corlinman_agent.reasoning_loop import (
     ToolCallEvent,
     ToolResult,
 )
+from corlinman_agent.skills import SkillRegistry
+from corlinman_agent.variables import VariableCascade
 from corlinman_grpc import agent_pb2, agent_pb2_grpc, common_pb2
 from corlinman_providers import registry as provider_registry
 from corlinman_providers.base import CorlinmanProvider, ProviderChunk
@@ -85,6 +92,7 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
         provider_resolver: _ResolverCallable | None = None,
         *,
         aliases: Mapping[str, AliasEntry] | None = None,
+        context_assembler: Any | None = None,
     ) -> None:
         """Construct the servicer.
 
@@ -106,6 +114,7 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
         else:
             self._resolve = provider_registry.resolve
         self._aliases: dict[str, AliasEntry] = dict(aliases or {})
+        self._context_assembler = context_assembler
 
     async def Chat(  # noqa: N802 — gRPC method name
         self,
@@ -137,6 +146,7 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
         # provider adapter forwards it to the SDK call body.
         start.model = upstream_model
         _apply_merged_params(start, merged_params)
+        start = await self._assemble_context(start)
 
         # Bump the tool-result timeout above the M2 default (0.05s) so the
         # loop actually waits long enough for the gateway to round-trip a
@@ -188,6 +198,92 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
             inbound_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await inbound_task
+
+    async def _assemble_context(self, start: AgentChatStart) -> AgentChatStart:
+        assembler = self._get_context_assembler()
+        if assembler is None:
+            return start
+
+        try:
+            assembled = await asyncio.wait_for(
+                assembler.assemble(
+                    list(start.messages),
+                    session_key=start.session_key,
+                    model_name=start.model,
+                    metadata=_context_metadata(start),
+                ),
+                timeout=_context_timeout_secs(),
+            )
+        except PlaceholderError as exc:
+            logger.warning(
+                "agent.chat.context_assembly_placeholder_failed",
+                session=start.session_key,
+                model=start.model,
+                error=str(exc),
+            )
+            return start
+        except Exception as exc:
+            logger.warning(
+                "agent.chat.context_assembly_failed",
+                session=start.session_key,
+                model=start.model,
+                error=str(exc),
+            )
+            return start
+
+        start.messages = assembled.messages
+        return start
+
+    def _get_context_assembler(self) -> Any | None:
+        if self._context_assembler is None:
+            self._context_assembler = _build_default_context_assembler()
+        return self._context_assembler
+
+
+def _build_default_context_assembler() -> ContextAssembler | None:
+    try:
+        data_dir = _resolve_data_dir()
+        return ContextAssembler(
+            agents=AgentCardRegistry.load_from_dir(data_dir / "agents"),
+            variables=VariableCascade(
+                data_dir / "TVStxt" / "tar",
+                data_dir / "TVStxt" / "var",
+                data_dir / "TVStxt" / "sar",
+                data_dir / "TVStxt" / "fixed",
+                hot_reload=False,
+            ),
+            skills=SkillRegistry.load_from_dir(data_dir / "skills"),
+            placeholder_client=PlaceholderClient(),
+            hook_emitter=LoggingHookEmitter(),
+            config_lookup=lambda key: os.environ.get(key),
+        )
+    except Exception as exc:
+        logger.warning("agent.chat.context_assembler_init_failed", error=str(exc))
+        return None
+
+
+def _resolve_data_dir() -> Path:
+    raw = os.environ.get("CORLINMAN_DATA_DIR")
+    if raw:
+        return Path(raw)
+    return Path.home() / ".corlinman"
+
+
+def _context_metadata(start: AgentChatStart) -> dict[str, str]:
+    md: dict[str, str] = {}
+    if start.session_key:
+        md["session_key"] = start.session_key
+    return md
+
+
+def _context_timeout_secs() -> float:
+    raw = os.environ.get("CORLINMAN_CONTEXT_ASSEMBLY_TIMEOUT_S")
+    if not raw:
+        return 2.0
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return 2.0
 
 
 async def _expect_start(

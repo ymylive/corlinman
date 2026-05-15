@@ -23,8 +23,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use corlinman_core::placeholder::{PlaceholderCtx, PlaceholderEngine};
+use corlinman_core::placeholder::{DynamicResolver, PlaceholderCtx, PlaceholderEngine};
 use corlinman_core::CorlinmanError;
+use corlinman_memory_host::MemoryHost;
 use corlinman_proto::v1::{
     placeholder_server::{Placeholder, PlaceholderServer},
     RenderRequest, RenderResponse,
@@ -74,6 +75,37 @@ impl PlaceholderService {
     }
 }
 
+/// Build the production placeholder engine.
+///
+/// The gateway owns the resolver registrations because both namespaces need
+/// gateway-local state: `episodes` reads per-tenant SQLite files under the
+/// data dir, while `memory` queries the same [`MemoryHost`] surfaced over MCP
+/// and `/memory/*`.
+pub fn build_engine(
+    data_dir: impl Into<PathBuf>,
+    memory_host: Option<Arc<dyn MemoryHost>>,
+) -> PlaceholderEngine {
+    build_engine_with_episodes(data_dir, memory_host, None)
+}
+
+fn build_engine_with_episodes(
+    data_dir: impl Into<PathBuf>,
+    memory_host: Option<Arc<dyn MemoryHost>>,
+    episodes: Option<Arc<dyn DynamicResolver>>,
+) -> PlaceholderEngine {
+    let mut engine = PlaceholderEngine::new();
+    let episodes_resolver = episodes
+        .unwrap_or_else(|| crate::placeholder::EpisodesResolver::new(data_dir.into()).into_arc());
+    engine.register_namespace("episodes", episodes_resolver);
+    if let Some(host) = memory_host {
+        engine.register_namespace(
+            "memory",
+            crate::placeholder::MemoryResolver::new(host).into_arc(),
+        );
+    }
+    engine
+}
+
 #[tonic::async_trait]
 impl Placeholder for PlaceholderService {
     async fn render(
@@ -103,12 +135,7 @@ impl Placeholder for PlaceholderService {
         let engine = if req.max_depth == 0 {
             self.engine.clone()
         } else {
-            // Rebuild an engine view with the override. The underlying
-            // `PlaceholderEngine::with_max_depth` consumes self, so we
-            // clone the registrations; acceptable for B1-BE3 (no
-            // resolvers registered). Once B2-BE4 lands real resolvers,
-            // override support moves into the engine itself.
-            Arc::new(PlaceholderEngine::new().with_max_depth(req.max_depth))
+            Arc::new(self.engine.clone_with_max_depth(req.max_depth))
         };
 
         match engine.render(&req.template, &ctx).await {
@@ -246,6 +273,18 @@ mod tests {
         })
     }
 
+    fn request_with_max_depth(template: &str, max_depth: u32) -> Request<RenderRequest> {
+        Request::new(RenderRequest {
+            template: template.into(),
+            ctx: Some(PbCtx {
+                session_key: "s1".into(),
+                model_name: "test-model".into(),
+                metadata: Default::default(),
+            }),
+            max_depth,
+        })
+    }
+
     #[tokio::test]
     async fn static_hit_is_rendered() {
         let eng = PlaceholderEngine::new().with_static("date.today", "2026-04-22");
@@ -328,6 +367,101 @@ mod tests {
         let resp = svc.render(req).await.unwrap().into_inner();
         assert_eq!(resp.rendered, "x|sess-a|gpt|t-42");
         assert!(resp.error.is_empty());
+    }
+
+    #[tokio::test]
+    async fn max_depth_override_preserves_registered_resolvers() {
+        use async_trait::async_trait;
+        use corlinman_core::placeholder::{DynamicResolver, PlaceholderError};
+
+        struct Echo;
+        #[async_trait]
+        impl DynamicResolver for Echo {
+            async fn resolve(
+                &self,
+                key: &str,
+                _ctx: &corlinman_core::placeholder::PlaceholderCtx,
+            ) -> Result<String, PlaceholderError> {
+                Ok(format!("resolved:{key}"))
+            }
+        }
+
+        let eng = PlaceholderEngine::new().with_dynamic("echo", Arc::new(Echo));
+        let svc = service_with(eng);
+        let resp = svc
+            .render(request_with_max_depth("{{echo.memory}}", 2))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.rendered, "resolved:memory");
+        assert!(resp.unresolved_keys.is_empty());
+        assert!(resp.error.is_empty());
+    }
+
+    #[tokio::test]
+    async fn production_engine_registers_episodes_and_memory_resolvers() {
+        use async_trait::async_trait;
+        use corlinman_core::placeholder::{DynamicResolver, PlaceholderError};
+        use corlinman_memory_host::{MemoryDoc, MemoryHit, MemoryHost, MemoryQuery};
+
+        struct StubEpisodes;
+        #[async_trait]
+        impl DynamicResolver for StubEpisodes {
+            async fn resolve(
+                &self,
+                key: &str,
+                _ctx: &corlinman_core::placeholder::PlaceholderCtx,
+            ) -> Result<String, PlaceholderError> {
+                Ok(format!("episodes:{key}"))
+            }
+        }
+
+        struct StubMemory;
+        #[async_trait]
+        impl MemoryHost for StubMemory {
+            fn name(&self) -> &str {
+                "stub-memory"
+            }
+
+            async fn query(&self, req: MemoryQuery) -> anyhow::Result<Vec<MemoryHit>> {
+                assert_eq!(req.text, "backend");
+                assert_eq!(req.namespace.as_deref(), Some("agent-brain"));
+                Ok(vec![MemoryHit {
+                    id: "m1".into(),
+                    content: "memory hit".into(),
+                    score: 1.0,
+                    source: "stub-memory".into(),
+                    metadata: serde_json::Value::Null,
+                }])
+            }
+
+            async fn upsert(&self, _doc: MemoryDoc) -> anyhow::Result<String> {
+                anyhow::bail!("not used")
+            }
+
+            async fn delete(&self, _id: &str) -> anyhow::Result<()> {
+                anyhow::bail!("not used")
+            }
+        }
+
+        let engine = build_engine_with_episodes(
+            PathBuf::from("."),
+            Some(Arc::new(StubMemory)),
+            Some(Arc::new(StubEpisodes)),
+        );
+
+        let out = engine
+            .render(
+                "{{episodes.recent}}\n{{memory.backend}}",
+                &corlinman_core::placeholder::PlaceholderCtx::new("s"),
+            )
+            .await
+            .unwrap();
+
+        assert!(out.contains("episodes:recent"));
+        assert!(out.contains("memory hit"));
+        assert!(out.contains("stub-memory:m1"));
     }
 
     #[tokio::test]
