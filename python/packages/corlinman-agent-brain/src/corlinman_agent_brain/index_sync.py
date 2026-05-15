@@ -59,6 +59,18 @@ class HttpTransport(Protocol):
         """POST JSON, return (status_code, response_json)."""
         ...
 
+    async def delete(
+        self, url: str, *, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        """DELETE, return (status_code, response_json)."""
+        ...
+
+    async def get(
+        self, url: str, *, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        """GET, return (status_code, response_json)."""
+        ...
+
 
 class HttpxTransport:
     """Production transport backed by ``httpx.AsyncClient``."""
@@ -96,18 +108,6 @@ def _json_or_empty(resp: httpx.Response) -> dict[str, Any]:
     except ValueError:
         return {"error": resp.text}
     return data if isinstance(data, dict) else {"value": data}
-
-    async def delete(
-        self, url: str, *, headers: dict[str, str]
-    ) -> tuple[int, dict[str, Any]]:
-        """DELETE, return (status_code, response_json)."""
-        ...
-
-    async def get(
-        self, url: str, *, headers: dict[str, str]
-    ) -> tuple[int, dict[str, Any]]:
-        """GET, return (status_code, response_json)."""
-        ...
 
 
 # ---------------------------------------------------------------------------
