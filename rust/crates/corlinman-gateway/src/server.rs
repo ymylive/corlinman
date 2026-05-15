@@ -238,7 +238,9 @@ pub async fn build_runtime_full(
     Arc<ArcSwap<Config>>,
     Option<PathBuf>,
 ) {
-    build_runtime_full_with_evolution(log_tx, hook_bus, watcher, None).await
+    let (router, backend, registry, cfg, cfg_path, _memory_host) =
+        build_runtime_full_with_evolution(log_tx, hook_bus, watcher, None).await;
+    (router, backend, registry, cfg, cfg_path)
 }
 
 /// Wave 1-C: superset of [`build_runtime_full`] that additionally accepts
@@ -259,6 +261,7 @@ pub async fn build_runtime_full_with_evolution(
     Arc<PluginRegistry>,
     Arc<ArcSwap<Config>>,
     Option<PathBuf>,
+    Option<Arc<dyn corlinman_memory_host::MemoryHost>>,
 ) {
     let registry = Arc::new(load_plugin_registry());
     tracing::info!(
@@ -404,6 +407,10 @@ pub async fn build_runtime_full_with_evolution(
         }
     }
 
+    let memory_state = rag_store
+        .as_ref()
+        .map(|store| crate::routes::memory::MemoryState::from_sqlite(store.clone()));
+
     let mut admin_state = build_admin_state_with_config(
         registry.clone(),
         log_tx,
@@ -496,15 +503,18 @@ pub async fn build_runtime_full_with_evolution(
     let base_router = {
         let snapshot = config_handle.load_full();
         if snapshot.mcp.enabled {
-            // C1 ships an empty memory-host map at the gateway layer:
-            // production memory hosts live in the Python tier today.
-            // The `corlinman://memory/...` resource scheme will surface
-            // an empty list until a Rust MemoryHost-trait implementation
-            // is wired here in a later iteration.
             let memory_hosts: std::collections::BTreeMap<
                 String,
                 std::sync::Arc<dyn corlinman_memory_host::MemoryHost>,
-            > = std::collections::BTreeMap::new();
+            > = match memory_state.as_ref() {
+                Some(state) => {
+                    let host = state.host();
+                    let mut map = std::collections::BTreeMap::new();
+                    map.insert(host.name().to_string(), host);
+                    map
+                }
+                None => std::collections::BTreeMap::new(),
+            };
             let skills_dir = resolve_data_dir().join(&snapshot.skills.dir);
             let skills = Arc::new(
                 corlinman_skills::SkillRegistry::load_from_dir(&skills_dir).unwrap_or_else(|err| {
@@ -532,9 +542,23 @@ pub async fn build_runtime_full_with_evolution(
         }
     };
 
+    let placeholder_memory_host = memory_state.as_ref().map(|state| state.host());
+
+    let base_router = match memory_state {
+        Some(state) => base_router.merge(crate::routes::memory::router(state)),
+        None => base_router,
+    };
+
     let router = mount_admin_routes(base_router, admin_state);
 
-    (router, backend_opt, registry, config_handle, cfg_path)
+    (
+        router,
+        backend_opt,
+        registry,
+        config_handle,
+        cfg_path,
+        placeholder_memory_host,
+    )
 }
 
 /// Variant of [`build_admin_state`] that reuses a pre-loaded config handle
@@ -765,7 +789,7 @@ async fn open_rag_store() -> Option<Arc<SqliteStore>> {
 
 /// Resolve the data directory the same way `main.rs` / plugins do: honour
 /// `$CORLINMAN_DATA_DIR`, else fall back to `~/.corlinman`.
-fn resolve_data_dir() -> PathBuf {
+pub fn resolve_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("CORLINMAN_DATA_DIR") {
         return PathBuf::from(dir);
     }

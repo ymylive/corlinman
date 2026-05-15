@@ -126,6 +126,8 @@ class _RawMessage:
     role: str
     content: str
     ts_ms: int
+    tenant_id: str = DEFAULT_TENANT_ID
+    agent_id: str = ""
     tool_call_id: str | None = None
     tool_name: str | None = None
 
@@ -276,10 +278,13 @@ def _fetch_messages(
             r[1]
             for r in conn.execute("PRAGMA table_info(sessions)").fetchall()
         }
+        tenant_col = "tenant_id" if "tenant_id" in cols else f"'{DEFAULT_TENANT_ID}'"
+        agent_col = "agent_id" if "agent_id" in cols else "''"
         tool_call_col = "tool_call_id" if "tool_call_id" in cols else "NULL"
         tool_name_col = "tool_name" if "tool_name" in cols else "NULL"
         cur = conn.execute(
             f"""SELECT session_key, seq, role, content, ts,
+                     {tenant_col}, {agent_col},
                      {tool_call_col}, {tool_name_col}
                 FROM sessions
                 WHERE {where_clause}
@@ -295,8 +300,10 @@ def _fetch_messages(
                     role=str(row[2]),
                     content=str(row[3]) if row[3] is not None else "",
                     ts_ms=ts_ms,
-                    tool_call_id=str(row[5]) if row[5] is not None else None,
-                    tool_name=str(row[6]) if row[6] is not None else None,
+                    tenant_id=str(row[5]) if row[5] is not None else DEFAULT_TENANT_ID,
+                    agent_id=str(row[6]) if row[6] is not None else "",
+                    tool_call_id=str(row[7]) if row[7] is not None else None,
+                    tool_name=str(row[8]) if row[8] is not None else None,
                 )
             )
         cur.close()
@@ -327,6 +334,8 @@ def _fetch_messages_ranged(
         }
         has_tenant = "tenant_id" in cols
         has_agent = "agent_id" in cols
+        tenant_col = "tenant_id" if has_tenant else f"'{DEFAULT_TENANT_ID}'"
+        agent_col = "agent_id" if has_agent else "''"
         tool_call_col = "tool_call_id" if "tool_call_id" in cols else "NULL"
         tool_name_col = "tool_name" if "tool_name" in cols else "NULL"
 
@@ -344,6 +353,7 @@ def _fetch_messages_ranged(
 
         cur = conn.execute(
             f"""SELECT session_key, seq, role, content, ts,
+              {tenant_col}, {agent_col},
               {tool_call_col}, {tool_name_col}
                 FROM sessions
                 WHERE {where_sql}
@@ -363,8 +373,10 @@ def _fetch_messages_ranged(
                     role=str(row[2]),
                     content=str(row[3]) if row[3] is not None else "",
                     ts_ms=ts_ms,
-                    tool_call_id=str(row[5]) if row[5] is not None else None,
-                    tool_name=str(row[6]) if row[6] is not None else None,
+                    tenant_id=str(row[5]) if row[5] is not None else DEFAULT_TENANT_ID,
+                    agent_id=str(row[6]) if row[6] is not None else "",
+                    tool_call_id=str(row[7]) if row[7] is not None else None,
+                    tool_name=str(row[8]) if row[8] is not None else None,
                 )
             )
         cur.close()
@@ -420,12 +432,14 @@ def _messages_to_bundle(
     timestamps = [m.ts_ms for m in messages if m.ts_ms > 0]
     started_at = min(timestamps) if timestamps else 0
     ended_at = max(timestamps) if timestamps else 0
+    tenant_id = next((m.tenant_id for m in messages if m.tenant_id), DEFAULT_TENANT_ID)
+    agent_id = next((m.agent_id for m in messages if m.agent_id), "")
 
     return SessionBundle(
         session_id=session_key,
-        tenant_id=DEFAULT_TENANT_ID,
+        tenant_id=tenant_id,
         user_id="",
-        agent_id="",
+        agent_id=agent_id,
         messages=bundle_messages,
         started_at_ms=started_at,
         ended_at_ms=ended_at,

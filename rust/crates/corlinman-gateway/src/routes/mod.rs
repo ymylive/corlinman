@@ -11,6 +11,7 @@ pub mod chat;
 pub mod chat_approve;
 pub mod embeddings;
 pub mod health;
+pub mod memory;
 pub mod metrics;
 pub mod models;
 pub mod plugin_callback;

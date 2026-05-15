@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import quote as url_quote
 
+import httpx
+
 from corlinman_agent_brain.models import (
     KnowledgeNode,
     KnowledgeNodeFrontmatter,
@@ -68,6 +70,44 @@ class HttpTransport(Protocol):
     ) -> tuple[int, dict[str, Any]]:
         """GET, return (status_code, response_json)."""
         ...
+
+
+class HttpxTransport:
+    """Production transport backed by ``httpx.AsyncClient``."""
+
+    def __init__(self, *, timeout_ms: int = 5000) -> None:
+        self._client = httpx.AsyncClient(timeout=timeout_ms / 1000.0)
+
+    async def post(
+        self, url: str, *, json_body: dict[str, Any], headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        resp = await self._client.post(url, json=json_body, headers=headers)
+        return resp.status_code, _json_or_empty(resp)
+
+    async def delete(
+        self, url: str, *, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        resp = await self._client.delete(url, headers=headers)
+        return resp.status_code, _json_or_empty(resp)
+
+    async def get(
+        self, url: str, *, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        resp = await self._client.get(url, headers=headers)
+        return resp.status_code, _json_or_empty(resp)
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
+def _json_or_empty(resp: httpx.Response) -> dict[str, Any]:
+    if not resp.content:
+        return {}
+    try:
+        data = resp.json()
+    except ValueError:
+        return {"error": resp.text}
+    return data if isinstance(data, dict) else {"value": data}
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +189,8 @@ def node_to_memory_doc(node: KnowledgeNode) -> dict[str, Any]:
         "tenant_id": fm.tenant_id,
         "agent_id": fm.agent_id,
         "tags": fm.tags,
+        "links": fm.links,
+        "related_nodes": node.related_nodes,
         "source_session_id": fm.source_session_id,
         "created_at": fm.created_at,
         "updated_at": fm.updated_at,
@@ -195,6 +237,12 @@ def hit_to_knowledge_node(hit: dict[str, Any]) -> KnowledgeNode:
     tags = meta.get("tags", [])
     if not isinstance(tags, list):
         tags = []
+    links = meta.get("links", [])
+    if not isinstance(links, list):
+        links = []
+    related_nodes = meta.get("related_nodes", [])
+    if not isinstance(related_nodes, list):
+        related_nodes = []
 
     frontmatter = KnowledgeNodeFrontmatter(
         id=node_id,
@@ -208,6 +256,7 @@ def hit_to_knowledge_node(hit: dict[str, Any]) -> KnowledgeNode:
         source_session_id=meta.get("source_session_id", ""),
         created_at=meta.get("created_at", ""),
         updated_at=meta.get("updated_at", ""),
+        links=links,
         tags=tags,
     )
 
@@ -218,6 +267,7 @@ def hit_to_knowledge_node(hit: dict[str, Any]) -> KnowledgeNode:
         kind=kind,
         frontmatter=frontmatter,
         summary=hit.get("content", ""),
+        related_nodes=related_nodes,
     )
 
 
@@ -402,6 +452,10 @@ class IndexSyncClient:
     # Query (implements RetrievalProvider contract)
     # ------------------------------------------------------------------
 
+    async def __call__(self, query: str, *, limit: int = 5) -> list[KnowledgeNode]:
+        """Delegate to :meth:`query` so this client satisfies ``RetrievalProvider``."""
+        return await self.query(query, limit=limit)
+
     async def query(self, text: str, *, limit: int = 5) -> list[KnowledgeNode]:
         """Query the vector index for nodes similar to the given text.
 
@@ -504,6 +558,7 @@ class IndexSyncClient:
 __all__ = [
     "BatchSyncReport",
     "HttpTransport",
+    "HttpxTransport",
     "IndexSyncClient",
     "IndexSyncConfig",
     "SyncResult",
