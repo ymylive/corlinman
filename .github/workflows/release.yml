@@ -1,17 +1,19 @@
 name: release
 
-# Triggered on annotated v* tags (and manual dispatch). Two jobs:
+# Triggered on annotated v* tags (and manual dispatch). Three jobs run
+# in parallel — operator's only step is `git tag vX.Y.Z && git push --tags`.
 #
-#   1. build-x86_64-linux: compiles natively on ubuntu-latest
-#      (amd64 runner, GCC modern enough for usearch's numkong
-#      AVX-512 intrinsics), packages, uploads to the release.
+#   1. build-x86_64-linux:    cargo build on ubuntu-latest (gcc 13 +
+#                             binutils 2.42, glibc 2.39); tarball
+#                             attached to the GitHub Release.
+#   2. build-aarch64-darwin:  cargo build on macos-latest (Apple Silicon
+#                             native, since 2024); tarball attached.
+#   3. build-and-push-image:  docker build via docker/Dockerfile,
+#                             push to ghcr.io as :vX.Y.Z + :latest + :dev.
 #
-#   2. upload-local-artifacts: attaches whatever the maintainer
-#      pre-built locally (macOS + aarch64-linux-gnu from
-#      `./scripts/build-release.sh`). Expected to live in
-#      a committed `dist/` directory or be re-attached after-tag
-#      via `gh release upload`. This job is a sanity check that
-#      surfaces missing artifacts.
+# The aarch64-linux-gnu prebuilt is intentionally disabled (see
+# build-aarch64-linux-disabled below for the multi-attempt rationale).
+# Operators on Graviton/Ampere build from source.
 
 on:
   push:
@@ -109,6 +111,95 @@ jobs:
           path: |
             dist/corlinman-*-x86_64-unknown-linux-gnu.tar.gz
             dist/corlinman-*-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+  # ---------------------------------------------------------------------------
+  # macOS aarch64 native build. Replaces the maintainer-side
+  # `scripts/build-release.sh aarch64-apple-darwin` + manual
+  # `gh release upload` step from the v0.6.x cycle. macos-latest is
+  # Apple-Silicon since GitHub Actions migrated in 2024, so this is a
+  # native cargo build (no cross / Rosetta involved).
+  #
+  # Cost note: macos-* minutes bill at 10x ubuntu — only runs on v* tag
+  # push (and workflow_dispatch), not on every PR.
+  # ---------------------------------------------------------------------------
+  build-aarch64-darwin:
+    name: Build aarch64-apple-darwin (native)
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target-aarch64-darwin
+          key: cargo-aarch64-darwin-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-aarch64-darwin-${{ runner.os }}-
+
+      - name: Install build prerequisites
+        run: brew install protobuf
+
+      - name: Resolve version + tag
+        id: meta
+        run: |
+          VERSION=$(grep -E '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binaries
+        run: |
+          export CARGO_TARGET_DIR=target-aarch64-darwin
+          cargo build --release --target aarch64-apple-darwin \
+            --bin corlinman-gateway \
+            --bin corlinman \
+            --bin corlinman-auto-rollback \
+            --bin corlinman-shadow-tester
+
+      - name: Package
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          TARGET="aarch64-apple-darwin"
+          OUTDIR="dist/corlinman-${VERSION}-${TARGET}"
+          mkdir -p "$OUTDIR"
+          for b in corlinman-gateway corlinman corlinman-auto-rollback corlinman-shadow-tester; do
+            cp "target-aarch64-darwin/${TARGET}/release/${b}" "$OUTDIR/"
+            strip "$OUTDIR/$b" 2>/dev/null || true
+          done
+          cat > "$OUTDIR/README" <<EOF
+          corlinman ${VERSION}
+          target: ${TARGET}
+          built on: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          source: ${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }}
+          EOF
+          ARCHIVE="corlinman-${VERSION}-${TARGET}.tar.gz"
+          (cd dist && tar -czf "$ARCHIVE" "$(basename "$OUTDIR")")
+          (cd dist && shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256")
+          ls -lh dist/
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          files: |
+            dist/corlinman-*-aarch64-apple-darwin.tar.gz
+            dist/corlinman-*-aarch64-apple-darwin.tar.gz.sha256
+          fail_on_unmatched_files: true
+
+      - name: Upload as workflow artifact (when manually dispatched)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: corlinman-aarch64-apple-darwin
+          path: |
+            dist/corlinman-*-aarch64-apple-darwin.tar.gz
+            dist/corlinman-*-aarch64-apple-darwin.tar.gz.sha256
 
   # aarch64-linux-gnu cross-compile is currently disabled. numkong (a
   # transitive dep of usearch) emits NEON SDOT intrinsics under
