@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -23,6 +24,7 @@ from corlinman_agent_brain.models import (
     KnowledgeNode,
     KnowledgeNodeFrontmatter,
     LinkAction,
+    LinkPlanEntry,
     MemoryCandidate,
     NodeScope,
     NodeStatus,
@@ -141,7 +143,6 @@ class CuratorPipeline:
                     run.errors.append(f"{candidate.candidate_id}: missing link plan")
                     continue
 
-                node = _candidate_to_node(candidate, bundle, entry.action)
                 decision = decide_write_action(
                     candidate,
                     _write_policy(self._config),
@@ -153,7 +154,41 @@ class CuratorPipeline:
                     )
                     continue
 
-                if entry.action == LinkAction.SEND_TO_REVIEW:
+                if (
+                    entry.action
+                    in {LinkAction.UPDATE_EXISTING, LinkAction.MERGE_INTO_EXISTING}
+                    and (
+                        decision.action != "auto_write"
+                        or candidate.confidence < self._config.auto_write_min_confidence
+                    )
+                ):
+                    review_node = _candidate_to_node(candidate, bundle, entry)
+                    review_node.frontmatter.status = NodeStatus.CONFLICT
+                    result = self._vault.write_conflict(review_node, dry_run=dry_run)
+                    report.write_results.append(result)
+                    if result.action != "skipped":
+                        report.nodes_written += 1
+                    run.candidates_drafted += 1
+                    run.decision_log.append(
+                        f"{candidate.candidate_id}: review required; "
+                        f"{entry.action}: {decision.reason}"
+                    )
+                    continue
+
+                node = _node_for_plan(candidate, bundle, entry)
+
+                updated_targets: list[KnowledgeNode] = []
+                if entry.action == LinkAction.CREATE_AND_LINK and entry.target_node is not None:
+                    updated_targets.append(_add_backlink(entry.target_node, node))
+
+                if entry.action in {
+                    LinkAction.UPDATE_EXISTING,
+                    LinkAction.MERGE_INTO_EXISTING,
+                }:
+                    result = self._vault.update_node(node, dry_run=dry_run)
+                    run.nodes_updated.append(node.node_id)
+                    run.candidates_auto_written += 1
+                elif entry.action == LinkAction.SEND_TO_REVIEW:
                     result = self._vault.write_conflict(node, dry_run=dry_run)
                     run.candidates_drafted += 1
                 elif decision.action == "auto_write":
@@ -167,20 +202,32 @@ class CuratorPipeline:
                 report.write_results.append(result)
                 if result.action != "skipped":
                     report.nodes_written += 1
-                run.nodes_created.append(node.node_id)
+                if entry.action not in {
+                    LinkAction.UPDATE_EXISTING,
+                    LinkAction.MERGE_INTO_EXISTING,
+                }:
+                    run.nodes_created.append(node.node_id)
                 run.decision_log.append(
                     f"{candidate.candidate_id}: {decision.action}; {entry.action}: {entry.reason}"
                 )
 
+                for updated in updated_targets:
+                    backlink_result = self._vault.update_node(updated, dry_run=dry_run)
+                    report.write_results.append(backlink_result)
+                    if backlink_result.action != "skipped":
+                        report.nodes_written += 1
+                    run.nodes_updated.append(updated.node_id)
+
                 if self._sync is not None and not dry_run:
-                    sync_result = await self._sync.upsert_node(node)
-                    report.sync_results.append(sync_result)
-                    if sync_result.action == "upserted":
-                        report.nodes_synced += 1
-                    elif sync_result.action == "failed":
-                        run.errors.append(
-                            f"sync {node.node_id}: {sync_result.error or 'failed'}"
-                        )
+                    for sync_node in [node, *updated_targets]:
+                        sync_result = await self._sync.upsert_node(sync_node)
+                        report.sync_results.append(sync_result)
+                        if sync_result.action == "upserted":
+                            report.nodes_synced += 1
+                        elif sync_result.action == "failed":
+                            run.errors.append(
+                                f"sync {sync_node.node_id}: {sync_result.error or 'failed'}"
+                            )
 
             run.status = CuratorRunStatus.OK if not run.errors else CuratorRunStatus.FAILED
         except Exception as exc:
@@ -228,13 +275,19 @@ def memoryhost_retrieval(sync_client: IndexSyncClient) -> RetrievalProvider:
 def _candidate_to_node(
     candidate: MemoryCandidate,
     bundle: SessionBundle,
-    action: LinkAction,
+    entry: LinkPlanEntry | LinkAction,
 ) -> KnowledgeNode:
     now = now_iso()
     node_id = _node_id()
     links: list[str] = []
-    if action == LinkAction.CREATE_AND_LINK:
-        links = candidate.tags[:]
+    related_nodes: list[str] = []
+    if isinstance(entry, LinkPlanEntry):
+        action = entry.action
+        if action == LinkAction.CREATE_AND_LINK and entry.target_node is not None:
+            links = [entry.target_node.node_id]
+            related_nodes = [entry.target_node.title]
+    else:
+        action = entry
 
     fm = KnowledgeNodeFrontmatter(
         id=node_id,
@@ -261,7 +314,54 @@ def _candidate_to_node(
         summary=candidate.summary,
         key_facts=[candidate.summary],
         evidence_sources=candidate.evidence,
+        related_nodes=related_nodes,
     )
+
+
+def _node_for_plan(
+    candidate: MemoryCandidate,
+    bundle: SessionBundle,
+    entry: LinkPlanEntry,
+) -> KnowledgeNode:
+    if entry.action in {LinkAction.UPDATE_EXISTING, LinkAction.MERGE_INTO_EXISTING}:
+        if entry.target_node is None:
+            return _candidate_to_node(candidate, bundle, entry)
+        return _merge_candidate_into_node(entry.target_node, candidate)
+    return _candidate_to_node(candidate, bundle, entry)
+
+
+def _merge_candidate_into_node(
+    target: KnowledgeNode,
+    candidate: MemoryCandidate,
+) -> KnowledgeNode:
+    node = deepcopy(target)
+    now = now_iso()
+    node.summary = candidate.summary or node.summary
+    node.key_facts = _append_unique(node.key_facts, [candidate.summary])
+    node.evidence_sources = _append_unique(node.evidence_sources, candidate.evidence)
+    node.frontmatter.confidence = max(node.frontmatter.confidence, candidate.confidence)
+    node.frontmatter.risk = candidate.risk
+    node.frontmatter.updated_at = now
+    node.frontmatter.tags = _append_unique(node.frontmatter.tags, candidate.tags)
+    return node
+
+
+def _add_backlink(target: KnowledgeNode, new_node: KnowledgeNode) -> KnowledgeNode:
+    node = deepcopy(target)
+    node.frontmatter.links = _append_unique(node.frontmatter.links, [new_node.node_id])
+    node.related_nodes = _append_unique(node.related_nodes, [new_node.title])
+    node.frontmatter.updated_at = now_iso()
+    return node
+
+
+def _append_unique(existing: list[str], additions: list[str]) -> list[str]:
+    out = [item for item in existing if item]
+    seen = set(out)
+    for item in additions:
+        if item and item not in seen:
+            out.append(item)
+            seen.add(item)
+    return out
 
 
 def _write_policy(config: CuratorConfig) -> WritePolicy:

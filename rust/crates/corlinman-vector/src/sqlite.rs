@@ -198,6 +198,15 @@ pub struct ChunkRow {
     pub namespace: String,
 }
 
+/// Metadata row maintained by `corlinman-memory-host` for synthetic chunks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryHostMetadataRow {
+    pub chunk_id: i64,
+    pub namespace: String,
+    pub metadata: String,
+    pub node_id: Option<String>,
+}
+
 /// Row from `tag_nodes` (schema v6, hierarchical tag tree).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagNodeRow {
@@ -969,6 +978,133 @@ impl SqliteStore {
         Ok(row.is_some())
     }
 
+    /// Ensure the light metadata table used by `corlinman-memory-host`
+    /// exists. Kept here so the host can reuse this SQLite connection
+    /// without taking a direct `sqlx` dependency.
+    pub async fn ensure_memory_host_metadata_schema(&self) -> Result<()> {
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS memory_host_docs (\
+                chunk_id INTEGER PRIMARY KEY,\
+                namespace TEXT NOT NULL,\
+                metadata TEXT NOT NULL,\
+                node_id TEXT,\
+                FOREIGN KEY(chunk_id) REFERENCES chunks(id) ON DELETE CASCADE\
+             );\
+             CREATE INDEX IF NOT EXISTS idx_memory_host_docs_namespace_node \
+                ON memory_host_docs(namespace, node_id);",
+        )
+        .execute(&self.pool)
+        .await
+        .context("ensure_memory_host_metadata_schema")?;
+        Ok(())
+    }
+
+    /// Upsert metadata associated with one synthetic memory-host chunk.
+    pub async fn upsert_memory_host_metadata(
+        &self,
+        chunk_id: i64,
+        namespace: &str,
+        metadata: &str,
+        node_id: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO memory_host_docs(chunk_id, namespace, metadata, node_id) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(chunk_id) DO UPDATE SET \
+                namespace = excluded.namespace, \
+                metadata = excluded.metadata, \
+                node_id = excluded.node_id",
+        )
+        .bind(chunk_id)
+        .bind(namespace)
+        .bind(metadata)
+        .bind(node_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("upsert_memory_host_metadata(chunk_id={chunk_id})"))?;
+        Ok(())
+    }
+
+    /// Fetch memory-host metadata for a set of chunk ids.
+    pub async fn memory_host_metadata_by_chunk_ids(
+        &self,
+        chunk_ids: &[i64],
+    ) -> Result<Vec<MemoryHostMetadataRow>> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", chunk_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT chunk_id, namespace, metadata, node_id \
+             FROM memory_host_docs WHERE chunk_id IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&sql);
+        for id in chunk_ids {
+            q = q.bind(id);
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .context("memory_host_metadata_by_chunk_ids")?;
+        Ok(rows.into_iter().map(row_to_memory_host_metadata).collect())
+    }
+
+    /// Return chunk ids for memory-host docs with node ids in `node_ids`.
+    pub async fn memory_host_chunk_ids_by_node_ids(
+        &self,
+        node_ids: &[String],
+        namespace: Option<&str>,
+    ) -> Result<Vec<i64>> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", node_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut sql =
+            format!("SELECT chunk_id FROM memory_host_docs WHERE node_id IN ({placeholders})");
+        if namespace.is_some() {
+            sql.push_str(" AND namespace = ?");
+        }
+        sql.push_str(" ORDER BY chunk_id ASC");
+        let mut q = sqlx::query(&sql);
+        for node_id in node_ids {
+            q = q.bind(node_id);
+        }
+        if let Some(ns) = namespace {
+            q = q.bind(ns);
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .context("memory_host_chunk_ids_by_node_ids")?;
+        Ok(rows.into_iter().map(|row| row.get("chunk_id")).collect())
+    }
+
+    /// Scan memory-host graph metadata, optionally scoped to one namespace.
+    pub async fn list_memory_host_metadata(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<Vec<MemoryHostMetadataRow>> {
+        let mut sql =
+            "SELECT chunk_id, namespace, metadata, node_id FROM memory_host_docs".to_string();
+        if namespace.is_some() {
+            sql.push_str(" WHERE namespace = ?");
+        }
+        sql.push_str(" ORDER BY chunk_id ASC");
+        let mut q = sqlx::query(&sql);
+        if let Some(ns) = namespace {
+            q = q.bind(ns);
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .context("list_memory_host_metadata")?;
+        Ok(rows.into_iter().map(row_to_memory_host_metadata).collect())
+    }
+
     // ---- pending_approvals (schema v3) -----------------------------------
 
     /// Insert a fresh pending-approval row.
@@ -1524,6 +1660,15 @@ fn row_to_chunk(r: sqlx::sqlite::SqliteRow) -> ChunkRow {
             .get::<Option<Vec<u8>>, _>("vector")
             .and_then(|b| crate::blob_to_f32_vec(&b)),
         namespace: r.get::<String, _>("namespace"),
+    }
+}
+
+fn row_to_memory_host_metadata(r: sqlx::sqlite::SqliteRow) -> MemoryHostMetadataRow {
+    MemoryHostMetadataRow {
+        chunk_id: r.get::<i64, _>("chunk_id"),
+        namespace: r.get::<String, _>("namespace"),
+        metadata: r.get::<String, _>("metadata"),
+        node_id: r.get::<Option<String>, _>("node_id"),
     }
 }
 

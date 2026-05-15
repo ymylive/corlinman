@@ -189,6 +189,8 @@ def node_to_memory_doc(node: KnowledgeNode) -> dict[str, Any]:
         "tenant_id": fm.tenant_id,
         "agent_id": fm.agent_id,
         "tags": fm.tags,
+        "links": fm.links,
+        "related_nodes": node.related_nodes,
         "source_session_id": fm.source_session_id,
         "created_at": fm.created_at,
         "updated_at": fm.updated_at,
@@ -235,6 +237,12 @@ def hit_to_knowledge_node(hit: dict[str, Any]) -> KnowledgeNode:
     tags = meta.get("tags", [])
     if not isinstance(tags, list):
         tags = []
+    links = meta.get("links", [])
+    if not isinstance(links, list):
+        links = []
+    related_nodes = meta.get("related_nodes", [])
+    if not isinstance(related_nodes, list):
+        related_nodes = []
 
     frontmatter = KnowledgeNodeFrontmatter(
         id=node_id,
@@ -248,6 +256,7 @@ def hit_to_knowledge_node(hit: dict[str, Any]) -> KnowledgeNode:
         source_session_id=meta.get("source_session_id", ""),
         created_at=meta.get("created_at", ""),
         updated_at=meta.get("updated_at", ""),
+        links=links,
         tags=tags,
     )
 
@@ -258,6 +267,7 @@ def hit_to_knowledge_node(hit: dict[str, Any]) -> KnowledgeNode:
         kind=kind,
         frontmatter=frontmatter,
         summary=hit.get("content", ""),
+        related_nodes=related_nodes,
     )
 
 

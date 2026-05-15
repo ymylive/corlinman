@@ -49,7 +49,8 @@ pub use migration::{
 pub use query::VectorStore;
 pub use rerank::{GrpcReranker, NoopReranker, Reranker};
 pub use sqlite::{
-    ChunkDecayState, ChunkEpaRow, ChunkRow, FileRow, PendingApproval, SqliteStore, TagNodeRow,
+    ChunkDecayState, ChunkEpaRow, ChunkRow, FileRow, MemoryHostMetadataRow, PendingApproval,
+    SqliteStore, TagNodeRow,
 };
 pub use usearch_index::UsearchIndex;
 

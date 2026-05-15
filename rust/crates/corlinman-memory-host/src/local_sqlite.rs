@@ -28,6 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use corlinman_vector::SqliteStore;
+use serde_json::Value;
 use tracing::debug;
 
 use crate::{MemoryDoc, MemoryHit, MemoryHost, MemoryQuery};
@@ -92,6 +93,11 @@ impl MemoryHost for LocalSqliteHost {
             None => None,
         };
 
+        self.store
+            .ensure_memory_host_metadata_schema()
+            .await
+            .context("LocalSqliteHost: ensure metadata schema")?;
+
         let hits = self
             .store
             .search_bm25_with_filter(&req.text, req.top_k, allowed_ids.as_deref())
@@ -102,7 +108,44 @@ impl MemoryHost for LocalSqliteHost {
             return Ok(Vec::new());
         }
 
-        let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
+        let mut scored: Vec<(i64, f32, bool)> = hits
+            .iter()
+            .map(|(id, score)| (*id, *score, false))
+            .collect();
+        let seed_ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
+        let expanded_ids = self
+            .one_hop_graph_ids(&seed_ids, req.namespace.as_deref())
+            .await?;
+        let mut seen: std::collections::HashSet<i64> = seed_ids.iter().copied().collect();
+        let seed_floor = hits.iter().map(|(_, score)| *score).fold(0.0_f32, f32::max) * 0.85;
+        for id in expanded_ids {
+            if seen.insert(id) {
+                scored.push((id, seed_floor, true));
+            }
+        }
+        let candidate_ids: Vec<i64> = scored.iter().map(|(id, _, _)| *id).collect();
+        let metadata_by_id = self
+            .metadata_for_chunk_ids(&candidate_ids)
+            .await
+            .context("LocalSqliteHost: hydrate metadata")?;
+
+        let mut budgeted = Vec::with_capacity(req.top_k);
+        let mut seen_node_ids = std::collections::HashSet::new();
+        for (id, score, graph_expanded) in scored {
+            if let Some(metadata) = metadata_by_id.get(&id) {
+                if let Some(node_id) = metadata.get("node_id").and_then(Value::as_str) {
+                    if !seen_node_ids.insert(node_id.to_string()) {
+                        continue;
+                    }
+                }
+            }
+            budgeted.push((id, score, graph_expanded));
+            if budgeted.len() >= req.top_k {
+                break;
+            }
+        }
+
+        let ids: Vec<i64> = budgeted.iter().map(|(id, _, _)| *id).collect();
         let chunks = self
             .store
             .query_chunks_by_ids(&ids)
@@ -115,19 +158,24 @@ impl MemoryHost for LocalSqliteHost {
             by_id.insert(c.id, c);
         }
 
-        let mut out = Vec::with_capacity(hits.len());
-        for (id, score) in hits {
+        let mut out = Vec::with_capacity(budgeted.len());
+        for (id, score, graph_expanded) in budgeted {
             if let Some(c) = by_id.remove(&id) {
+                let metadata = merge_metadata(
+                    serde_json::json!({
+                        "file_id": c.file_id,
+                        "chunk_index": c.chunk_index,
+                        "namespace": c.namespace,
+                        "graph_expanded": graph_expanded,
+                    }),
+                    metadata_by_id.get(&id),
+                );
                 out.push(MemoryHit {
                     id: id.to_string(),
                     content: c.content,
                     score,
                     source: self.name.clone(),
-                    metadata: serde_json::json!({
-                        "file_id": c.file_id,
-                        "chunk_index": c.chunk_index,
-                        "namespace": c.namespace,
-                    }),
+                    metadata,
                 });
             }
         }
@@ -154,6 +202,13 @@ impl MemoryHost for LocalSqliteHost {
             .insert_chunk(file_id, 0, &doc.content, None, namespace)
             .await
             .context("LocalSqliteHost: insert chunk")?;
+
+        self.store
+            .ensure_memory_host_metadata_schema()
+            .await
+            .context("LocalSqliteHost: ensure metadata schema")?;
+        self.upsert_metadata(chunk_id, namespace, &doc.metadata)
+            .await?;
 
         Ok(chunk_id.to_string())
     }
@@ -188,6 +243,19 @@ impl MemoryHost for LocalSqliteHost {
             Some(c) => c,
             None => return Ok(None),
         };
+        self.store
+            .ensure_memory_host_metadata_schema()
+            .await
+            .context("LocalSqliteHost: ensure metadata schema")?;
+        let metadata_by_id = self.metadata_for_chunk_ids(&[chunk_id]).await?;
+        let metadata = merge_metadata(
+            serde_json::json!({
+                "file_id": chunk.file_id,
+                "chunk_index": chunk.chunk_index,
+                "namespace": chunk.namespace,
+            }),
+            metadata_by_id.get(&chunk_id),
+        );
         Ok(Some(MemoryHit {
             id: chunk.id.to_string(),
             content: chunk.content,
@@ -195,13 +263,163 @@ impl MemoryHost for LocalSqliteHost {
             // pose a query. 1.0 is the "fully matched" sentinel.
             score: 1.0,
             source: self.name.clone(),
-            metadata: serde_json::json!({
-                "file_id": chunk.file_id,
-                "chunk_index": chunk.chunk_index,
-                "namespace": chunk.namespace,
-            }),
+            metadata,
         }))
     }
+}
+
+impl LocalSqliteHost {
+    async fn upsert_metadata(
+        &self,
+        chunk_id: i64,
+        namespace: &str,
+        metadata: &Value,
+    ) -> Result<()> {
+        let node_id = metadata
+            .get("node_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.store
+            .upsert_memory_host_metadata(
+                chunk_id,
+                namespace,
+                &metadata.to_string(),
+                node_id.as_deref(),
+            )
+            .await
+            .context("LocalSqliteHost: upsert metadata")?;
+        Ok(())
+    }
+
+    async fn metadata_for_chunk_ids(
+        &self,
+        chunk_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Value>> {
+        if chunk_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows = self
+            .store
+            .memory_host_metadata_by_chunk_ids(chunk_ids)
+            .await
+            .context("LocalSqliteHost: query metadata by chunk ids")?;
+        let mut out = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let value = serde_json::from_str(&row.metadata).unwrap_or(Value::Null);
+            out.insert(row.chunk_id, value);
+        }
+        Ok(out)
+    }
+
+    async fn one_hop_graph_ids(
+        &self,
+        seed_chunk_ids: &[i64],
+        namespace: Option<&str>,
+    ) -> Result<Vec<i64>> {
+        if seed_chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let seed_metadata = self.metadata_for_chunk_ids(seed_chunk_ids).await?;
+        let mut seed_node_ids = Vec::new();
+        let mut linked_node_ids = Vec::new();
+        for metadata in seed_metadata.values() {
+            if let Some(node_id) = metadata.get("node_id").and_then(Value::as_str) {
+                seed_node_ids.push(node_id.to_string());
+            }
+            linked_node_ids.extend(json_string_array(metadata.get("links")));
+        }
+        let mut wanted = Vec::new();
+        wanted.extend(linked_node_ids);
+        wanted.extend(
+            self.backlinked_node_ids(&seed_node_ids, namespace)
+                .await
+                .context("LocalSqliteHost: query backlinks")?,
+        );
+        wanted = dedupe_strings(wanted);
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.chunk_ids_for_node_ids(&wanted, namespace).await
+    }
+
+    async fn backlinked_node_ids(
+        &self,
+        seed_node_ids: &[String],
+        namespace: Option<&str>,
+    ) -> Result<Vec<String>> {
+        if seed_node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .store
+            .list_memory_host_metadata(namespace)
+            .await
+            .context("LocalSqliteHost: scan graph metadata")?;
+        let seed: std::collections::HashSet<&str> =
+            seed_node_ids.iter().map(String::as_str).collect();
+        let mut out = Vec::new();
+        for row in rows {
+            let metadata: Value = serde_json::from_str(&row.metadata).unwrap_or(Value::Null);
+            let links = json_string_array(metadata.get("links"));
+            if links.iter().any(|link| seed.contains(link.as_str())) {
+                if let Some(node_id) = row.node_id {
+                    out.push(node_id);
+                }
+            }
+        }
+        Ok(dedupe_strings(out))
+    }
+
+    async fn chunk_ids_for_node_ids(
+        &self,
+        node_ids: &[String],
+        namespace: Option<&str>,
+    ) -> Result<Vec<i64>> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.store
+            .memory_host_chunk_ids_by_node_ids(node_ids, namespace)
+            .await
+            .context("LocalSqliteHost: query one-hop chunks")
+    }
+}
+
+fn merge_metadata(base: Value, stored: Option<&Value>) -> Value {
+    let mut base_obj = serde_json::Map::new();
+    if let Some(Value::Object(stored_obj)) = stored {
+        for (key, value) in stored_obj {
+            base_obj.insert(key.clone(), value.clone());
+        }
+    }
+    if let Value::Object(host_obj) = base {
+        for (key, value) in host_obj {
+            base_obj.insert(key, value);
+        }
+    }
+    Value::Object(base_obj)
+}
+
+fn json_string_array(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn dedupe_strings(items: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        if seen.insert(item.clone()) {
+            out.push(item);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -277,6 +495,197 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, id_a);
+    }
+
+    #[tokio::test]
+    async fn query_preserves_upserted_metadata() {
+        let (host, _tmp) = fresh_host().await;
+        host.upsert(MemoryDoc {
+            content: "alpha graph node".into(),
+            metadata: serde_json::json!({
+                "node_id": "kn-a",
+                "title": "Alpha Node",
+                "links": ["kn-b"],
+                "related_nodes": ["Beta Node"]
+            }),
+            namespace: Some("agent-brain".into()),
+        })
+        .await
+        .unwrap();
+
+        let hits = host
+            .query(MemoryQuery {
+                text: "alpha".into(),
+                top_k: 3,
+                filters: vec![],
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].metadata["node_id"], "kn-a");
+        assert_eq!(hits[0].metadata["title"], "Alpha Node");
+        assert_eq!(hits[0].metadata["links"], serde_json::json!(["kn-b"]));
+        assert_eq!(
+            hits[0].metadata["related_nodes"],
+            serde_json::json!(["Beta Node"])
+        );
+    }
+
+    #[tokio::test]
+    async fn query_expands_one_hop_links_after_bm25_seed() {
+        let (host, _tmp) = fresh_host().await;
+        let id_a = host
+            .upsert(MemoryDoc {
+                content: "alpha seed memory".into(),
+                metadata: serde_json::json!({
+                    "node_id": "kn-a",
+                    "title": "Alpha",
+                    "links": ["kn-b"]
+                }),
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+        let id_b = host
+            .upsert(MemoryDoc {
+                content: "beta linked context without query term".into(),
+                metadata: serde_json::json!({
+                    "node_id": "kn-b",
+                    "title": "Beta",
+                    "links": []
+                }),
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+        let id_c = host
+            .upsert(MemoryDoc {
+                content: "gamma backlink context without query term".into(),
+                metadata: serde_json::json!({
+                    "node_id": "kn-c",
+                    "title": "Gamma",
+                    "links": ["kn-a"]
+                }),
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+
+        let hits = host
+            .query(MemoryQuery {
+                text: "alpha".into(),
+                top_k: 3,
+                filters: vec![],
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec![id_a.as_str(), id_b.as_str(), id_c.as_str()]);
+        assert_eq!(hits[0].metadata["graph_expanded"], false);
+        assert_eq!(hits[1].metadata["graph_expanded"], true);
+        assert_eq!(hits[2].metadata["graph_expanded"], true);
+    }
+
+    #[tokio::test]
+    async fn query_dedupes_by_node_id_and_host_metadata_wins() {
+        let (host, _tmp) = fresh_host().await;
+        let id_a = host
+            .upsert(MemoryDoc {
+                content: "alpha duplicate first".into(),
+                metadata: serde_json::json!({
+                    "node_id": "kn-a",
+                    "title": "Alpha",
+                    "namespace": "spoofed",
+                    "graph_expanded": true
+                }),
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+        let _id_dup = host
+            .upsert(MemoryDoc {
+                content: "alpha duplicate second".into(),
+                metadata: serde_json::json!({
+                    "node_id": "kn-a",
+                    "title": "Alpha duplicate"
+                }),
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+
+        let hits = host
+            .query(MemoryQuery {
+                text: "alpha duplicate".into(),
+                top_k: 5,
+                filters: vec![],
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, id_a);
+        assert_eq!(hits[0].metadata["namespace"], "agent-brain");
+        assert_eq!(hits[0].metadata["graph_expanded"], false);
+    }
+
+    #[tokio::test]
+    async fn query_dedupes_before_applying_top_k_budget() {
+        let (host, _tmp) = fresh_host().await;
+        let id_a = host
+            .upsert(MemoryDoc {
+                content: "alpha duplicate first".into(),
+                metadata: serde_json::json!({
+                    "node_id": "kn-a",
+                    "title": "Alpha",
+                    "links": ["kn-b"]
+                }),
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+        let _id_dup = host
+            .upsert(MemoryDoc {
+                content: "alpha duplicate second".into(),
+                metadata: serde_json::json!({
+                    "node_id": "kn-a",
+                    "title": "Alpha duplicate",
+                    "links": []
+                }),
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+        let id_b = host
+            .upsert(MemoryDoc {
+                content: "beta linked context without query term".into(),
+                metadata: serde_json::json!({
+                    "node_id": "kn-b",
+                    "title": "Beta",
+                    "links": []
+                }),
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+
+        let hits = host
+            .query(MemoryQuery {
+                text: "alpha duplicate".into(),
+                top_k: 2,
+                filters: vec![],
+                namespace: Some("agent-brain".into()),
+            })
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec![id_a.as_str(), id_b.as_str()]);
     }
 
     #[tokio::test]

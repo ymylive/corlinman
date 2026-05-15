@@ -188,6 +188,7 @@ class LinkPlanEntry:
     candidate_id: str
     action: LinkAction
     target_node_id: str | None = None
+    target_node: KnowledgeNode | None = None
     similarity_score: float = 0.0
     reason: str = ""
 

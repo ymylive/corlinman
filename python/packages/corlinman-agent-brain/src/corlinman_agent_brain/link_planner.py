@@ -105,6 +105,7 @@ def _decide_action(
             candidate_id=candidate.candidate_id,
             action=LinkAction.SEND_TO_REVIEW,
             target_node_id=target_id,
+            target_node=matches[0][0] if matches else None,
             similarity_score=best_score,
             reason=(
                 f"Candidate flagged for review: risk={candidate.risk}, kind={candidate.kind}"
@@ -130,6 +131,7 @@ def _decide_action(
             candidate_id=candidate.candidate_id,
             action=LinkAction.UPDATE_EXISTING,
             target_node_id=best_node.node_id,
+            target_node=best_node,
             similarity_score=best_score,
             reason=(
                 f"High similarity ({best_score:.3f} > {config.similarity_threshold_update}) "
@@ -143,6 +145,7 @@ def _decide_action(
             candidate_id=candidate.candidate_id,
             action=LinkAction.MERGE_INTO_EXISTING,
             target_node_id=best_node.node_id,
+            target_node=best_node,
             similarity_score=best_score,
             reason=(
                 f"Moderate similarity ({best_score:.3f} > {config.similarity_threshold_merge}) "
@@ -156,6 +159,7 @@ def _decide_action(
             candidate_id=candidate.candidate_id,
             action=LinkAction.CREATE_AND_LINK,
             target_node_id=best_node.node_id,
+            target_node=best_node,
             similarity_score=best_score,
             reason=(
                 f"Low-moderate similarity ({best_score:.3f} > {config.similarity_threshold_link}); "

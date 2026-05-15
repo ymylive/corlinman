@@ -223,6 +223,8 @@ class TestReadSessionById:
         assert len(bundle.messages) == 3
         assert bundle.started_at_ms == 1000
         assert bundle.ended_at_ms == 3000
+        assert bundle.tenant_id == "default"
+        assert bundle.agent_id == "agent-1"
 
     def test_returns_none_for_missing_session(self, sessions_db: Path) -> None:
         bundle = read_session_by_id(sessions_db=sessions_db, session_key="nonexistent")
