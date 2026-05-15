@@ -122,6 +122,58 @@ jobs:
   # Ampere should build from source (`cargo install --path ...`) until
   # we either patch numkong upstream or pin a usearch version without
   # this dependency. x86_64 + macOS prebuilts still ship.
+  # ---------------------------------------------------------------------------
+  # docker image: build runtime via docker/Dockerfile + push to ghcr.io.
+  # Tagged on every v* release. Tags written:
+  #   - ghcr.io/<repo>:vX.Y.Z   (immutable per release)
+  #   - ghcr.io/<repo>:latest   (mutable; tracks newest tag)
+  #   - ghcr.io/<repo>:dev      (mutable; the channel the operator's
+  #                              docker-compose pulls from)
+  # The dev tag mirrors the latest tagged release so existing operator
+  # `docker compose pull && docker compose up -d` flows just work.
+  # ---------------------------------------------------------------------------
+  build-and-push-image:
+    name: Build + push docker image (ghcr.io)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tag
+        id: meta
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          REPO_LOWER="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "repo=$REPO_LOWER" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: runtime
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.repo }}:${{ steps.meta.outputs.tag }}
+            ghcr.io/${{ steps.meta.outputs.repo }}:latest
+            ghcr.io/${{ steps.meta.outputs.repo }}:dev
+
   build-aarch64-linux-disabled:
     name: Build aarch64-linux-gnu (cross from amd64)
     if: false
