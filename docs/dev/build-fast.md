@@ -6,27 +6,66 @@ dependencies. This page describes the one-time toolchain setup that
 brings dev-mode rebuilds under a minute and release builds to roughly
 2–3 minutes.
 
-The repo ships with [`.cargo/config.toml`](../../.cargo/config.toml)
-preconfigured. You only need to install the tools below.
+The repo keeps [`.cargo/config.toml`](../../.cargo/config.toml) portable.
+Optional acceleration tools are enabled from your shell environment or
+per-host Cargo config so a fresh checkout does not require them.
+
+## Local baseline captured on 2026-05-16
+
+Host: Windows, PowerShell, Rust 1.95.0 (`x86_64-pc-windows-msvc`).
+
+| Command | Clean target? | Elapsed seconds | Result | Notes |
+| --- | --- | ---: | --- | --- |
+| `.\scripts\rust-build-baseline.ps1 -Profile dev -Clean` | yes | 26.51 | fail | Stops in `numkong v7.6.0` build script while compiling the `usearch` transitive C dependency with MSVC `cl.exe`; first fatal path is `include/numkong/cast/serial.h(884): error C2059: syntax error: "if"`. |
+
+The baseline script is still useful on Windows because it records elapsed time
+even when the build fails. The failure is a local toolchain blocker, not a
+change introduced by the script: `cargo build -p corlinman-vector` fails at the
+same `numkong` dependency. A GNU-target probe with the installed MinGW GCC 8
+also fails; with all x86 `NK_TARGET_*` SIMD probes disabled, GCC still hits an
+internal compiler error in `numkong.c`.
+
+Until the Windows C toolchain is upgraded or `numkong`/`usearch` changes, use
+Linux/macOS or CI runners for full Rust baseline numbers, and treat Windows
+results as "blocked before link" measurements.
 
 ## 1. Local build cache: `sccache`
 
-Caches the output of every `rustc` invocation keyed on inputs + flags.
-First build of any crate populates the cache; subsequent builds (even
-on a `git switch`) re-use the artifacts.
+`sccache` is optional. It caches `rustc` outputs by input hash, so it helps
+most after the first build, across branch switches, and when CI restores the
+cache. The repo does not hard-code `rustc-wrapper`; use environment variables
+so fresh checkouts and cross builds never fail because `sccache` is missing.
+
+Windows on this workstation:
+
+```powershell
+$env:CARGO_HOME = "E:\DevData\cargo"
+$env:RUSTUP_HOME = "E:\DevData\rustup"
+cargo install sccache --locked --root "E:\DevData\cargo-tools"
+$env:Path = "E:\DevData\cargo-tools\bin;$env:Path"
+$env:SCCACHE_DIR = "E:\DevData\sccache"
+$env:RUSTC_WRAPPER = "sccache"
+sccache --show-stats
+```
+
+Linux/macOS:
 
 ```bash
 cargo install sccache --locked
-```
-
-Optional: point sccache at S3 / Redis for shared CI cache. Defaults
-fine for solo work.
-
-Verify:
-
-```bash
+export RUSTC_WRAPPER=sccache
 sccache --show-stats
 ```
+
+Rollback:
+
+```powershell
+Remove-Item Env:\RUSTC_WRAPPER -ErrorAction SilentlyContinue
+```
+
+Task 2 validation on Windows confirmed `sccache` is invoked with
+`RUSTC_WRAPPER=sccache`. With `SCCACHE_DIR=E:\DevData\sccache`, stats reported
+`Cache location Local disk: "E:\\DevData\\sccache"`. The Rust build still stops
+at the pre-existing `numkong` C compile blocker described above.
 
 ## 2. Faster linker
 
@@ -41,8 +80,9 @@ sudo apt-get install -y mold clang   # debian/ubuntu
 sudo dnf install -y mold clang       # fedora
 ```
 
-`.cargo/config.toml` already wires `-fuse-ld=mold` for the standard
-GNU + musl targets.
+Enable `mold` from your shell or a per-host Cargo config, for example by
+setting `RUSTFLAGS="-C link-arg=-fuse-ld=mold"` for local native builds. Do not
+commit host-specific linker requirements to the repo config.
 
 ### macOS
 
@@ -72,6 +112,59 @@ cargo build --profile release-thin -p corlinman-gateway
 Trade-off: ~5% runtime perf vs the GA `release` profile, but 50%
 faster to build.
 
+## Build command choice
+
+Use `cargo build` for edit/compile/test loops.
+
+Use `make rust-build-fast` when you need release-like binaries for local
+dogfooding and do not need GA packaging. It uses `release-thin`, which keeps
+ThinLTO but raises `codegen-units` to improve build latency.
+
+Use `make build` or `cargo build --release -p corlinman-gateway -p corlinman-cli`
+for production release checks. This path remains unchanged.
+
+Task 3 validation on Windows used `mingw32-make` because `make` is not on this
+PowerShell `PATH`. `mingw32-make -n build` still expands to the unchanged
+production release command, followed by `uv sync --frozen --no-dev` and
+`pnpm -C ui build`. `mingw32-make -n rust-build-fast` expands to
+`cargo build --profile release-thin -p corlinman-gateway -p corlinman-cli`.
+The actual `mingw32-make rust-build-fast` invocation reaches Cargo and then
+stops at the same pre-existing `numkong v7.6.0` MSVC C compile blocker:
+`include\numkong/cast/serial.h(884): error C2059: syntax error: "if"`.
+
+## `release-check` profile
+
+`release-check` is for local release-like compile checks when link time is the
+bottleneck. It disables LTO, raises codegen units, keeps incremental builds on,
+and keeps symbols. It is not a production packaging profile.
+
+```powershell
+cargo build --profile release-check -p corlinman-gateway -p corlinman-cli
+```
+
+Use this only for local validation that the two primary binaries still compile
+in an optimized profile. Use `release` for GA artifacts and `release-thin` for
+dogfood binaries.
+
+Task 4 validation on Windows confirmed Cargo accepts the profile and writes
+artifacts under `target\release-check\`, but the build does not complete on
+this host. It stops at the pre-existing `numkong v7.6.0` MSVC C compile blocker
+and also reports `Could not find protoc` from `corlinman-proto` because
+`protoc` is not currently on `PATH` or `PROTOC`. No `release-check` binaries
+were produced, so the `target\release-check\corlinman*.exe --help` smoke checks
+could not run.
+
+`scripts/build-release.sh` rejects `--profile release-check` on purpose.
+That profile is for local compile validation only and must not produce
+operator-facing archives.
+
+Task 5 validation on Windows: `bash -n scripts/build-release.sh` passes.
+`bash scripts/build-release.sh --profile release-check macos-aarch64` exits
+non-zero before building and prints the guard message. `bash
+scripts/build-release.sh --profile release-thin macos-aarch64` is not blocked
+by the guard; it reaches Cargo and then fails because the local Rust toolchain
+does not have `aarch64-apple-darwin` installed.
+
 ## 5. CI cache hint
 
 GitHub Actions cache key examples:
@@ -87,19 +180,90 @@ GitHub Actions cache key examples:
     key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 ```
 
+## Dependency and codegen observations
+
+Installed analysis tools into `E:\DevData\cargo-tools`:
+
+```powershell
+$env:CARGO_HOME = "E:\DevData\cargo"
+$env:RUSTUP_HOME = "E:\DevData\rustup"
+cargo install cargo-bloat cargo-llvm-lines --locked --root "E:\DevData\cargo-tools"
+```
+
+Attempted on Windows:
+
+```powershell
+$env:Path = "E:\DevData\cargo-tools\bin;$env:Path"
+cargo bloat --release --crates --bin corlinman-gateway
+cargo llvm-lines --release -p corlinman-gateway --bin corlinman-gateway
+```
+
+Both tools trigger a release build before they can report size or LLVM IR data.
+On this workstation they stop at the same pre-existing `numkong v7.6.0` MSVC C
+compile failure: `include\numkong/cast/serial.h(884): error C2059: syntax
+error: "if"`. `cargo llvm-lines` also requires an explicit package when run
+from the workspace root because the root `Cargo.toml` is a virtual manifest.
+
+Top size/codegen contributors:
+
+| Binary | Tool | Contributor | Observation | Action |
+| --- | --- | --- | --- | --- |
+| corlinman-gateway | cargo-bloat | not captured | blocked before binary build by `numkong` | observe only |
+| corlinman | cargo-bloat | not captured | skipped after same `numkong` blocker reproduced on gateway | observe only |
+| corlinman-gateway | cargo-llvm-lines | not captured | blocked before LLVM IR report by `numkong` | observe only |
+| corlinman | cargo-llvm-lines | not captured | skipped after same `numkong` blocker reproduced on gateway | observe only |
+
+## Validation after build-speed changes
+
+| Command | Result | Notes |
+| --- | --- | --- |
+| `cargo fmt --all -- --check` | pass | exits 0 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | fail | blocked before Rust lint results by `numkong v7.6.0`; MSVC first fatal error is `include\numkong/cast/serial.h(884): error C2059: syntax error: "if"` |
+| `cargo nextest run --workspace` | fail | `cargo-nextest v0.9.135` installed into `E:\DevData\cargo-tools`; test compile then blocks at the same `numkong v7.6.0` MSVC C compile failure |
+| `cargo build --profile release-thin -p corlinman-gateway -p corlinman-cli` | fail | blocked at the same `numkong v7.6.0` MSVC C compile failure before link or binary output |
+| `.\target\release-thin\corlinman.exe --help` | fail | not run because `target\release-thin\corlinman.exe` was not produced |
+| `.\target\release-thin\corlinman-gateway.exe --help` | fail | not run because `target\release-thin\corlinman-gateway.exe` was not produced |
+| `cargo build --release -p corlinman-gateway -p corlinman-cli` | fail | production profile remains unchanged; build is blocked at the same pre-existing `numkong v7.6.0` MSVC C compile failure |
+
 ## 6. Cross-compile cheat sheet
 
 See `scripts/build-release.sh`. tl;dr: install `cross`
 (`cargo install cross --git https://github.com/cross-rs/cross`),
 then `cross build --release --target x86_64-unknown-linux-musl`.
-The repo's `.cargo/config.toml` wires the linker per target.
+Keep target linker setup in the build image, CI runner, or per-host Cargo
+config unless it is available to every fresh checkout.
+
+## Rollback
+
+All build-speed changes in this plan are build-system only.
+
+To disable `sccache` for the current PowerShell session:
+
+```powershell
+Remove-Item Env:\RUSTC_WRAPPER -ErrorAction SilentlyContinue
+```
+
+To stop using the local validation profile, switch back to:
+
+```powershell
+cargo build
+cargo build --release -p corlinman-gateway -p corlinman-cli
+```
+
+To remove local baseline artifacts:
+
+```powershell
+Remove-Item -LiteralPath .target-baseline -Recurse -Force
+```
+
+Production release behavior remains controlled by the existing `release`
+profile and `make build`.
 
 ## Troubleshooting
 
 - **`error: linker 'clang' not found`** — install clang via your
-  package manager or replace `linker = "clang"` in
-  `.cargo/config.toml` with the linker you have. Native cargo
-  defaults still work.
+  package manager or remove the local linker override from your shell
+  environment or per-host Cargo config. Native cargo defaults still work.
 - **`-fuse-ld=mold: command not found`** — install mold; or drop
   the rustflags line under the affected `[target.*]` section.
 - **sccache reports 0% hit rate** — first warm-up; or you switched

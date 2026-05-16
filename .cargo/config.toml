@@ -1,21 +1,22 @@
-# Cargo build acceleration knobs.
+# Cargo build acceleration knobs for corlinman.
 #
-# This file ships with corlinman-friendly defaults but stays minimal:
-# nothing here should make a fresh `cargo build` fail. Linker /
-# wrapper overrides are opt-in via env vars or per-host override
-# files so cross-compile containers and CI runners don't trip over
-# missing tools.
+# Keep this file portable. A fresh checkout must build even when optional
+# tools such as sccache, mold, lld, or clang are not installed.
 #
-# Recommended one-time setup on a dev box (macOS or Linux):
+# Local Windows setup:
+#   $env:CARGO_HOME = "E:\DevData\cargo"
+#   $env:RUSTUP_HOME = "E:\DevData\rustup"
+#   cargo install sccache --locked --root "E:\DevData\cargo-tools"
+#   $env:Path = "E:\DevData\cargo-tools\bin;$env:Path"
+#   $env:SCCACHE_DIR = "E:\DevData\sccache"
+#   $env:RUSTC_WRAPPER = "sccache"
+#
+# Local Linux/macOS setup:
 #   cargo install sccache --locked
-#   export RUSTC_WRAPPER=sccache             # add to ~/.zshrc
-#   # Linux only, optional but worth it for the gateway crate:
-#   sudo apt-get install -y mold clang
-#   export RUSTFLAGS='-C link-arg=-fuse-ld=mold'
+#   export RUSTC_WRAPPER=sccache
 #
-# See docs/dev/build-fast.md for the full guide.
+# Faster linkers are intentionally configured through environment variables
+# or per-host Cargo config, not this repository file, because missing linkers
+# break first-time builds and cross-rs containers.
 #
-# Why so few keys? Earlier revisions hard-coded `linker = "clang"` and
-# `rustc-wrapper = "sccache"`, which broke first-time builds on hosts
-# that didn't have those tools and broke cross-rs containers that
-# don't carry clang. Lesson learnt: opt-in beats opt-out.
+# See docs/dev/build-fast.md for measured commands and rollback steps.

@@ -112,6 +112,11 @@ if [[ ${#TARGETS[@]} -eq 0 ]]; then
     )
 fi
 
+if [[ "$PROFILE" == "release-check" ]]; then
+    echo "release-check is a local validation profile and must not be packaged" >&2
+    exit 1
+fi
+
 # Filter jemalloc-under-QEMU spam from cross build output so progress
 # stays scannable. Compiling lines pass through; jemalloc lines drop.
 filter_noise() {

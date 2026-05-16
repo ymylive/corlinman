@@ -47,6 +47,17 @@ Next step: the owning agents for those crates run `cargo fmt --all` plus
 `cargo clippy --fix --workspace --all-targets --allow-dirty` once the
 M1-M5 beachhead merges.
 
+### rust-release-check — not added
+
+Skipped for now. Existing `rust-clippy` and `rust-test` jobs already use
+`Swatinem/rust-cache@v2`, and local `release-check` measurement is sufficient
+until CI timing shows a release-like compile gate is needed. On the 2026-05-16
+Windows workstation, `cargo build --profile release-check -p corlinman-gateway
+-p corlinman-cli` was accepted by Cargo but blocked before completion by the
+known `numkong v7.6.0` MSVC C compile failure and missing `protoc`, so adding a
+new advisory CI job now would expand signal surface before local validation is
+clean.
+
 ### 2. `python` — yellow
 
 Pipeline wiring: **green**. Python code: **yellow** (7 mypy + 17 ruff in

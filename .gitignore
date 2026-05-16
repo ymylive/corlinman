@@ -1,5 +1,6 @@
 # Rust
 /target/
+/.target-baseline/
 # Cross-compile target dirs (CARGO_TARGET_DIR set by scripts/build-release.sh
 # + .github/workflows/release.yml).
 /target-*-linux-gnu/

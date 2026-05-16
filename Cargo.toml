@@ -82,6 +82,17 @@ inherits = "release"
 codegen-units = 16
 lto = "thin"
 
+# Fast local release checks. This profile is intentionally opt-in:
+# it prioritizes compile latency over final binary size/runtime.
+# Do not use it for GA artifacts.
+[profile.release-check]
+inherits = "release"
+debug = 1
+lto = false
+codegen-units = 256
+incremental = true
+strip = "none"
+
 # Smaller dev cycle: incremental on, debug-info unpacked, no
 # opt-level=0 surprises (kept at 0 — anything higher slows the
 # inner edit-build loop without a corresponding correctness win).
