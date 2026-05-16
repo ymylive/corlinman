@@ -180,6 +180,39 @@ GitHub Actions cache key examples:
     key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 ```
 
+## Dependency and codegen observations
+
+Installed analysis tools into `E:\DevData\cargo-tools`:
+
+```powershell
+$env:CARGO_HOME = "E:\DevData\cargo"
+$env:RUSTUP_HOME = "E:\DevData\rustup"
+cargo install cargo-bloat cargo-llvm-lines --locked --root "E:\DevData\cargo-tools"
+```
+
+Attempted on Windows:
+
+```powershell
+$env:Path = "E:\DevData\cargo-tools\bin;$env:Path"
+cargo bloat --release --crates --bin corlinman-gateway
+cargo llvm-lines --release -p corlinman-gateway --bin corlinman-gateway
+```
+
+Both tools trigger a release build before they can report size or LLVM IR data.
+On this workstation they stop at the same pre-existing `numkong v7.6.0` MSVC C
+compile failure: `include\numkong/cast/serial.h(884): error C2059: syntax
+error: "if"`. `cargo llvm-lines` also requires an explicit package when run
+from the workspace root because the root `Cargo.toml` is a virtual manifest.
+
+Top size/codegen contributors:
+
+| Binary | Tool | Contributor | Observation | Action |
+| --- | --- | --- | --- | --- |
+| corlinman-gateway | cargo-bloat | not captured | blocked before binary build by `numkong` | observe only |
+| corlinman | cargo-bloat | not captured | skipped after same `numkong` blocker reproduced on gateway | observe only |
+| corlinman-gateway | cargo-llvm-lines | not captured | blocked before LLVM IR report by `numkong` | observe only |
+| corlinman | cargo-llvm-lines | not captured | skipped after same `numkong` blocker reproduced on gateway | observe only |
+
 ## 6. Cross-compile cheat sheet
 
 See `scripts/build-release.sh`. tl;dr: install `cross`
