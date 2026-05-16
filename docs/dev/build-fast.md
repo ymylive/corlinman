@@ -132,6 +132,28 @@ The actual `mingw32-make rust-build-fast` invocation reaches Cargo and then
 stops at the same pre-existing `numkong v7.6.0` MSVC C compile blocker:
 `include\numkong/cast/serial.h(884): error C2059: syntax error: "if"`.
 
+## `release-check` profile
+
+`release-check` is for local release-like compile checks when link time is the
+bottleneck. It disables LTO, raises codegen units, keeps incremental builds on,
+and keeps symbols. It is not a production packaging profile.
+
+```powershell
+cargo build --profile release-check -p corlinman-gateway -p corlinman-cli
+```
+
+Use this only for local validation that the two primary binaries still compile
+in an optimized profile. Use `release` for GA artifacts and `release-thin` for
+dogfood binaries.
+
+Task 4 validation on Windows confirmed Cargo accepts the profile and writes
+artifacts under `target\release-check\`, but the build does not complete on
+this host. It stops at the pre-existing `numkong v7.6.0` MSVC C compile blocker
+and also reports `Could not find protoc` from `corlinman-proto` because
+`protoc` is not currently on `PATH` or `PROTOC`. No `release-check` binaries
+were produced, so the `target\release-check\corlinman*.exe --help` smoke checks
+could not run.
+
 ## 5. CI cache hint
 
 GitHub Actions cache key examples:
