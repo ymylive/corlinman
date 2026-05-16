@@ -133,7 +133,11 @@ jobs:
           EOF
           ARCHIVE="corlinman-${VERSION}-${TARGET}.tar.gz"
           (cd dist && tar -czf "$ARCHIVE" "$(basename "$OUTDIR")")
-          (cd dist && shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256")
+          # AlmaLinux 8 (manylinux_2_28 base) ships `sha256sum` from
+          # coreutils, not the BSD `shasum` perl script. The output
+          # format is identical (`<hex>  <filename>`), so consumers
+          # using `shasum -a 256 -c` accept the resulting .sha256 file.
+          (cd dist && sha256sum "$ARCHIVE" > "$ARCHIVE.sha256")
           ls -lh dist/
 
       - name: Upload to release
