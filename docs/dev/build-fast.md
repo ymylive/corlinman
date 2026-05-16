@@ -233,6 +233,32 @@ then `cross build --release --target x86_64-unknown-linux-musl`.
 Keep target linker setup in the build image, CI runner, or per-host Cargo
 config unless it is available to every fresh checkout.
 
+## Rollback
+
+All build-speed changes in this plan are build-system only.
+
+To disable `sccache` for the current PowerShell session:
+
+```powershell
+Remove-Item Env:\RUSTC_WRAPPER -ErrorAction SilentlyContinue
+```
+
+To stop using the local validation profile, switch back to:
+
+```powershell
+cargo build
+cargo build --release -p corlinman-gateway -p corlinman-cli
+```
+
+To remove local baseline artifacts:
+
+```powershell
+Remove-Item -LiteralPath .target-baseline -Recurse -Force
+```
+
+Production release behavior remains controlled by the existing `release`
+profile and `make build`.
+
 ## Troubleshooting
 
 - **`error: linker 'clang' not found`** — install clang via your
