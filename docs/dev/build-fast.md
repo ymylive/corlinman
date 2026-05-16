@@ -9,6 +9,25 @@ brings dev-mode rebuilds under a minute and release builds to roughly
 The repo ships with [`.cargo/config.toml`](../../.cargo/config.toml)
 preconfigured. You only need to install the tools below.
 
+## Local baseline captured on 2026-05-16
+
+Host: Windows, PowerShell, Rust 1.95.0 (`x86_64-pc-windows-msvc`).
+
+| Command | Clean target? | Elapsed seconds | Result | Notes |
+| --- | --- | ---: | --- | --- |
+| `.\scripts\rust-build-baseline.ps1 -Profile dev -Clean` | yes | 26.51 | fail | Stops in `numkong v7.6.0` build script while compiling the `usearch` transitive C dependency with MSVC `cl.exe`; first fatal path is `include/numkong/cast/serial.h(884): error C2059: syntax error: "if"`. |
+
+The baseline script is still useful on Windows because it records elapsed time
+even when the build fails. The failure is a local toolchain blocker, not a
+change introduced by the script: `cargo build -p corlinman-vector` fails at the
+same `numkong` dependency. A GNU-target probe with the installed MinGW GCC 8
+also fails; with all x86 `NK_TARGET_*` SIMD probes disabled, GCC still hits an
+internal compiler error in `numkong.c`.
+
+Until the Windows C toolchain is upgraded or `numkong`/`usearch` changes, use
+Linux/macOS or CI runners for full Rust baseline numbers, and treat Windows
+results as "blocked before link" measurements.
+
 ## 1. Local build cache: `sccache`
 
 Caches the output of every `rustc` invocation keyed on inputs + flags.
