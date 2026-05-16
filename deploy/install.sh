@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # corlinman one-line installer.
 #
+# v0.6.7+: --mode native now works on Debian 11+ / Ubuntu 20.04+ /
+# RHEL 8+ thanks to the manylinux_2_28 (glibc 2.28) baseline build.
+# Previously (v0.6.0 - v0.6.6) --mode docker was the only portable
+# option on distros older than Ubuntu 24.04.
+#
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/ymylive/corlinman/main/deploy/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/ymylive/corlinman/main/deploy/install.sh | bash -s -- --mode docker
