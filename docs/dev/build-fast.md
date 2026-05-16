@@ -30,22 +30,41 @@ results as "blocked before link" measurements.
 
 ## 1. Local build cache: `sccache`
 
-Caches the output of every `rustc` invocation keyed on inputs + flags.
-First build of any crate populates the cache; subsequent builds (even
-on a `git switch`) re-use the artifacts.
+`sccache` is optional. It caches `rustc` outputs by input hash, so it helps
+most after the first build, across branch switches, and when CI restores the
+cache. The repo does not hard-code `rustc-wrapper`; use environment variables
+so fresh checkouts and cross builds never fail because `sccache` is missing.
+
+Windows on this workstation:
+
+```powershell
+$env:CARGO_HOME = "E:\DevData\cargo"
+$env:RUSTUP_HOME = "E:\DevData\rustup"
+cargo install sccache --locked --root "E:\DevData\cargo-tools"
+$env:Path = "E:\DevData\cargo-tools\bin;$env:Path"
+$env:SCCACHE_DIR = "E:\DevData\sccache"
+$env:RUSTC_WRAPPER = "sccache"
+sccache --show-stats
+```
+
+Linux/macOS:
 
 ```bash
 cargo install sccache --locked
-```
-
-Optional: point sccache at S3 / Redis for shared CI cache. Defaults
-fine for solo work.
-
-Verify:
-
-```bash
+export RUSTC_WRAPPER=sccache
 sccache --show-stats
 ```
+
+Rollback:
+
+```powershell
+Remove-Item Env:\RUSTC_WRAPPER -ErrorAction SilentlyContinue
+```
+
+Task 2 validation on Windows confirmed `sccache` is invoked with
+`RUSTC_WRAPPER=sccache`. With `SCCACHE_DIR=E:\DevData\sccache`, stats reported
+`Cache location Local disk: "E:\\DevData\\sccache"`. The Rust build still stops
+at the pre-existing `numkong` C compile blocker described above.
 
 ## 2. Faster linker
 
