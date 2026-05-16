@@ -14,7 +14,12 @@ from corlinman_agent_brain.index_sync import (
     IndexSyncClient,
     IndexSyncConfig,
 )
-from corlinman_agent_brain.runner import NullRetrievalProvider, curate_session
+from corlinman_agent_brain.link_planner import RetrievalProvider
+from corlinman_agent_brain.runner import (
+    NullRetrievalProvider,
+    curate_session,
+    memoryhost_retrieval,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,7 +71,7 @@ async def async_main(argv: list[str] | None = None) -> int:
             )
 
         sync_client = None
-        retrieval = NullRetrievalProvider()
+        retrieval: RetrievalProvider = NullRetrievalProvider()
         if args.memory_base_url:
             sync_config = IndexSyncConfig(
                 base_url=args.memory_base_url,
@@ -76,7 +81,10 @@ async def async_main(argv: list[str] | None = None) -> int:
                 HttpxTransport(timeout_ms=sync_config.timeout_ms),
                 sync_config,
             )
-            retrieval = sync_client
+            # IndexSyncClient structurally implements RetrievalProvider; route
+            # through the named adapter so mypy doesn't complain about
+            # `retrieval` being narrowed to NullRetrievalProvider at line 69.
+            retrieval = memoryhost_retrieval(sync_client)
 
         report = await curate_session(
             session_id=args.session_id,
