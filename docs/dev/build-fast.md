@@ -1,5 +1,12 @@
 # Faster Rust builds
 
+> **CI release pipeline (since v0.6.7):** the Linux x86_64 release
+> tarball is built inside the `quay.io/pypa/manylinux_2_28_x86_64`
+> container so it links against glibc 2.28 — portable across Debian 11+,
+> Ubuntu 20.04+, RHEL/AlmaLinux/Rocky 8+. The notes below cover **local**
+> builds only; for the CI build matrix and the glibc baseline check see
+> [`.github/workflows/release.yml`](../../.github/workflows/release.yml).
+
 corlinman's Rust workspace is 30+ crates; a cold `cargo build --release`
 can spend 5–10 minutes mostly on link time and on recompiling unchanged
 dependencies. This page describes the one-time toolchain setup that

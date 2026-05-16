@@ -105,28 +105,32 @@ Deep dive: [`docs/architecture.md`](docs/architecture.md).
 
 ### Fastest: one-line installer (recommended)
 
-```bash
-# Prebuilt binary + docker compose for newapi sidecar. Detects arch,
-# verifies checksums, runs as systemd unit (native mode) or compose
-# stack (docker mode).
-#
-# Supported prebuilt platforms: Linux x86_64, macOS aarch64.
-# Linux aarch64 (Graviton/Ampere) is source-build only for now —
-# upstream numkong NEON SDOT cross-compile blocker; the installer
-# exits cleanly with a `cargo build --release` instruction on that
-# arch.
-curl -fsSL https://raw.githubusercontent.com/ymylive/corlinman/main/deploy/install.sh \
-  | bash -s -- --mode docker
-```
+Two install paths, same `install.sh`, same onboarding wizard at the end.
+As of **v0.6.7** the prebuilt Linux x86_64 binary is built inside
+`manylinux_2_28` (glibc 2.28 baseline), so the **native** mode works on
+every currently-supported mainstream Linux distro — Docker is no longer
+the only portable option.
 
-On first run the installer points your browser at
-`http://localhost:6005/onboard` for the 4-step wizard: admin
+| Path | One-liner | Where it runs | When to pick it |
+| --- | --- | --- | --- |
+| **Pre-built binary (`--mode native`)** | `curl -fsSL https://raw.githubusercontent.com/ymylive/corlinman/main/deploy/install.sh \| bash -s -- --mode native` | Debian 11+, Ubuntu 20.04+, RHEL/AlmaLinux/Rocky 8+ (glibc ≥ 2.28); macOS aarch64. Installs to `/opt/corlinman/bin`, runs under `systemd`. No Docker on the host. | You want the smallest footprint, native systemd integration, and a single binary you can audit. |
+| **Pre-built docker image (`--mode docker`)** | `curl -fsSL https://raw.githubusercontent.com/ymylive/corlinman/main/deploy/install.sh \| bash -s -- --mode docker` | Anywhere Docker Engine 24+ with the compose v2 plugin runs. Pulls `ghcr.io/ymylive/corlinman:<tag>` and brings up corlinman + newapi together. | You want container isolation, you're on a distro with an unusual or pre-2.28 glibc, or you already manage everything via compose. |
+
+> Heads up: **Linux aarch64** (Graviton / Ampere) prebuilts are not yet
+> published — upstream numkong NEON SDOT cross-compile blocker. The
+> installer exits cleanly with a `cargo build --release` instruction on
+> that arch. Use source build (`scripts/build-release.sh`) or the docker
+> image (multi-arch, includes `linux/arm64`).
+
+On first run either path opens
+`http://localhost:6005/onboard` — the 4-step wizard: admin
 account → newapi connection (token + base URL) → pick default
 LLM / embedding / TTS models → confirm. The wizard writes a
 complete `config.toml` atomically.
 
-For a fully-native install with no Docker, swap `--mode docker` for
-`--mode native`. See [`deploy/install.sh`](deploy/install.sh).
+See [`deploy/install.sh`](deploy/install.sh) for environment overrides
+(`CORLINMAN_VERSION`, `CORLINMAN_PREFIX`, `CORLINMAN_DATA_DIR`,
+`CORLINMAN_PORT`).
 
 ### From source
 
