@@ -213,6 +213,18 @@ Top size/codegen contributors:
 | corlinman-gateway | cargo-llvm-lines | not captured | blocked before LLVM IR report by `numkong` | observe only |
 | corlinman | cargo-llvm-lines | not captured | skipped after same `numkong` blocker reproduced on gateway | observe only |
 
+## Validation after build-speed changes
+
+| Command | Result | Notes |
+| --- | --- | --- |
+| `cargo fmt --all -- --check` | pass | exits 0 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | fail | blocked before Rust lint results by `numkong v7.6.0`; MSVC first fatal error is `include\numkong/cast/serial.h(884): error C2059: syntax error: "if"` |
+| `cargo nextest run --workspace` | fail | `cargo-nextest v0.9.135` installed into `E:\DevData\cargo-tools`; test compile then blocks at the same `numkong v7.6.0` MSVC C compile failure |
+| `cargo build --profile release-thin -p corlinman-gateway -p corlinman-cli` | fail | blocked at the same `numkong v7.6.0` MSVC C compile failure before link or binary output |
+| `.\target\release-thin\corlinman.exe --help` | fail | not run because `target\release-thin\corlinman.exe` was not produced |
+| `.\target\release-thin\corlinman-gateway.exe --help` | fail | not run because `target\release-thin\corlinman-gateway.exe` was not produced |
+| `cargo build --release -p corlinman-gateway -p corlinman-cli` | fail | production profile remains unchanged; build is blocked at the same pre-existing `numkong v7.6.0` MSVC C compile failure |
+
 ## 6. Cross-compile cheat sheet
 
 See `scripts/build-release.sh`. tl;dr: install `cross`
