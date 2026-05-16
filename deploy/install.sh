@@ -157,7 +157,10 @@ install_native() {
     tmp="$(mktemp -d)"
     curl -fsSL "$url" -o "$tmp/$tarball"
 
-    if [[ -f "$url.sha256" ]] || curl -fsSI "$url.sha256" >/dev/null 2>&1; then
+    # `[[ -f "$url" ]]` always returns false on a URL string — the
+    # previous code accidentally relied on the HEAD-probe fallback.
+    # Drop the dead branch; HEAD-probe is the only meaningful check.
+    if curl -fsSI "$url.sha256" >/dev/null 2>&1; then
         curl -fsSL "$url.sha256" -o "$tmp/$tarball.sha256"
         (cd "$tmp" && shasum -a 256 -c "$tarball.sha256") || die "checksum mismatch"
     else
@@ -167,9 +170,12 @@ install_native() {
     log "installing to $PREFIX/bin"
     sudo mkdir -p "$PREFIX/bin" "$DATA_DIR"
     sudo tar -xzf "$tmp/$tarball" -C "$tmp"
-    sudo cp "$tmp"/corlinman-*/corlinman-gateway "$PREFIX/bin/"
-    sudo cp "$tmp"/corlinman-*/corlinman          "$PREFIX/bin/"
-    sudo cp "$tmp"/corlinman-*/corlinman-mcp      "$PREFIX/bin/" || true
+    # Copy every binary release.yml packages. Names must stay in sync
+    # with the `for b in …; do cp … done` loop in
+    # .github/workflows/release.yml's Package step.
+    for bin in corlinman-gateway corlinman corlinman-auto-rollback corlinman-shadow-tester; do
+        sudo cp "$tmp"/corlinman-*/"$bin" "$PREFIX/bin/"
+    done
 
     if [[ "$os" == "linux" ]]; then
         log "writing systemd unit"
