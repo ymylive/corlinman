@@ -27,13 +27,26 @@ env:
 
 jobs:
   build-x86_64-linux:
-    name: Build x86_64-linux-gnu (native)
-    # ubuntu-latest = 24.04 (gcc 13 + binutils 2.42) — needed for
-    # numkong's AVX-512/AMX intrinsics. Resulting binary links against
-    # glibc 2.39, so the prebuilt **does not load on Debian 12**
-    # (glibc 2.36) via deploy/install.sh --mode native; for older
-    # distros use --mode docker (the runtime image stays bookworm).
+    name: Build x86_64-linux-gnu (manylinux_2_28, portable)
+    # Build inside the manylinux_2_28 container so the resulting binary
+    # links against glibc 2.28 (AlmaLinux 8). That's portable to every
+    # currently-supported Linux distro that matters:
+    #   - Debian 11 / 12 / 13  (glibc 2.31 / 2.36 / 2.38+)
+    #   - Ubuntu 20.04 / 22.04 / 24.04 (glibc 2.31 / 2.35 / 2.39)
+    #   - RHEL 8 / 9 / 10  (glibc 2.28 / 2.34 / 2.39)
+    # The container also ships gcc 14 + binutils 2.40+, which together
+    # are new enough to compile numkong's AVX-512 / AMX-FP16 intrinsics
+    # — that's why we can't just downgrade the runner image to ubuntu-22.04
+    # (gcc 11 / binutils 2.38 don't know `tdpfp16ps` etc.).
+    #
+    # End result: ONE binary that works for both deploy paths —
+    # `install.sh --mode native` (extract + run) AND inside the ghcr
+    # runtime image. Operators on old + new distros all get a working
+    # prebuilt; the docker image is now a convenience, not a hard
+    # requirement.
     runs-on: ubuntu-latest
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64
     permissions:
       contents: write
     steps:
@@ -46,14 +59,23 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target-x86_64-linux-gnu
-          key: cargo-x86_64-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-x86_64-manylinux_2_28-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-x86_64-${{ runner.os }}-
+            cargo-x86_64-manylinux_2_28-
+
+      - name: Install Rust 1.95.0
+        run: |
+          # manylinux ships rustup-init via system; reinstall to ensure 1.95.0.
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain 1.95.0 --profile minimal \
+                --component rustfmt,clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install build prerequisites
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          # manylinux_2_28 is AlmaLinux 8 base; protobuf-compiler lives in EPEL.
+          dnf install -y protobuf-compiler protobuf-devel || \
+            dnf install -y --enablerepo=powertools,epel protobuf-compiler protobuf-devel
 
       - name: Resolve version + tag
         id: meta
@@ -66,11 +88,32 @@ jobs:
       - name: Build release binaries
         run: |
           export CARGO_TARGET_DIR=target-x86_64-linux-gnu
+          export PATH="$HOME/.cargo/bin:$PATH"
           cargo build --release --target x86_64-unknown-linux-gnu \
             --bin corlinman-gateway \
             --bin corlinman \
             --bin corlinman-auto-rollback \
             --bin corlinman-shadow-tester
+
+      - name: Verify glibc baseline
+        # Sanity check: the binary must NOT require any glibc symbol
+        # newer than 2.28. If it does, the manylinux image leaked a
+        # post-2.28 dep into the link and we ship an unportable artifact.
+        run: |
+          for b in corlinman-gateway corlinman corlinman-auto-rollback corlinman-shadow-tester; do
+            highest=$(objdump -T "target-x86_64-linux-gnu/x86_64-unknown-linux-gnu/release/$b" \
+              | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+              | sort -V | tail -1 || true)
+            echo "$b -> max glibc symbol: ${highest:-none}"
+            if [ -n "$highest" ]; then
+              major=$(echo "$highest" | sed -E 's/GLIBC_([0-9]+)\..*/\1/')
+              minor=$(echo "$highest" | sed -E 's/GLIBC_[0-9]+\.([0-9]+).*/\1/')
+              if [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -gt 28 ]; }; then
+                echo "::error::$b requires $highest which exceeds the manylinux_2_28 baseline (glibc 2.28)"
+                exit 1
+              fi
+            fi
+          done
 
       - name: Package
         run: |
