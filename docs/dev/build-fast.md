@@ -6,8 +6,9 @@ dependencies. This page describes the one-time toolchain setup that
 brings dev-mode rebuilds under a minute and release builds to roughly
 2–3 minutes.
 
-The repo ships with [`.cargo/config.toml`](../../.cargo/config.toml)
-preconfigured. You only need to install the tools below.
+The repo keeps [`.cargo/config.toml`](../../.cargo/config.toml) portable.
+Optional acceleration tools are enabled from your shell environment or
+per-host Cargo config so a fresh checkout does not require them.
 
 ## Local baseline captured on 2026-05-16
 
@@ -79,8 +80,9 @@ sudo apt-get install -y mold clang   # debian/ubuntu
 sudo dnf install -y mold clang       # fedora
 ```
 
-`.cargo/config.toml` already wires `-fuse-ld=mold` for the standard
-GNU + musl targets.
+Enable `mold` from your shell or a per-host Cargo config, for example by
+setting `RUSTFLAGS="-C link-arg=-fuse-ld=mold"` for local native builds. Do not
+commit host-specific linker requirements to the repo config.
 
 ### macOS
 
@@ -110,6 +112,26 @@ cargo build --profile release-thin -p corlinman-gateway
 Trade-off: ~5% runtime perf vs the GA `release` profile, but 50%
 faster to build.
 
+## Build command choice
+
+Use `cargo build` for edit/compile/test loops.
+
+Use `make rust-build-fast` when you need release-like binaries for local
+dogfooding and do not need GA packaging. It uses `release-thin`, which keeps
+ThinLTO but raises `codegen-units` to improve build latency.
+
+Use `make build` or `cargo build --release -p corlinman-gateway -p corlinman-cli`
+for production release checks. This path remains unchanged.
+
+Task 3 validation on Windows used `mingw32-make` because `make` is not on this
+PowerShell `PATH`. `mingw32-make -n build` still expands to the unchanged
+production release command, followed by `uv sync --frozen --no-dev` and
+`pnpm -C ui build`. `mingw32-make -n rust-build-fast` expands to
+`cargo build --profile release-thin -p corlinman-gateway -p corlinman-cli`.
+The actual `mingw32-make rust-build-fast` invocation reaches Cargo and then
+stops at the same pre-existing `numkong v7.6.0` MSVC C compile blocker:
+`include\numkong/cast/serial.h(884): error C2059: syntax error: "if"`.
+
 ## 5. CI cache hint
 
 GitHub Actions cache key examples:
@@ -130,14 +152,14 @@ GitHub Actions cache key examples:
 See `scripts/build-release.sh`. tl;dr: install `cross`
 (`cargo install cross --git https://github.com/cross-rs/cross`),
 then `cross build --release --target x86_64-unknown-linux-musl`.
-The repo's `.cargo/config.toml` wires the linker per target.
+Keep target linker setup in the build image, CI runner, or per-host Cargo
+config unless it is available to every fresh checkout.
 
 ## Troubleshooting
 
 - **`error: linker 'clang' not found`** — install clang via your
-  package manager or replace `linker = "clang"` in
-  `.cargo/config.toml` with the linker you have. Native cargo
-  defaults still work.
+  package manager or remove the local linker override from your shell
+  environment or per-host Cargo config. Native cargo defaults still work.
 - **`-fuse-ld=mold: command not found`** — install mold; or drop
   the rustflags line under the affected `[target.*]` section.
 - **sccache reports 0% hit rate** — first warm-up; or you switched

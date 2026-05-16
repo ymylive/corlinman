@@ -1,11 +1,12 @@
 # corlinman root Makefile. Keep thin — real logic in scripts/ or cargo/uv/pnpm.
 .DEFAULT_GOAL := help
-.PHONY: help dev build test lint fmt proto docker ci clean
+.PHONY: help dev build rust-build-fast test lint fmt proto docker ci clean
 
 help:
 	@echo "corlinman make targets:"
 	@echo "  dev      one-shot developer bootstrap (hooks, rust, uv, pnpm, proto)"
 	@echo "  build    cargo + uv + pnpm production builds"
+	@echo "  rust-build-fast  Rust dogfood build using the faster release-thin profile"
 	@echo "  test     cargo nextest + pytest (non-live) + pnpm test"
 	@echo "  lint     fmt check + clippy -D warnings + ruff + mypy + ui typecheck"
 	@echo "  fmt      cargo fmt + ruff format"
@@ -20,6 +21,9 @@ build:
 	cargo build --release -p corlinman-gateway -p corlinman-cli
 	uv sync --frozen --no-dev
 	pnpm -C ui build
+
+rust-build-fast:
+	cargo build --profile release-thin -p corlinman-gateway -p corlinman-cli
 
 test:
 	cargo nextest run --workspace
