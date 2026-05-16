@@ -154,6 +154,17 @@ and also reports `Could not find protoc` from `corlinman-proto` because
 were produced, so the `target\release-check\corlinman*.exe --help` smoke checks
 could not run.
 
+`scripts/build-release.sh` rejects `--profile release-check` on purpose.
+That profile is for local compile validation only and must not produce
+operator-facing archives.
+
+Task 5 validation on Windows: `bash -n scripts/build-release.sh` passes.
+`bash scripts/build-release.sh --profile release-check macos-aarch64` exits
+non-zero before building and prints the guard message. `bash
+scripts/build-release.sh --profile release-thin macos-aarch64` is not blocked
+by the guard; it reaches Cargo and then fails because the local Rust toolchain
+does not have `aarch64-apple-darwin` installed.
+
 ## 5. CI cache hint
 
 GitHub Actions cache key examples:
