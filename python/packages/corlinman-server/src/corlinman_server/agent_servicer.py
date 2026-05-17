@@ -66,6 +66,8 @@ from corlinman_providers import registry as provider_registry
 from corlinman_providers.base import CorlinmanProvider, ProviderChunk
 from corlinman_providers.specs import AliasEntry
 
+from corlinman_server.runner_pool import PoolStats, RunnerPool
+
 logger = structlog.get_logger(__name__)
 
 #: Tool names dispatched in-process by the servicer rather than routed
@@ -150,6 +152,16 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
         # pays for an empty sqlite file.
         self._builtin_agents: AgentCardRegistry | None = None
         self._blackboard_store: BlackboardStore | None = None
+        # v0.7.1 warm pool. Operators can call ``prewarm_providers`` at
+        # boot to resolve known aliases before the first user request;
+        # the SDK auth handshake then happens off the hot path. The
+        # per-chat path itself still delegates to the provider
+        # registry's existing memoisation — the pool is the lever for
+        # per-tenant / sandboxed providers in v0.8+.
+        self._provider_pool: RunnerPool[CorlinmanProvider] = RunnerPool(
+            max_warm_per_key=int(os.environ.get("CORLINMAN_RUNNER_POOL_WARM", "2")),
+            max_active_total=int(os.environ.get("CORLINMAN_RUNNER_POOL_MAX", "8")),
+        )
 
     async def Chat(  # noqa: N802 — gRPC method name
         self,
@@ -250,6 +262,43 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
             inbound_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await inbound_task
+
+    # ─── v0.7.1 warm pool surface ─────────────────────────────────────
+
+    def prewarm_providers(self, model_names: list[str] | tuple[str, ...]) -> None:
+        """Resolve the configured provider for each model name at boot
+        and park it warm in the pool. Operators wire this in
+        ``main.py`` immediately after constructing the servicer so the
+        first user request doesn't pay the SDK init cost.
+
+        Resolution errors (missing alias, bad config) are logged and
+        skipped — pre-warming is best-effort. The servicer keeps
+        running with the cold path intact.
+        """
+        for name in model_names:
+            try:
+                provider, upstream_model, _ = _call_resolver(
+                    self._resolve, name, self._aliases
+                )
+            except Exception as exc:
+                logger.warning(
+                    "agent.chat.prewarm_failed",
+                    model=name,
+                    error=str(exc),
+                )
+                continue
+            key = (name, upstream_model)
+            self._provider_pool.prewarm(key, lambda p=provider: p)
+            logger.info(
+                "agent.chat.prewarm_succeeded",
+                model=name,
+                upstream_model=upstream_model,
+            )
+
+    def pool_stats(self) -> PoolStats:
+        """Snapshot of the provider pool counters. Surfaced for
+        operator tooling (admin UI, ``corlinman doctor``)."""
+        return self._provider_pool.stats()
 
     async def _dispatch_builtin(
         self,

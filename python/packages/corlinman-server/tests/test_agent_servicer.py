@@ -477,3 +477,181 @@ async def test_servicer_builtin_tool_unknown_envelope() -> None:
     )
     payload = json.loads(result_json)
     assert "error" in payload
+
+
+@pytest.mark.asyncio
+async def test_servicer_dispatches_spawn_many_round_trip(
+    tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end smoke for v0.7 fan-out: a spawn_many ToolCallEvent
+    flows through _dispatch_builtin, dispatches two siblings, and
+    returns a ``{"tasks": [TaskResult, TaskResult]}`` envelope.
+
+    Uses a stateful agent registry pre-populated with `researcher` and
+    `editor` so the per-sibling dispatch can resolve the child cards.
+    """
+    from corlinman_agent.agents.card import AgentCard
+    from corlinman_agent.agents.registry import AgentCardRegistry
+    from corlinman_agent.reasoning_loop import ChatStart, ToolCallEvent
+    from corlinman_server.agent_servicer import CorlinmanAgentServicer
+
+    monkeypatch.setenv("CORLINMAN_DATA_DIR", str(tmp_path))
+
+    servicer = CorlinmanAgentServicer(provider_resolver=lambda _m: _FakeProvider([]))
+    # Inject the agent registry directly; the lazy loader would otherwise
+    # try to read `agents/*.yaml` from CORLINMAN_DATA_DIR which is empty here.
+    servicer._builtin_agents = AgentCardRegistry(
+        {
+            "researcher": AgentCard(
+                name="researcher", description="", system_prompt="you research"
+            ),
+            "editor": AgentCard(
+                name="editor", description="", system_prompt="you edit"
+            ),
+        }
+    )
+
+    # Per-sibling provider: each child gets one chat_stream call that
+    # streams a single token + done(stop). The same instance is shared
+    # across siblings because the dispatch path doesn't care.
+    provider = _FakeProvider(_token_stream(["did the work"]))
+
+    start = ChatStart(
+        model="orchestrator",
+        messages=[],
+        tools=[],
+        session_key="tenant-a::sess-1",
+    )
+    args = json.dumps(
+        {
+            "tasks": [
+                {"agent": "researcher", "goal": "find papers on X"},
+                {"agent": "editor", "goal": "tighten the prose"},
+            ]
+        }
+    )
+    event = ToolCallEvent(
+        call_id="spawn-1",
+        plugin="subagent",
+        tool="subagent.spawn_many",
+        args_json=args.encode(),
+    )
+    result_json = await servicer._dispatch_builtin(event, start, provider)
+    payload = json.loads(result_json)
+    assert "error" not in payload, "fan-out happy path must elide outer error"
+    assert len(payload["tasks"]) == 2
+    # Order preserved from input.
+    assert payload["tasks"][0]["child_session_key"].endswith("::child::0")
+    assert payload["tasks"][1]["child_session_key"].endswith("::child::1")
+    # Both stopped cleanly.
+    for sibling in payload["tasks"]:
+        assert sibling["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_servicer_threads_parent_tools_into_spawn(
+    tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``start.tools`` (the parent's full tool schema list) must reach
+    the per-sibling dispatch so the child's allowlist filter can
+    intersect against the parent's set. The contract is "child cannot
+    request a tool the parent doesn't hold". This locks the wiring
+    at the servicer boundary so a regression that drops ``start.tools``
+    on the floor would surface here, not on a live deployment."""
+    from corlinman_agent.agents.card import AgentCard
+    from corlinman_agent.agents.registry import AgentCardRegistry
+    from corlinman_agent.reasoning_loop import ChatStart, ToolCallEvent
+    from corlinman_server.agent_servicer import CorlinmanAgentServicer
+
+    monkeypatch.setenv("CORLINMAN_DATA_DIR", str(tmp_path))
+    servicer = CorlinmanAgentServicer(provider_resolver=lambda _m: _FakeProvider([]))
+    servicer._builtin_agents = AgentCardRegistry(
+        {"researcher": AgentCard(name="researcher", description="", system_prompt="r")}
+    )
+
+    parent_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "web.search",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    start = ChatStart(
+        model="m",
+        messages=[],
+        tools=parent_tools,
+        session_key="s",
+    )
+    # The child requests a tool the parent does NOT hold ("file.read").
+    # If start.tools threads through correctly, the runner's allowlist
+    # filter rejects the spawn with ``tool_allowlist_escalation``.
+    args = json.dumps(
+        {
+            "agent": "researcher",
+            "goal": "x",
+            "tool_allowlist": ["file.read"],
+        }
+    )
+    event = ToolCallEvent(
+        call_id="c",
+        plugin="subagent",
+        tool="subagent.spawn",
+        args_json=args.encode(),
+    )
+    result_json = await servicer._dispatch_builtin(
+        event, start, _FakeProvider([])
+    )
+    payload = json.loads(result_json)
+    # The escalation reject proves parent_tools flowed through; if
+    # ``start.tools`` had been dropped, the filter would have seen an
+    # empty parent set and the child would have just inherited (silent
+    # success with no tools).
+    assert payload["finish_reason"] == "rejected"
+    assert "tool_allowlist_escalation" in payload["error"]
+
+
+# ---------------------------------------------------------------------------
+# v0.7.1 warm pool: prewarm_providers surface
+# ---------------------------------------------------------------------------
+
+
+def test_servicer_prewarm_providers_populates_pool() -> None:
+    """``prewarm_providers`` resolves each model name via the
+    configured resolver and parks the result in the pool. We assert
+    on the pool stats since the resolver's return value is opaque
+    to the servicer's hot path."""
+    from corlinman_server.agent_servicer import CorlinmanAgentServicer
+
+    resolved_calls: list[str] = []
+
+    def resolver(model: str) -> Any:
+        resolved_calls.append(model)
+        return _FakeProvider(_token_stream(["ok"]))
+
+    servicer = CorlinmanAgentServicer(provider_resolver=resolver)
+    servicer.prewarm_providers(["alpha", "beta", "gamma"])
+
+    # All three resolutions happened at boot, not at first chat.
+    assert resolved_calls == ["alpha", "beta", "gamma"]
+    s = servicer.pool_stats()
+    assert s.warm_count == 3
+    assert s.misses == 0  # prewarm does not count as a miss
+
+
+def test_servicer_prewarm_swallows_resolution_errors() -> None:
+    """An unresolved alias must not crash the boot — the failed entry
+    is skipped, others succeed."""
+    from corlinman_server.agent_servicer import CorlinmanAgentServicer
+
+    def resolver(model: str) -> Any:
+        if model == "bad":
+            raise KeyError(model)
+        return _FakeProvider([])
+
+    servicer = CorlinmanAgentServicer(provider_resolver=resolver)
+    servicer.prewarm_providers(["good", "bad", "also-good"])
+    s = servicer.pool_stats()
+    # Only the two good ones landed warm.
+    assert s.warm_count == 2
