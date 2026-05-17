@@ -46,3 +46,7 @@ dist/
 
 # Design assets (mockups, palettes, screenshots) — kept locally / external store
 /_design/
+
+# Local deploy/test env files (compose reads .env, but its contents are
+# operator-specific secrets — keep them out of the repo).
+/.env

@@ -946,6 +946,70 @@ export function fetchBudget(): Promise<BudgetSnapshot> {
 
 
 // ---------------------------------------------------------------------------
+// Wave 2.3 — Credentials manager (EnvPage-style provider grouping)
+//
+// Mirrors `/admin/credentials*` on the gateway. Reads/writes string fields
+// inside `[providers.<name>]` blocks in config.toml. Plaintext values are
+// NEVER returned from the server — `preview` is a "…last4" tail when the
+// stored value is a literal, otherwise null. `env_ref` surfaces the
+// conventional env-var name (or the actual `{ env = "X" }` override the
+// operator wrote, if any).
+// ---------------------------------------------------------------------------
+
+export interface CredentialField {
+  key: string;
+  set: boolean;
+  preview: string | null;
+  env_ref: string | null;
+}
+
+export interface CredentialProvider {
+  name: string;
+  kind: string;
+  enabled: boolean;
+  fields: CredentialField[];
+}
+
+export interface CredentialsListResponse {
+  providers: CredentialProvider[];
+}
+
+export function listCredentials(): Promise<CredentialsListResponse> {
+  return apiFetch<CredentialsListResponse>("/admin/credentials");
+}
+
+export function setCredential(
+  provider: string,
+  key: string,
+  value: string,
+): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>(
+    `/admin/credentials/${encodeURIComponent(provider)}/${encodeURIComponent(key)}`,
+    { method: "PUT", body: { value } },
+  );
+}
+
+export function deleteCredential(
+  provider: string,
+  key: string,
+): Promise<void> {
+  return apiFetch<void>(
+    `/admin/credentials/${encodeURIComponent(provider)}/${encodeURIComponent(key)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function setProviderEnabled(
+  provider: string,
+  enabled: boolean,
+): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>(
+    `/admin/credentials/${encodeURIComponent(provider)}/enable`,
+    { method: "POST", body: { enabled } },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // newapi connector — both /admin/newapi (post-onboard) and the
 // /admin/onboard/newapi/* stateless wizard endpoints.
 // ---------------------------------------------------------------------------
@@ -1052,4 +1116,303 @@ export function finalizeOnboard(body: OnboardFinalizeBody): Promise<{
     method: "POST",
     body,
   });
+}
+
+/**
+ * `POST /admin/onboard/finalize-skip` (Wave 2.1 + 2.2).
+ *
+ * Idempotent shortcut for "I don't have a real LLM yet — bootstrap me with
+ * the mock provider so I can poke around the console". Writes
+ * `[providers.mock] enabled = true` and `[models].default = "mock"` to
+ * config.toml. Returns `{status:"ok",mode:"mock"}` on success.
+ */
+export function finalizeSkipOnboard(): Promise<{
+  status: string;
+  mode: string;
+}> {
+  return apiFetch("/admin/onboard/finalize-skip", {
+    method: "POST",
+  });
+}
+
+// --- profiles (W3.1 + W3.2) -------------------------------------------------
+//
+// CRUD over `/admin/profiles`. The wire shape is defined by
+// ``routes_admin_a/profiles.py`` (FastAPI ``ProfileOut``).
+//
+// Server quirk: ``GET /admin/profiles`` returns a *bare list* (FastAPI
+// ``response_model=list[ProfileOut]``), not the ``{profiles: [...]}``
+// envelope you'd get from a more elaborate paginated endpoint. We wrap
+// it client-side so callers don't have to know that detail.
+
+/** Wire shape of one profile row. Mirrors backend ``ProfileOut``. */
+export interface Profile {
+  slug: string;
+  display_name: string;
+  parent_slug: string | null;
+  description: string | null;
+  /** ISO-8601 UTC with a ``Z`` suffix. */
+  created_at: string;
+}
+
+export interface CreateProfileBody {
+  slug: string;
+  display_name?: string;
+  /** Slug of a parent profile to clone SOUL/MEMORY/USER/skills from. */
+  clone_from?: string;
+  description?: string;
+}
+
+export interface UpdateProfileBody {
+  display_name?: string;
+  description?: string;
+}
+
+/** List every profile. */
+export async function listProfiles(): Promise<{ profiles: Profile[] }> {
+  // Backend returns a bare list — wrap into ``{profiles}`` envelope so
+  // the rest of the app can treat the response uniformly.
+  const profiles = await apiFetch<Profile[]>("/admin/profiles");
+  return { profiles };
+}
+
+/** Create one profile (optionally cloning a parent). */
+export function createProfile(body: CreateProfileBody): Promise<Profile> {
+  return apiFetch<Profile>("/admin/profiles", {
+    method: "POST",
+    body,
+  });
+}
+
+/** Fetch one profile by slug. */
+export function getProfile(slug: string): Promise<Profile> {
+  return apiFetch<Profile>(`/admin/profiles/${encodeURIComponent(slug)}`);
+}
+
+/** Partial update — pass only the fields you want to change. */
+export function updateProfile(
+  slug: string,
+  patch: UpdateProfileBody,
+): Promise<Profile> {
+  return apiFetch<Profile>(`/admin/profiles/${encodeURIComponent(slug)}`, {
+    method: "PATCH",
+    body: patch,
+  });
+}
+
+/** Delete one profile. Throws 409 ``profile_protected`` for ``default``. */
+export function deleteProfile(slug: string): Promise<void> {
+  return apiFetch<void>(`/admin/profiles/${encodeURIComponent(slug)}`, {
+    method: "DELETE",
+  });
+}
+
+/** Read the persona markdown. Empty string when the file is missing. */
+export function getProfileSoul(
+  slug: string,
+): Promise<{ content: string }> {
+  return apiFetch<{ content: string }>(
+    `/admin/profiles/${encodeURIComponent(slug)}/soul`,
+  );
+}
+
+/** Atomic-write the persona markdown. */
+export function setProfileSoul(
+  slug: string,
+  content: string,
+): Promise<{ content: string }> {
+  return apiFetch<{ content: string }>(
+    `/admin/profiles/${encodeURIComponent(slug)}/soul`,
+    {
+      method: "PUT",
+      body: { content },
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Wave 4.6 — Curator UI surface
+//
+// Mirrors `gateway/routes_admin_b/curator.py`. Seven endpoints behind
+// `/admin/curator/*` drive the new evolution / curator surface: list
+// profiles + thresholds, preview / run the deterministic lifecycle pass,
+// pause / resume, edit thresholds, list skills with state + origin
+// badges, pin / unpin. The shapes below mirror the pydantic models
+// exactly so the wire stays self-describing.
+// ---------------------------------------------------------------------------
+
+export type CuratorSkillState = "active" | "stale" | "archived";
+export type CuratorSkillOrigin =
+  | "bundled"
+  | "user-requested"
+  | "agent-created";
+
+/** Wire shape of one transition in a curator report. */
+export interface CuratorTransition {
+  skill_name: string;
+  from_state: string;
+  to_state: string;
+  /** "stale_threshold" | "archive_threshold" | "reactivated" */
+  reason: string;
+  days_idle: number;
+}
+
+/** Result of a preview / real run — same shape, the dry_run intent is
+ * baked into the route, not into the response. */
+export interface CuratorReport {
+  profile_slug: string;
+  /** ISO-8601 UTC */
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  transitions: CuratorTransition[];
+  marked_stale: number;
+  archived: number;
+  reactivated: number;
+  checked: number;
+  skipped: number;
+}
+
+export interface ProfileSkillCounts {
+  active: number;
+  stale: number;
+  archived: number;
+  total: number;
+}
+
+export interface ProfileOriginCounts {
+  bundled: number;
+  "user-requested": number;
+  "agent-created": number;
+}
+
+export interface ProfileCuratorState {
+  slug: string;
+  paused: boolean;
+  interval_hours: number;
+  stale_after_days: number;
+  archive_after_days: number;
+  last_review_at: string | null;
+  last_review_summary: string | null;
+  run_count: number;
+  skill_counts: ProfileSkillCounts;
+  origin_counts: ProfileOriginCounts;
+}
+
+export interface CuratorProfilesResponse {
+  profiles: ProfileCuratorState[];
+}
+
+/** Slim post-update state returned by /pause + /thresholds. */
+export interface CuratorStateUpdate {
+  slug: string;
+  paused: boolean;
+  interval_hours: number;
+  stale_after_days: number;
+  archive_after_days: number;
+  last_review_at: string | null;
+  last_review_summary: string | null;
+  run_count: number;
+}
+
+export interface SkillSummary {
+  name: string;
+  description: string;
+  version: string;
+  state: CuratorSkillState;
+  origin: CuratorSkillOrigin;
+  pinned: boolean;
+  use_count: number;
+  last_used_at: string | null;
+  created_at: string | null;
+}
+
+export interface SkillsListResponse {
+  skills: SkillSummary[];
+}
+
+export interface SkillFilters {
+  state?: CuratorSkillState;
+  origin?: CuratorSkillOrigin;
+  search?: string;
+}
+
+export interface CuratorThresholdsPatch {
+  interval_hours?: number;
+  stale_after_days?: number;
+  archive_after_days?: number;
+}
+
+/** GET /admin/curator/profiles → list every profile + thresholds + counts. */
+export function listCuratorProfiles(): Promise<CuratorProfilesResponse> {
+  return apiFetch<CuratorProfilesResponse>("/admin/curator/profiles");
+}
+
+/** POST /admin/curator/{slug}/preview → dry-run pass. */
+export function previewCuratorRun(slug: string): Promise<CuratorReport> {
+  return apiFetch<CuratorReport>(
+    `/admin/curator/${encodeURIComponent(slug)}/preview`,
+    { method: "POST", body: {} },
+  );
+}
+
+/** POST /admin/curator/{slug}/run → real run, persists transitions. */
+export function runCuratorNow(slug: string): Promise<CuratorReport> {
+  return apiFetch<CuratorReport>(
+    `/admin/curator/${encodeURIComponent(slug)}/run`,
+    { method: "POST", body: {} },
+  );
+}
+
+/** POST /admin/curator/{slug}/pause → flip the per-profile pause flag. */
+export function pauseCurator(
+  slug: string,
+  paused: boolean,
+): Promise<CuratorStateUpdate> {
+  return apiFetch<CuratorStateUpdate>(
+    `/admin/curator/${encodeURIComponent(slug)}/pause`,
+    { method: "POST", body: { paused } },
+  );
+}
+
+/** PATCH /admin/curator/{slug}/thresholds → tune any subset of the three
+ * thresholds. The backend enforces `archive > stale` and `interval >= 1`. */
+export function updateCuratorThresholds(
+  slug: string,
+  patch: CuratorThresholdsPatch,
+): Promise<CuratorStateUpdate> {
+  return apiFetch<CuratorStateUpdate>(
+    `/admin/curator/${encodeURIComponent(slug)}/thresholds`,
+    { method: "PATCH", body: patch },
+  );
+}
+
+/** GET /admin/curator/{slug}/skills → filterable skill list. */
+export function listProfileSkills(
+  slug: string,
+  filters: SkillFilters = {},
+): Promise<SkillsListResponse> {
+  const params = new URLSearchParams();
+  if (filters.state) params.set("state", filters.state);
+  if (filters.origin) params.set("origin", filters.origin);
+  if (filters.search) params.set("search", filters.search);
+  const qs = params.toString();
+  const path = `/admin/curator/${encodeURIComponent(slug)}/skills${
+    qs ? `?${qs}` : ""
+  }`;
+  return apiFetch<SkillsListResponse>(path);
+}
+
+/** POST /admin/curator/{slug}/skills/{name}/pin → toggle Skill.pinned. */
+export function pinSkill(
+  slug: string,
+  name: string,
+  pinned: boolean,
+): Promise<SkillSummary> {
+  return apiFetch<SkillSummary>(
+    `/admin/curator/${encodeURIComponent(slug)}/skills/${encodeURIComponent(
+      name,
+    )}/pin`,
+    { method: "POST", body: { pinned } },
+  );
 }

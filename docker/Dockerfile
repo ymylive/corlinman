@@ -77,11 +77,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
-# Bring across the prebuilt venv and only the source the venv needs
-# (editable installs reference /app/python).
+# Bring across the prebuilt venv and only the source the venv needs.
+# uv's editable .pth files reference absolute paths like
+# /build/python/packages/<name>/src ; the runtime stage stores the source
+# at /app/python instead, so we add a /build/python -> /app/python
+# symlink to keep those .pth references resolvable. Without this the
+# venv boots with ``ModuleNotFoundError: corlinman_server`` on every
+# console-script entry point.
 COPY --from=py-builder /opt/venv /opt/venv
 COPY --from=py-builder /build/python /app/python
 COPY --from=py-builder /build/proto /app/proto
+RUN mkdir -p /build && ln -s /app/python /build/python && ln -s /app/proto /build/proto
 
 # Activate the venv.
 ENV PATH=/opt/venv/bin:$PATH

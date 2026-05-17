@@ -62,6 +62,10 @@ from typing import Any
 
 import structlog
 
+from corlinman_server.gateway.lifecycle.admin_seed import (
+    ensure_admin_credentials,
+    resolve_admin_config_path,
+)
 from corlinman_server.gateway.lifecycle.legacy_migration import (
     migrate_legacy_data_files,
 )
@@ -248,14 +252,26 @@ def _build_state(cfg: Any | None, data_dir: Path) -> Any:
             or getattr(core, "AppState", None)
         )
         if builder is not None:
+            built: Any = None
             try:
-                return builder(config=cfg, data_dir=data_dir)  # type: ignore[misc]
+                built = builder(config=cfg, data_dir=data_dir)  # type: ignore[misc]
             except TypeError:
-                # Builders that take positional args, or only ``config=``,
-                # or no args at all — fall through, try a less ambitious
-                # signature, finally drop to the degraded stub.
+                # The real ``AppState`` doesn't accept ``data_dir`` as a
+                # kwarg (it's a free-form attribute the gateway wires
+                # at boot). Fall back to a ``config``-only call and
+                # stamp ``data_dir`` afterwards so downstream code can
+                # still do ``getattr(state, "data_dir", None)``.
                 try:
-                    return builder(cfg, data_dir)  # type: ignore[misc]
+                    built = builder(config=cfg)  # type: ignore[misc]
+                except TypeError:
+                    try:
+                        built = builder()  # type: ignore[misc]
+                    except Exception as exc:  # pragma: no cover — defensive
+                        logger.warning(
+                            "gateway.state.builder_failed",
+                            builder=type(builder).__name__,
+                            error=str(exc),
+                        )
                 except Exception as exc:  # pragma: no cover — defensive
                     logger.warning(
                         "gateway.state.builder_failed",
@@ -268,6 +284,21 @@ def _build_state(cfg: Any | None, data_dir: Path) -> Any:
                     builder=type(builder).__name__,
                     error=str(exc),
                 )
+            if built is not None:
+                # AppState is a dataclass without __slots__ — safe to
+                # set attributes dynamically. This is the contract
+                # ``_mount_routes`` reads via ``getattr(state,
+                # "data_dir", None)`` to wire the profile store.
+                try:
+                    setattr(built, "data_dir", data_dir)
+                except (AttributeError, TypeError):  # pragma: no cover
+                    pass
+                if getattr(built, "config", None) is None and cfg is not None:
+                    try:
+                        setattr(built, "config", cfg)
+                    except (AttributeError, TypeError):  # pragma: no cover
+                        pass
+                return built
     return _DegradedAppState(config=cfg, data_dir=data_dir)
 
 
@@ -294,7 +325,9 @@ class _DegradedAppState:
 # ---------------------------------------------------------------------------
 
 
-def _mount_routes(app: Any, state: Any) -> None:
+def _mount_routes(
+    app: Any, state: Any, *, admin_config_path: Path | None = None
+) -> Any:
     """Mount every gateway routes submodule onto ``app``.
 
     Each W4 submodule exposes a different composition surface; this
@@ -307,6 +340,15 @@ def _mount_routes(app: Any, state: Any) -> None:
 
     Missing submodules log a warning and the gateway continues to boot
     in degraded mode (so a partial port still serves health checks).
+
+    Returns a ``(admin_a_state, admin_b_state)`` tuple — each entry is
+    the registered ``AdminState`` instance for that subtree (or ``None``
+    when the submodule isn't present). The lifespan reaches into the
+    admin_a slot to populate seeded credentials after
+    :func:`ensure_admin_credentials` completes, and into the admin_b
+    slot to attach the evolution-store repos opened by W5.0. The state
+    objects are registered with ``set_admin_state`` here so test code
+    that doesn't run the lifespan still sees a usable singleton.
     """
     routes_top = _lazy_import("corlinman_server.gateway.routes.register")
     if routes_top is not None:
@@ -335,30 +377,162 @@ def _mount_routes(app: Any, state: Any) -> None:
         except Exception as exc:  # pragma: no cover — sibling-owned
             logger.warning("gateway.routes_voice.mount_failed", error=str(exc))
 
+    admin_a_state: Any | None = None
     admin_a = _lazy_import("corlinman_server.gateway.routes_admin_a")
     if admin_a is not None:
         try:
             admin_a_state_cls = getattr(admin_a, "AdminState", None)
             set_admin_a = getattr(admin_a, "set_admin_state", None)
             if admin_a_state_cls is not None and set_admin_a is not None:
-                # Construct a minimal AdminState — all fields optional;
-                # handlers 503 on missing dependencies.
+                # Construct an AdminState seeded with what we can know
+                # synchronously — admin_username / admin_password_hash /
+                # must_change_password are populated by the lifespan once
+                # ``ensure_admin_credentials`` resolves the disk state.
                 data_dir = getattr(state, "data_dir", None)
-                set_admin_a(admin_a_state_cls(data_dir=data_dir))
+                # Wave 3.1: wire the profile registry. Best-effort —
+                # if the profiles submodule fails to import we leave
+                # ``profile_store=None`` and the /admin/profiles* routes
+                # 503 ``profile_store_missing`` rather than crashing the
+                # gateway boot.
+                profile_store: Any | None = None
+                if data_dir is not None:
+                    try:
+                        from corlinman_server.profiles import ProfileStore
+
+                        profile_store = ProfileStore(
+                            Path(data_dir) / "profiles"
+                        )
+                        # Bootstrap a "default" profile on first run so
+                        # the UI's profile-switcher always has at least
+                        # one selectable entry.
+                        if not profile_store.list():
+                            profile_store.create(
+                                slug="default",
+                                display_name="Default",
+                                description="Bootstrap profile",
+                            )
+                    except Exception as exc:  # pragma: no cover
+                        logger.warning(
+                            "gateway.routes_admin_a.profile_store_init_failed",
+                            error=str(exc),
+                        )
+                        profile_store = None
+                admin_a_state = admin_a_state_cls(
+                    data_dir=data_dir,
+                    config_path=admin_config_path,
+                    admin_write_lock=asyncio.Lock(),
+                    profile_store=profile_store,
+                )
+                set_admin_a(admin_a_state)
             app.include_router(admin_a.build_router())
         except Exception as exc:  # pragma: no cover — sibling-owned
             logger.warning("gateway.routes_admin_a.mount_failed", error=str(exc))
 
+    admin_b_state: Any | None = None
     admin_b = _lazy_import("corlinman_server.gateway.routes_admin_b")
     if admin_b is not None:
         try:
             admin_b_state_cls = getattr(admin_b, "AdminState", None)
             set_admin_b = getattr(admin_b, "set_admin_state", None)
             if admin_b_state_cls is not None and set_admin_b is not None:
-                set_admin_b(admin_b_state_cls())
+                # W4.6: thread the curator UI handles through to the
+                # admin_b state. ``profile_store`` matches the admin_a
+                # field so /admin/curator/* can look up profile rows;
+                # ``skill_registry_factory`` lazy-loads per-profile
+                # SkillRegistry views. ``curator_state_repo`` and
+                # ``signals_repo`` are populated by the lifespan once
+                # the evolution sqlite is opened — left ``None`` here so
+                # the routes 503 cleanly during a partial install.
+                _admin_a_config_path = (
+                    getattr(admin_a_state, "config_path", None)
+                    if admin_a_state is not None
+                    else None
+                )
+
+                def _admin_b_config_loader() -> dict[str, Any]:
+                    """Fresh-read the live config TOML on every snapshot
+                    call. Captures :data:`_admin_a_config_path` via
+                    closure so the credentials + onboard PUT paths see
+                    sections (notably ``[admin]``) other handlers may
+                    have rewritten between snapshot reads — without it
+                    the write-back collapses to ``{providers: {...}}``
+                    and quietly wipes the operator's credentials.
+                    """
+                    import tomllib  # noqa: PLC0415 — stdlib
+
+                    if (
+                        _admin_a_config_path is None
+                        or not _admin_a_config_path.exists()
+                    ):
+                        return {}
+                    try:
+                        return tomllib.loads(
+                            _admin_a_config_path.read_text(encoding="utf-8")
+                        )
+                    except (OSError, ValueError):
+                        return {}
+
+                _admin_b_state_kwargs: dict[str, Any] = {
+                    "profile_store": (
+                        getattr(admin_a_state, "profile_store", None)
+                        if admin_a_state is not None
+                        else None
+                    ),
+                    # Mirror the admin_a config_path so /admin/credentials*
+                    # and /admin/onboard/finalize-skip can persist the
+                    # [providers.*] block back to the same TOML the
+                    # admin_seed bootstrap wrote. Without this the routes
+                    # 503 with ``config_path_unset`` even though the
+                    # gateway booted with a perfectly resolvable file.
+                    "config_path": _admin_a_config_path,
+                    # Fresh-read loader so the credentials and onboard
+                    # routes see other sections (``[admin]`` first and
+                    # foremost) when they rebuild + atomically rewrite
+                    # the TOML.
+                    "config_loader": _admin_b_config_loader,
+                    # Admin-write lock shared with admin_a so the rotate
+                    # / username / credentials writers don't race when
+                    # both surfaces try to mutate the same TOML.
+                    "admin_write_lock": (
+                        getattr(admin_a_state, "admin_write_lock", None)
+                        if admin_a_state is not None
+                        else None
+                    ),
+                }
+                # Per-profile registry factory: reads
+                # ``<data_dir>/profiles/<slug>/skills`` for each call so
+                # mid-run SKILL.md edits show up on the next fetch.
+                data_dir_for_skills = getattr(state, "data_dir", None)
+                if data_dir_for_skills is not None:
+                    try:
+                        from corlinman_skills_registry import (  # noqa: PLC0415
+                            SkillRegistry,
+                        )
+
+                        def _skill_registry_factory(slug: str) -> Any:
+                            skills_dir = (
+                                Path(data_dir_for_skills)
+                                / "profiles"
+                                / slug
+                                / "skills"
+                            )
+                            return SkillRegistry.load_from_dir(skills_dir)
+
+                        _admin_b_state_kwargs["skill_registry_factory"] = (
+                            _skill_registry_factory
+                        )
+                    except ImportError as exc:  # pragma: no cover
+                        logger.warning(
+                            "gateway.routes_admin_b.skill_registry_factory_missing",
+                            error=str(exc),
+                        )
+                admin_b_state = admin_b_state_cls(**_admin_b_state_kwargs)
+                set_admin_b(admin_b_state)
             app.include_router(admin_b.build_router())
         except Exception as exc:  # pragma: no cover — sibling-owned
             logger.warning("gateway.routes_admin_b.mount_failed", error=str(exc))
+
+    return admin_a_state, admin_b_state
 
 
 # ---------------------------------------------------------------------------
@@ -411,8 +585,125 @@ def build_app(
 
     state = _build_state(cfg, resolved_data_dir)
 
+    # Resolve the on-disk path the admin-seed routine writes to / reads
+    # back from. Cached on the FastAPI app so the lifespan handler can
+    # re-use it after :func:`_mount_routes` already stamped it onto the
+    # ``AdminState``. We compute it eagerly here so a missing
+    # ``[admin]`` block still has a target path on first boot.
+    admin_config_path = resolve_admin_config_path(
+        cli_config_path=config_path, data_dir=resolved_data_dir
+    )
+
     @asynccontextmanager
     async def _lifespan(app: Any):  # type: ignore[no-untyped-def]
+        # Seed default ``admin``/``root`` credentials before the sibling
+        # bootstraps fire — admin routes that load credentials lazily
+        # (services / evolution) must see the resolved hash. The
+        # ``AdminState`` was already registered with the singleton
+        # during ``_mount_routes`` so we mutate it in place; FastAPI
+        # only starts accepting requests after this coroutine yields.
+        admin_a_state = getattr(app.state, "corlinman_admin_a_state", None)
+        admin_b_state = getattr(app.state, "corlinman_admin_b_state", None)
+        try:
+            seeded = await ensure_admin_credentials(
+                config_path=admin_config_path
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("gateway.admin_seed.failed", error=str(exc))
+            seeded = None
+
+        if admin_a_state is not None and seeded is not None:
+            admin_a_state.admin_username = seeded.username
+            admin_a_state.admin_password_hash = seeded.password_hash
+            admin_a_state.config_path = seeded.config_path
+            admin_a_state.must_change_password = seeded.must_change_password
+
+        # W5.0: open the evolution sqlite + attach the curator / signals
+        # repos to admin_b (the /admin/curator/* routes read them from
+        # there) and to admin_a (W4.5 applier surfaces consult admin_a's
+        # ``signals_repo`` / ``skill_registry_factory`` slots). All
+        # best-effort — a sqlite open failure logs at WARN and the
+        # gateway still boots, with the curator routes returning their
+        # typed 503 envelopes instead.
+        evolution_store: Any | None = None
+        signals_repo: Any | None = None
+        curator_state_repo: Any | None = None
+        evolution_db_path = resolved_data_dir / "evolution.sqlite"
+        try:
+            from corlinman_evolution_store import (  # noqa: PLC0415
+                CuratorStateRepo,
+                EvolutionStore,
+                SignalsRepo,
+            )
+
+            # ``EvolutionStore.open`` is the async classmethod that
+            # creates parents (sqlite makes the file; we make the dir).
+            evolution_db_path.parent.mkdir(parents=True, exist_ok=True)
+            evolution_store = await EvolutionStore.open(evolution_db_path)
+            # The repos share the store's underlying aiosqlite
+            # connection — there are no ``store.signals_repo()`` /
+            # ``store.curator_state_repo()`` accessors today, so we
+            # construct them directly off ``store.conn``.
+            signals_repo = SignalsRepo(evolution_store.conn)
+            curator_state_repo = CuratorStateRepo(evolution_store.conn)
+
+            if admin_b_state is not None:
+                admin_b_state.curator_state_repo = curator_state_repo
+                admin_b_state.signals_repo = signals_repo
+                # Re-expose the raw store on admin_b too — a couple of
+                # legacy /admin/evolution routes look it up from there.
+                admin_b_state.evolution_store = evolution_store
+
+            if admin_a_state is not None:
+                # Dataclass allows dynamic attribute writes; the
+                # user-correction applier reads ``signals_repo`` /
+                # ``skill_registry_factory`` from admin_a so its
+                # background-review fork can resolve a per-profile
+                # SkillRegistry view at correction time.
+                admin_a_state.signals_repo = signals_repo
+                factory = getattr(
+                    admin_b_state, "skill_registry_factory", None
+                )
+                if factory is None and admin_a_state is not None:
+                    # Fallback factory mirrors the one wired in
+                    # _mount_routes — covers cases where admin_b isn't
+                    # mounted but admin_a still wants to spawn reviews.
+                    try:
+                        from corlinman_skills_registry import (  # noqa: PLC0415
+                            SkillRegistry,
+                        )
+
+                        def _fallback_skill_registry(slug: str) -> Any:
+                            skills_dir = (
+                                resolved_data_dir
+                                / "profiles"
+                                / slug
+                                / "skills"
+                            )
+                            skills_dir.mkdir(parents=True, exist_ok=True)
+                            return SkillRegistry.load_from_dir(skills_dir)
+
+                        factory = _fallback_skill_registry
+                    except ImportError:  # pragma: no cover
+                        factory = None
+                admin_a_state.skill_registry_factory = factory
+
+            # Stash the handle so the lifespan-exit ``finally`` can
+            # close cleanly and external test code can introspect it.
+            app.state._evolution_store = evolution_store
+            app.state._evolution_signals_repo = signals_repo
+            app.state._evolution_curator_state_repo = curator_state_repo
+            logger.info(
+                "gateway.evolution.store_opened",
+                path=str(evolution_db_path),
+            )
+        except Exception as exc:  # pragma: no cover — defensive umbrella
+            logger.warning(
+                "gateway.evolution.store_open_failed",
+                path=str(evolution_db_path),
+                error=str(exc),
+            )
+
         services = _lazy_import("corlinman_server.gateway.services")
         evolution = _lazy_import("corlinman_server.gateway.evolution")
         grpc_mod = _lazy_import("corlinman_server.gateway.grpc")
@@ -453,6 +744,96 @@ def build_app(
                         "gateway.grpc.bootstrap_failed", error=str(exc)
                     )
 
+        # W5.0: wire the user-correction HookBus listener. Today no
+        # other component constructs a shared HookBus in the gateway
+        # boot path, so we build one here and publish it on
+        # ``app.state.hook_bus`` for future producers (channels /
+        # subagent supervisor / chat service) to reuse. The listener
+        # itself only needs ``signals_repo`` and the applier callback;
+        # missing either is an opt-out (we log + skip).
+        user_correction_task: asyncio.Task[None] | None = None
+        user_correction_applier: Any | None = None
+        if signals_repo is not None:
+            try:
+                from corlinman_hooks import HookBus  # noqa: PLC0415
+
+                bus = getattr(app.state, "hook_bus", None)
+                if bus is None:
+                    # Capacity mirrors the default the observer / other
+                    # subscribers expect — 256 events of slack per tier
+                    # before a slow handler trips ``Lagged``.
+                    bus = HookBus(capacity=256)
+                    app.state.hook_bus = bus
+
+                from corlinman_server.gateway.evolution import (  # noqa: PLC0415
+                    UserCorrectionApplier,
+                    register_user_correction_listener,
+                )
+
+                def _resolve_provider(slug: str) -> tuple[Any, str]:
+                    """Resolve ``(provider_instance, model_name)`` for a
+                    profile. Today the gateway does not expose a stable
+                    provider-lookup surface; we degrade to ``(None, "")``
+                    and let ``UserCorrectionApplier`` short-circuit on
+                    the resolver-failure gate. Wired here as a hook so
+                    a sibling provider-wiring agent can later swap in
+                    the real lookup without touching the listener.
+                    """
+                    return (None, "")
+
+                # Closures over the just-attached admin_a slots — read
+                # via getattr so a missing piece collapses to ``None``
+                # rather than NameError. The applier's resolver
+                # failure paths already log + gate gracefully.
+                def _registry_for_profile(slug: str) -> Any:
+                    fn = getattr(
+                        admin_a_state, "skill_registry_factory", None
+                    )
+                    if fn is None:
+                        raise RuntimeError("skill_registry_factory not wired")
+                    return fn(slug)
+
+                def _profile_root_for_profile(slug: str):
+                    pstore = getattr(admin_a_state, "profile_store", None)
+                    if pstore is None:
+                        # Fall back to the conventional layout under
+                        # ``<data_dir>/profiles/<slug>``.
+                        return resolved_data_dir / "profiles" / slug
+                    return Path(pstore.profiles_dir) / slug
+
+                user_correction_applier = UserCorrectionApplier(
+                    registry_for_profile=_registry_for_profile,
+                    profile_root_for_profile=_profile_root_for_profile,
+                    provider_for_profile=_resolve_provider,
+                    rate_limit_seconds=30,
+                    min_weight=0.7,
+                )
+
+                async def _on_signal(sig: Any) -> None:
+                    # Fire-and-forget bridge — the listener already
+                    # spawns ``asyncio.create_task`` around this
+                    # callback, so a direct await is fine and keeps the
+                    # ``last_fired`` map updates serialised.
+                    await user_correction_applier.apply(sig)
+
+                user_correction_task = register_user_correction_listener(
+                    bus,
+                    signals_repo,
+                    on_signal=_on_signal,
+                )
+                background.append(user_correction_task)
+                app.state._user_correction_applier = (
+                    user_correction_applier
+                )
+                logger.info(
+                    "gateway.evolution.user_correction_listener_registered"
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning(
+                    "gateway.evolution.user_correction_listener_failed",
+                    error=str(exc),
+                )
+
         try:
             yield
         finally:
@@ -464,6 +845,19 @@ def build_app(
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
+            # W5.0 teardown: close the evolution sqlite cleanly so the
+            # WAL file is checkpointed and tests don't leave stale
+            # file handles open on Windows.
+            store = getattr(app.state, "_evolution_store", None)
+            if store is not None:
+                try:
+                    await store.close()
+                except Exception as exc:  # pragma: no cover — defensive
+                    logger.warning(
+                        "gateway.evolution.store_close_failed",
+                        error=str(exc),
+                    )
+                app.state._evolution_store = None
 
     app = FastAPI(lifespan=_lifespan)
     app.state.corlinman_state = state
@@ -485,7 +879,17 @@ def build_app(
     # Mount every routes submodule. Each submodule exposes a different
     # composition surface (per the parallel-agent contracts); we wire them
     # individually here to keep entrypoint.py the single composition root.
-    _mount_routes(app, state)
+    admin_a_state, admin_b_state = _mount_routes(
+        app, state, admin_config_path=admin_config_path
+    )
+    # Stash the admin state handles on ``app.state`` so the lifespan
+    # closure (defined above ``_mount_routes``'s call) can populate the
+    # seeded credentials once :func:`ensure_admin_credentials` runs, and
+    # so W5.0's evolution-store wiring can stamp the curator/signals
+    # repos onto admin_b once the sqlite handle is open.
+    app.state.corlinman_admin_a_state = admin_a_state
+    app.state.corlinman_admin_b_state = admin_b_state
+    app.state.corlinman_admin_config_path = admin_config_path
 
     # Degraded-mode safety net: if no routes module mounted a ``/health``
     # path, expose a trivial liveness endpoint so probes succeed.
@@ -497,6 +901,41 @@ def build_app(
         @app.get("/health")
         async def _health() -> dict[str, str]:  # pragma: no cover — trivial
             return {"status": "ok", "mode": "degraded"}
+
+    # UI static fall-through. The docker image bakes the Next.js static
+    # export into ``/app/ui-static``; this mount serves it for any path
+    # not already claimed by an API route. SPA-style HTML routes
+    # (/account/security, /profiles, /credentials, /evolution …) resolve
+    # via the pre-rendered ``<route>.html`` files Next emits. Without
+    # this mount the gateway answers every browser hit with 404 even
+    # when the bundle is present on disk.
+    ui_dir_env = os.environ.get("CORLINMAN_UI_DIR")
+    if ui_dir_env:
+        ui_path = Path(ui_dir_env)
+        if ui_path.is_dir():
+            try:
+                from fastapi.staticfiles import StaticFiles  # noqa: PLC0415
+
+                # Mount last so all explicit API routes (incl. /health,
+                # /admin/*, /v1/*, /onboard) win in route resolution.
+                app.mount(
+                    "/",
+                    StaticFiles(directory=str(ui_path), html=True),
+                    name="ui",
+                )
+                logger.info(
+                    "gateway.ui.static_mounted", path=str(ui_path)
+                )
+            except Exception as exc:  # pragma: no cover — best effort
+                logger.warning(
+                    "gateway.ui.static_mount_failed",
+                    path=str(ui_path),
+                    error=str(exc),
+                )
+        else:
+            logger.warning(
+                "gateway.ui.static_dir_missing", path=str(ui_path)
+            )
 
     return app
 
