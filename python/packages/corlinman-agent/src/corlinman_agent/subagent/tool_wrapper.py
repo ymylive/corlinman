@@ -49,6 +49,7 @@ LLM↔runner round-trip without needing the Rust crate built.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable, Sequence
 from contextlib import nullcontext
@@ -66,6 +67,7 @@ from corlinman_agent.subagent.api import (
     TaskSpec,
 )
 from corlinman_agent.subagent.runner import (
+    SUBAGENT_SPAWN_MANY_TOOL,
     SUBAGENT_SPAWN_TOOL,
     run_child,
 )
@@ -514,10 +516,290 @@ def _result_json(result: TaskResult) -> str:
     return json.dumps(payload)
 
 
+#: Hard cap on the number of siblings one ``subagent.spawn_many`` call
+#: can dispatch. Matches the supervisor's per-parent concurrency ceiling
+#: so the cap surfaces as an args-invalid rejection (a clear, actionable
+#: signal to the LLM) instead of N-3 silent ``parent_concurrency_exceeded``
+#: rejections inside the gather. Raise this only if the supervisor's
+#: ``SupervisorPolicy::max_concurrent_per_parent`` is raised in lock-step.
+SUBAGENT_SPAWN_MANY_MAX_TASKS: int = 3
+
+
+def subagent_spawn_many_tool_schema(
+    *,
+    default_max_wall_seconds: int = DEFAULT_MAX_WALL_SECONDS,
+    default_max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
+    max_tasks: int = SUBAGENT_SPAWN_MANY_MAX_TASKS,
+) -> dict[str, Any]:
+    """Return the OpenAI-shaped tool descriptor for ``subagent.spawn_many``.
+
+    The orchestrator persona is the primary consumer. The descriptor
+    accepts a list of per-child specs (each shaped like a
+    :func:`subagent_spawn_tool_schema` body) and the dispatcher fans
+    them out concurrently under one parent context. The siblings run in
+    parallel, bounded by the supervisor's per-parent concurrency cap
+    (which is why ``max_tasks`` defaults to that cap).
+
+    The schema deliberately does NOT carry a ``blackboard_key`` field —
+    coordination between siblings is a *content* concern handled by
+    putting the same key into each child's ``extra_context``. Keeping
+    the fan-out tool ignorant of the blackboard means the same fan-out
+    primitive serves shared-state and no-shared-state patterns.
+    """
+    per_task = {
+        "type": "object",
+        "properties": {
+            "agent": {
+                "type": "string",
+                "description": (
+                    "Name of the registered agent card to spawn for "
+                    "this sibling."
+                ),
+            },
+            "goal": {
+                "type": "string",
+                "description": (
+                    "User-turn prompt this sibling will receive as its "
+                    "only message."
+                ),
+            },
+            "tool_allowlist": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional subset of the parent's tool set this "
+                    "sibling is allowed to call. Inherit if omitted."
+                ),
+            },
+            "max_wall_seconds": {
+                "type": "integer",
+                "description": (
+                    f"Hard wall-clock budget for this sibling. Default "
+                    f"{default_max_wall_seconds}s."
+                ),
+                "minimum": 1,
+            },
+            "max_tool_calls": {
+                "type": "integer",
+                "description": (
+                    f"Cap on this sibling's reasoning rounds. Default "
+                    f"{default_max_tool_calls}."
+                ),
+                "minimum": 1,
+            },
+            "extra_context": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": (
+                    "Optional {ctx.<key>: <text>} blobs spliced into "
+                    "this sibling's system prompt. Use this to pass a "
+                    "shared 'blackboard_key' to coordinating siblings."
+                ),
+            },
+        },
+        "required": ["agent", "goal"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "function",
+        "function": {
+            "name": SUBAGENT_SPAWN_MANY_TOOL,
+            "description": (
+                "Dispatch up to "
+                f"{max_tasks} sibling child agents concurrently and "
+                "block until all return. Use for true fan-out: "
+                "research + edit, query multiple sources, compare "
+                "approaches. Each sibling runs in its own fresh "
+                "context; pass a shared key via extra_context if they "
+                "need to coordinate through the blackboard tools. "
+                "Returns {\"tasks\": [TaskResult, ...]} in input order."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": per_task,
+                        "minItems": 1,
+                        "maxItems": max_tasks,
+                        "description": (
+                            f"1..{max_tasks} per-sibling task specs. "
+                            "Each sibling is dispatched concurrently."
+                        ),
+                    },
+                },
+                "required": ["tasks"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+async def dispatch_subagent_spawn_many(
+    *,
+    args_json: bytes | str,
+    parent_ctx: ParentContext,
+    agent_registry: AgentCardRegistry,
+    provider: Any,
+    parent_tools: Sequence[dict[str, Any]] | None = None,
+    persona_store: PersonaStore | None = None,
+    supervisor_acquire: SupervisorAcquire | None = None,
+    base_child_seq: int = 0,
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    max_wall_seconds_ceiling: int | None = None,
+    max_tasks: int = SUBAGENT_SPAWN_MANY_MAX_TASKS,
+) -> str:
+    """Translate one ``subagent.spawn_many`` tool call into a JSON
+    envelope of :class:`TaskResult` siblings, run concurrently.
+
+    The dispatcher splits the LLM's ``tasks`` list, builds an isolated
+    ``args_json`` for each, and awaits :func:`dispatch_subagent_spawn`
+    on all of them in parallel via ``asyncio.gather``. The supervisor's
+    per-parent concurrency cap (default 3) is the hard limit on live
+    siblings; this dispatcher also rejects ``len(tasks) > max_tasks``
+    up-front so the LLM sees a clean args-invalid envelope instead of
+    N-3 silent slot rejections.
+
+    Children are disambiguated by ``child_seq = base_child_seq + i`` so
+    their ``ParentContext.child_context`` derivations don't collide.
+    Failures in one sibling are isolated: ``asyncio.gather`` is called
+    with ``return_exceptions=True`` and any exception is folded into a
+    synthetic ERROR envelope for that index, keeping the wire shape
+    ``{"tasks": [TaskResult, ...]}`` intact.
+
+    Returns
+    -------
+    str
+        JSON object ``{"tasks": [TaskResult, ...]}`` in input order.
+        ``error`` lives on individual siblings; the outer envelope is
+        always shaped the same.
+    """
+    # ── 1. Parse + validate the LLM's args. ──────────────────────────
+    try:
+        task_specs = _parse_spawn_many_args(args_json, max_tasks=max_tasks)
+    except _ArgsInvalidError as exc:
+        logger.warning(
+            "subagent.dispatch_many.args_invalid",
+            session=parent_ctx.parent_session_key,
+            error=exc.message,
+        )
+        # Fan-out's args-invalid surfaces as a top-level error
+        # envelope (the LLM sees no per-sibling results) so it can't
+        # confuse a parse failure with a sibling's runtime failure.
+        return json.dumps(
+            {
+                "tasks": [],
+                "error": f"{ARGS_INVALID_ERROR}: {exc.message}",
+            }
+        )
+
+    # ── 2. Fan out. asyncio.gather over per-sibling dispatch_spawn. ──
+    coros = [
+        dispatch_subagent_spawn(
+            args_json=task_args,
+            parent_ctx=parent_ctx,
+            agent_registry=agent_registry,
+            provider=provider,
+            parent_tools=parent_tools,
+            persona_store=persona_store,
+            supervisor_acquire=supervisor_acquire,
+            child_seq=base_child_seq + i,
+            max_depth=max_depth,
+            max_wall_seconds_ceiling=max_wall_seconds_ceiling,
+        )
+        for i, task_args in enumerate(task_specs)
+    ]
+    raw = await asyncio.gather(*coros, return_exceptions=True)
+
+    # ── 3. Normalise each result. dispatch_subagent_spawn already
+    #      returns a JSON string; if a coro raised (programmer error,
+    #      not a sibling-level failure), synthesise the ERROR envelope
+    #      so the wire shape is always ``{"tasks": [TaskResult, ...]}``.
+    siblings: list[dict[str, Any]] = []
+    for i, item in enumerate(raw):
+        if isinstance(item, BaseException):
+            logger.exception(
+                "subagent.dispatch_many.gather_uncaught",
+                session=parent_ctx.parent_session_key,
+                child_index=i,
+                exc_info=item,
+            )
+            siblings.append(
+                {
+                    "output_text": "",
+                    "tool_calls_made": [],
+                    "child_session_key": (
+                        f"{parent_ctx.parent_session_key}"
+                        f"::child::{base_child_seq + i}"
+                    ),
+                    "child_agent_id": "",
+                    "elapsed_ms": 0,
+                    "finish_reason": FinishReason.ERROR.value,
+                    "error": str(item),
+                }
+            )
+        else:
+            siblings.append(json.loads(item))
+
+    return json.dumps({"tasks": siblings})
+
+
+def _parse_spawn_many_args(
+    args_json: bytes | str,
+    *,
+    max_tasks: int,
+) -> list[str]:
+    """Validate ``{"tasks": [...]}`` and return per-sibling args_json.
+
+    Each returned string is a ready-to-feed argument to
+    :func:`dispatch_subagent_spawn` — pre-shaped so the per-sibling
+    dispatch reuses the same validation in
+    :func:`_parse_args` rather than duplicating the field-by-field
+    type checks here. The fan-out wrapper does only the *envelope*
+    shape (list size, list-of-objects).
+    """
+    if isinstance(args_json, (bytes, bytearray)):
+        try:
+            decoded = args_json.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise _ArgsInvalidError(f"args_json not utf-8: {exc}") from exc
+    else:
+        decoded = args_json
+    try:
+        raw = json.loads(decoded) if decoded else {}
+    except json.JSONDecodeError as exc:
+        raise _ArgsInvalidError(f"args_json not JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise _ArgsInvalidError(
+            f"args_json must be a JSON object, got {type(raw).__name__}"
+        )
+    tasks = raw.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        raise _ArgsInvalidError("'tasks' must be a non-empty list of objects")
+    if len(tasks) > max_tasks:
+        raise _ArgsInvalidError(
+            f"'tasks' length {len(tasks)} exceeds the per-fanout cap of {max_tasks}"
+        )
+    out: list[str] = []
+    for i, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            raise _ArgsInvalidError(
+                f"tasks[{i}] must be a JSON object, got {type(task).__name__}"
+            )
+        # Re-serialise each per-sibling spec so the per-sibling
+        # dispatcher's own field validation runs identically to the
+        # single-spawn path. Cheap and keeps validation in one place.
+        out.append(json.dumps(task))
+    return out
+
+
 __all__ = [
     "AGENT_NOT_FOUND_ERROR",
     "ARGS_INVALID_ERROR",
+    "SUBAGENT_SPAWN_MANY_MAX_TASKS",
     "SupervisorAcquire",
     "dispatch_subagent_spawn",
+    "dispatch_subagent_spawn_many",
+    "subagent_spawn_many_tool_schema",
     "subagent_spawn_tool_schema",
 ]

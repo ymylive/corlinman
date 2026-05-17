@@ -74,6 +74,14 @@ from corlinman_agent.subagent.api import (
 #: place — registry code imports the same name.
 SUBAGENT_SPAWN_TOOL: str = "subagent.spawn"
 
+#: Fan-out sibling of ``subagent.spawn`` — the orchestrator agent (v0.7)
+#: emits this to dispatch N children concurrently under one parent. The
+#: supervisor's per-parent concurrency cap (default 3) still bounds the
+#: live siblings; the dispatcher splits the task list and awaits all via
+#: ``asyncio.gather``. Pruned from the child's allowlist by the same
+#: depth-1 rule that prunes ``subagent.spawn``.
+SUBAGENT_SPAWN_MANY_TOOL: str = "subagent.spawn_many"
+
 #: Sentinel error string surfaced on a privilege-escalation rejection.
 #: Pinned in :attr:`TaskResult.error` so the LLM (and forensic queries)
 #: can branch on the exact reason the child was refused.
@@ -473,6 +481,7 @@ def _filter_tools_for_child(
     # delegate one more level.
     if child_depth >= max_depth - 1:
         effective.discard(SUBAGENT_SPAWN_TOOL)
+        effective.discard(SUBAGENT_SPAWN_MANY_TOOL)
 
     return frozenset(effective)
 
@@ -658,6 +667,7 @@ def _now_ms() -> int:
 # iter 4. iter 6 will reach for it when overlaying timeout outcomes
 # onto a partial TaskResult.
 __all__ = [
+    "SUBAGENT_SPAWN_MANY_TOOL",
     "SUBAGENT_SPAWN_TOOL",
     "TOOL_ALLOWLIST_ESCALATION_ERROR",
     "replace",
