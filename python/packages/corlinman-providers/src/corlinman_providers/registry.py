@@ -37,6 +37,7 @@ from corlinman_providers.market_providers import (
     ReplicateProvider,
     TogetherProvider,
 )
+from corlinman_providers.mock import MockProvider
 from corlinman_providers.openai_compatible import OpenAICompatibleProvider
 from corlinman_providers.openai_provider import OpenAIProvider
 from corlinman_providers.specs import AliasEntry, ProviderKind, ProviderSpec
@@ -72,6 +73,9 @@ _KIND_TO_CLASS: dict[ProviderKind, type[Any]] = {
     # ``openai_compatible``. The kind exists to document operator intent
     # and let the admin UI light up new-api-specific health columns.
     ProviderKind.NEWAPI: OpenAICompatibleProvider,
+    # Built-in echo provider for the easy-setup skip path (Wave 2.2).
+    # Zero-config; always builds successfully even without credentials.
+    ProviderKind.MOCK: MockProvider,
 }
 
 

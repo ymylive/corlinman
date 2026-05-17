@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -93,8 +93,48 @@ class FinalizeResponse(BaseModel):
     redirect: str = "/login"
 
 
+class FinalizeSkipResponse(BaseModel):
+    """Response payload for ``POST /admin/onboard/finalize-skip``."""
+
+    status: str = "ok"
+    mode: str = "mock"
+
+
 def _bad(code: str) -> JSONResponse:
     return JSONResponse(status_code=400, content={"error": code})
+
+
+def _write_config_atomic(path: Any, cfg: dict[str, Any]) -> JSONResponse | None:
+    """Serialise ``cfg`` to TOML and atomically replace ``path``.
+
+    Mirrors the writer pattern used by ``post_finalize`` above — pick the
+    ``tomli_w`` writer with a ``toml`` fallback, dump to a sibling
+    ``.new`` file, then rename onto the target. Returns ``None`` on
+    success, or a :class:`JSONResponse` describing the failure for
+    callers to short-circuit with.
+    """
+    try:
+        try:
+            import tomli_w  # noqa: PLC0415
+        except ImportError:  # pragma: no cover — fallback path
+            import toml as tomli_w  # type: ignore  # noqa: PLC0415
+        serialised = tomli_w.dumps(cfg)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=500,
+            content={"error": "serialise_failed", "message": str(exc)},
+        )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".new")
+        tmp.write_text(serialised, encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "write_failed", "message": str(exc)},
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -253,5 +293,67 @@ def router() -> APIRouter:
                 )
 
         return FinalizeResponse()
+
+    @r.post(
+        "/admin/onboard/finalize-skip",
+        response_model=FinalizeSkipResponse,
+        summary="Finish onboarding with mock provider",
+    )
+    async def post_finalize_skip(
+        body: dict[str, Any] | None = Body(default=None),
+    ):
+        """Skip-path finalizer — wire up the built-in mock provider.
+
+        Wave 2.2 of the easy-setup plan: when a new user can't / doesn't
+        want to configure a real LLM yet, this endpoint provisions a
+        ``[providers.mock]`` entry and points the default model alias at
+        it. The mock provider echoes user input (reversed, prefixed with
+        a sentinel banner) so the agent loop, chat UI, and embedding
+        pipeline all work end-to-end without upstream credentials.
+
+        Body is intentionally optional; callers MAY send ``{}``. The
+        write is idempotent — calling twice merges the same block back
+        in without duplicating it, and leaves the config valid TOML.
+        """
+        del body  # Reserved for future flags (e.g. preferred model id).
+        state = get_admin_state()
+        if state.config_path is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "config_path_unset"},
+            )
+
+        async with state.admin_write_lock:
+            cfg = dict(config_snapshot())
+
+            providers = dict(cfg.get("providers") or {})
+            existing = providers.get("mock")
+            mock_entry: dict[str, Any] = (
+                dict(existing) if isinstance(existing, dict) else {}
+            )
+            mock_entry["kind"] = "mock"
+            mock_entry["enabled"] = True
+            providers["mock"] = mock_entry
+            cfg["providers"] = providers
+
+            # Point the default model alias at the mock provider so that
+            # ``/v1/chat/completions`` resolves without a Configured
+            # ``[models]`` block from the operator.
+            models_cfg = dict(cfg.get("models") or {})
+            models_cfg["default"] = "mock"
+            aliases = dict(models_cfg.get("aliases") or {})
+            aliases["mock"] = {
+                "model": "mock",
+                "provider": "mock",
+                "params": {},
+            }
+            models_cfg["aliases"] = aliases
+            cfg["models"] = models_cfg
+
+            err = _write_config_atomic(state.config_path, cfg)
+            if err is not None:
+                return err
+
+        return FinalizeSkipResponse()
 
     return r

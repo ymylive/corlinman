@@ -3,15 +3,28 @@
 /**
  * First-run onboarding page — 4-step wizard.
  *
+ * Wave 2.1 reshape:
+ *   - On mount we fetch `/admin/me`. If the gateway already seeded an
+ *     admin (401 absent, `must_change_password` returned) we skip Step 1
+ *     and land on Step 2 with a small "Using default admin/root" hint
+ *     + a "Customize admin account" escape hatch.
+ *   - Step 2 ("Connect LLM") adds a `Skip — use mock provider` button
+ *     that POSTs `/admin/onboard/finalize-skip` and jumps straight to a
+ *     success view (bypassing Step 3 entirely).
+ *   - Step 3 replaces the dual `<select>` channel pickers with the
+ *     hermes two-stage `ModelPickerDialog` (provider list → model list).
+ *   - Step 4 becomes an in-page success card with a primary CTA to
+ *     `/account/security` so the operator changes the default password
+ *     before going anywhere else.
+ *
  * Steps:
  *   1. account   — username + password (POST /admin/onboard)
  *   2. newapi    — base_url + token + admin_token
- *                  (POST /admin/onboard/newapi/probe)
- *   3. models    — pick LLM / embedding / TTS defaults from
- *                  the live channel list
+ *                  (POST /admin/onboard/newapi/probe)  or  skip → mock
+ *   3. models    — pick LLM / embedding / TTS via ModelPickerDialog
  *                  (POST /admin/onboard/newapi/channels)
- *   4. confirm   — atomic config write
- *                  (POST /admin/onboard/finalize) → /login
+ *   4. confirm   — atomic config write (POST /admin/onboard/finalize)
+ *                  then success card → /account/security or /
  *
  * State lives in this component (React useState). No server-side
  * session — each backend call carries everything inline. The user
@@ -19,14 +32,16 @@
  * trade-off accepted to avoid DashMap/cookie wiring.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslation } from "react-i18next";
+import { CheckCircle2, ChevronRight } from "lucide-react";
 
-import { onboard } from "@/lib/auth";
+import { getSession, onboard } from "@/lib/auth";
 import {
   CorlinmanApiError,
   finalizeOnboard,
+  finalizeSkipOnboard,
   listOnboardChannels,
   probeNewapi,
   type NewapiChannel,
@@ -37,6 +52,10 @@ import { ThemeToggle } from "@/components/layout/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  ModelPickerDialog,
+  type ModelPickerKind,
+} from "@/components/onboard/model-picker-dialog";
 
 const MIN_PASSWORD_LEN = 8;
 
@@ -56,6 +75,11 @@ interface ModelPickState {
 interface TtsPickState extends ModelPickState {
   voice?: string;
 }
+
+/** Result of the post-finish flow — drives the success card variant. */
+type FinishResult =
+  | { kind: "mock" }
+  | { kind: "real"; provider: string; model: string };
 
 export default function OnboardPage() {
   return (
@@ -116,19 +140,98 @@ function OnboardWizard() {
   const [embPick, setEmbPick] = useState<ModelPickState | null>(null);
   const [ttsPick, setTtsPick] = useState<TtsPickState | null>(null);
 
+  /**
+   * `seededAdmin` = true → /admin/me returned 200 + must_change_password=true.
+   * `seededAdmin` = false → we have admin info but it's already customized.
+   * `seededAdmin` = null → /admin/me returned 401 (no admin yet); we start
+   *                       at the classic account step.
+   */
+  const [seededAdmin, setSeededAdmin] = useState<boolean | null>(null);
+  const [meChecked, setMeChecked] = useState(false);
+
+  /** Set when a finalize succeeds — flips the wizard into success-card mode. */
+  const [finished, setFinished] = useState<FinishResult | null>(null);
+
+  // One-shot admin detection. We never re-fetch — the wizard is a single
+  // session and the gateway either has admin or it doesn't.
+  const probedRef = useRef(false);
+  useEffect(() => {
+    if (probedRef.current) return;
+    probedRef.current = true;
+    (async () => {
+      try {
+        const me = await getSession();
+        if (me) {
+          const seeded = me.must_change_password === true;
+          setSeededAdmin(seeded);
+          // Both cases skip Step 1 — only difference is whether we
+          // surface the "using default" hint or not.
+          setStep("newapi");
+        } else {
+          setSeededAdmin(null);
+        }
+      } catch {
+        // /admin/me hiccup — fall through to the classic 4-step flow.
+        setSeededAdmin(null);
+      } finally {
+        setMeChecked(true);
+      }
+    })();
+  }, []);
+
+  if (finished) {
+    return (
+      <div className="w-full max-w-md space-y-6">
+        <div className="space-y-1.5 md:hidden">
+          <BrandMark />
+        </div>
+        <SuccessCard result={finished} />
+      </div>
+    );
+  }
+
   return (
     <div className="w-full max-w-md space-y-6">
       <div className="space-y-1.5 md:hidden">
         <BrandMark />
       </div>
+      {seededAdmin === true && step !== "account" ? (
+        <div
+          className="rounded-md border border-tp-glass-edge bg-tp-glass-inner px-3 py-2 text-xs text-tp-ink-3"
+          data-testid="onboard-default-admin-hint"
+        >
+          {t("auth.onboardUsingDefaultAdmin")}
+        </div>
+      ) : null}
       <StepIndicator current={step} />
-      {step === "account" && <AccountStep onDone={() => setStep("newapi")} />}
+      {seededAdmin !== null && step !== "account" ? (
+        <button
+          type="button"
+          onClick={() => setStep("account")}
+          className="text-xs text-tp-ink-3 underline-offset-4 hover:underline"
+          data-testid="onboard-customize-admin"
+        >
+          {t("auth.onboardCustomizeAdmin")}
+        </button>
+      ) : null}
+      {step === "account" && (
+        <AccountStep
+          // If admin already seeded the wizard treats Step 1 as optional —
+          // back into Step 2 if the user changes their mind.
+          onSkip={
+            seededAdmin !== null ? () => setStep("newapi") : undefined
+          }
+          onDone={() => setStep("newapi")}
+        />
+      )}
       {step === "newapi" && (
         <NewapiStep
           value={newapi}
           onChange={setNewapi}
           onBack={() => setStep("account")}
+          showBack={seededAdmin === null}
           onDone={() => setStep("models")}
+          onSkipMock={(result) => setFinished(result)}
         />
       )}
       {step === "models" && (
@@ -151,11 +254,15 @@ function OnboardWizard() {
           embPick={embPick}
           ttsPick={ttsPick}
           onBack={() => setStep("models")}
+          onFinished={(result) => setFinished(result)}
         />
       )}
       <p className="text-center text-xs text-tp-ink-3">
         {t("auth.onboardHint")}
       </p>
+      {/* `meChecked` is observed by tests via data attribute; a no-op DOM hook
+          keeps it side-effect-free in production. */}
+      <span hidden data-testid="onboard-me-checked" data-checked={meChecked} />
     </div>
   );
 }
@@ -204,7 +311,14 @@ function StepIndicator({ current }: { current: Step }) {
 // Step 1: Account
 // ---------------------------------------------------------------------------
 
-function AccountStep({ onDone }: { onDone: () => void }) {
+function AccountStep({
+  onDone,
+  onSkip,
+}: {
+  onDone: () => void;
+  /** When admin is already seeded, the wizard exposes a back-out link. */
+  onSkip?: () => void;
+}) {
   const { t } = useTranslation();
   const router = useRouter();
   const [username, setUsername] = useState("");
@@ -302,31 +416,52 @@ function AccountStep({ onDone }: { onDone: () => void }) {
             {error}
           </p>
         ) : null}
-        <Button type="submit" className="w-full" disabled={submitting}>
-          {submitting ? t("auth.submitting") : t("auth.onboardSubmit")}
-        </Button>
+        <div className="flex gap-2">
+          {onSkip ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onSkip}
+              data-testid="account-skip"
+            >
+              {t("auth.onboardBack")}
+            </Button>
+          ) : null}
+          <Button
+            type="submit"
+            className="flex-1"
+            disabled={submitting}
+          >
+            {submitting ? t("auth.submitting") : t("auth.onboardSubmit")}
+          </Button>
+        </div>
       </form>
     </>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Step 2: newapi connect
+// Step 2: newapi connect (with skip → mock provider)
 // ---------------------------------------------------------------------------
 
 function NewapiStep({
   value,
   onChange,
   onBack,
+  showBack,
   onDone,
+  onSkipMock,
 }: {
   value: NewapiState;
   onChange: (v: NewapiState) => void;
   onBack: () => void;
+  showBack: boolean;
   onDone: () => void;
+  onSkipMock: (result: FinishResult) => void;
 }) {
   const { t } = useTranslation();
   const [submitting, setSubmitting] = useState(false);
+  const [skipping, setSkipping] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
@@ -353,6 +488,27 @@ function NewapiStep({
     }
   }
 
+  async function onSkip() {
+    setError(null);
+    setSkipping(true);
+    try {
+      await finalizeSkipOnboard();
+      onSkipMock({ kind: "mock" });
+    } catch (err) {
+      if (err instanceof CorlinmanApiError) {
+        setError(
+          t("auth.onboardFinalizeError", { detail: err.message }),
+        );
+      } else {
+        setError(String(err));
+      }
+    } finally {
+      setSkipping(false);
+    }
+  }
+
+  const busy = submitting || skipping;
+
   return (
     <>
       <div className="space-y-1">
@@ -373,7 +529,7 @@ function NewapiStep({
             placeholder="http://localhost:3000"
             value={value.base_url}
             onChange={(e) => onChange({ ...value, base_url: e.target.value })}
-            disabled={submitting}
+            disabled={busy}
           />
         </div>
         <div className="space-y-2">
@@ -384,7 +540,7 @@ function NewapiStep({
             required
             value={value.token}
             onChange={(e) => onChange({ ...value, token: e.target.value })}
-            disabled={submitting}
+            disabled={busy}
           />
         </div>
         <div className="space-y-2">
@@ -398,7 +554,7 @@ function NewapiStep({
             onChange={(e) =>
               onChange({ ...value, admin_token: e.target.value })
             }
-            disabled={submitting}
+            disabled={busy}
           />
           <p className="text-xs text-tp-ink-3">
             {t("auth.onboardNewapiAdminTokenHint")}
@@ -413,13 +569,35 @@ function NewapiStep({
             {error}
           </p>
         ) : null}
-        <div className="flex gap-2">
-          <Button type="button" variant="outline" onClick={onBack}>
-            {t("auth.onboardBack")}
-          </Button>
-          <Button type="submit" className="flex-1" disabled={submitting}>
+        <div className="flex flex-wrap gap-2">
+          {showBack ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onBack}
+              disabled={busy}
+            >
+              {t("auth.onboardBack")}
+            </Button>
+          ) : null}
+          <Button type="submit" className="flex-1" disabled={busy}>
             {submitting ? t("auth.submitting") : t("auth.onboardNext")}
           </Button>
+        </div>
+        <div className="rounded-md border border-tp-glass-edge bg-tp-glass-inner p-3">
+          <Button
+            type="button"
+            variant="secondary"
+            className="w-full font-semibold"
+            onClick={onSkip}
+            disabled={busy}
+            data-testid="onboard-skip-mock"
+          >
+            {skipping ? t("auth.submitting") : t("auth.onboardSkipLlm")}
+          </Button>
+          <p className="mt-2 text-xs text-tp-ink-3">
+            {t("auth.onboardSkipHint")}
+          </p>
         </div>
       </form>
     </>
@@ -427,7 +605,7 @@ function NewapiStep({
 }
 
 // ---------------------------------------------------------------------------
-// Step 3: Pick models
+// Step 3: Pick models — two-stage ModelPickerDialog per kind
 // ---------------------------------------------------------------------------
 
 function ModelsStep({
@@ -457,6 +635,7 @@ function ModelsStep({
   const [ttsChannels, setTtsChannels] = useState<NewapiChannel[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [openKind, setOpenKind] = useState<ModelPickerKind | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -480,28 +659,6 @@ function ModelsStep({
         setLlmChannels(a.channels);
         setEmbChannels(b.channels);
         setTtsChannels(c.channels);
-        if (a.channels.length > 0 && !llmPick) {
-          const ch = a.channels[0];
-          onLlmChange({
-            channel_id: ch.id,
-            model: ch.models.split(",")[0].trim(),
-          });
-        }
-        if (b.channels.length > 0 && !embPick) {
-          const ch = b.channels[0];
-          onEmbChange({
-            channel_id: ch.id,
-            model: ch.models.split(",")[0].trim(),
-          });
-        }
-        if (c.channels.length > 0 && !ttsPick) {
-          const ch = c.channels[0];
-          onTtsChange({
-            channel_id: ch.id,
-            model: ch.models.split(",")[0].trim(),
-            voice: "alloy",
-          });
-        }
       } catch (err) {
         if (!active) return;
         if (err instanceof CorlinmanApiError) {
@@ -529,6 +686,34 @@ function ModelsStep({
     onDone();
   }
 
+  const activeChannels =
+    openKind === "llm"
+      ? llmChannels
+      : openKind === "embedding"
+        ? embChannels
+        : openKind === "tts"
+          ? ttsChannels
+          : [];
+
+  const activePick =
+    openKind === "llm"
+      ? llmPick
+      : openKind === "embedding"
+        ? embPick
+        : openKind === "tts"
+          ? ttsPick
+          : null;
+
+  function handlePick(pick: { channel_id: number; model: string }) {
+    if (openKind === "llm") {
+      onLlmChange(pick);
+    } else if (openKind === "embedding") {
+      onEmbChange(pick);
+    } else if (openKind === "tts") {
+      onTtsChange({ ...pick, voice: ttsPick?.voice ?? "alloy" });
+    }
+  }
+
   return (
     <>
       <div className="space-y-1">
@@ -540,33 +725,38 @@ function ModelsStep({
         </p>
       </div>
       <form onSubmit={onSubmit} className="space-y-4">
-        <ChannelPicker
+        <ModelRow
+          kind="llm"
           label={t("auth.onboardModelsLlm")}
+          kindLabel={t("auth.onboardModelsKindLlm")}
           channels={llmChannels}
+          pick={llmPick}
+          required
+          loading={loading}
+          onEdit={() => setOpenKind("llm")}
           emptyHint={t("auth.onboardModelsNoLlm")}
-          value={llmPick}
-          onChange={onLlmChange}
-          disabled={loading}
         />
-        <ChannelPicker
+        <ModelRow
+          kind="embedding"
           label={t("auth.onboardModelsEmbedding")}
+          kindLabel={t("auth.onboardModelsKindEmbedding")}
           channels={embChannels}
+          pick={embPick}
+          loading={loading}
+          onEdit={() => setOpenKind("embedding")}
+          onSkip={() => onEmbChange(null)}
           emptyHint={t("auth.onboardModelsNoEmbedding")}
-          value={embPick}
-          onChange={onEmbChange}
-          disabled={loading}
         />
-        <ChannelPicker
+        <ModelRow
+          kind="tts"
           label={t("auth.onboardModelsTts")}
+          kindLabel={t("auth.onboardModelsKindTts")}
           channels={ttsChannels}
+          pick={ttsPick}
+          loading={loading}
+          onEdit={() => setOpenKind("tts")}
+          onSkip={() => onTtsChange(null)}
           emptyHint={t("auth.onboardModelsNoTts")}
-          value={ttsPick}
-          onChange={(v) =>
-            onTtsChange(
-              v ? { channel_id: v.channel_id, model: v.model, voice: "alloy" } : null,
-            )
-          }
-          disabled={loading}
         />
         {error ? (
           <p role="alert" className="text-sm text-destructive">
@@ -577,82 +767,106 @@ function ModelsStep({
           <Button type="button" variant="outline" onClick={onBack}>
             {t("auth.onboardBack")}
           </Button>
-          <Button type="submit" className="flex-1" disabled={loading}>
+          <Button
+            type="submit"
+            className="flex-1"
+            disabled={loading || !llmPick}
+          >
             {t("auth.onboardNext")}
           </Button>
         </div>
       </form>
+      {openKind ? (
+        <ModelPickerDialog
+          open={openKind !== null}
+          onOpenChange={(o) => {
+            if (!o) setOpenKind(null);
+          }}
+          providers={activeChannels}
+          onPick={handlePick}
+          kind={openKind}
+          currentChannelId={activePick?.channel_id}
+          currentModel={activePick?.model}
+        />
+      ) : null}
     </>
   );
 }
 
-function ChannelPicker({
+function ModelRow({
+  kind,
   label,
+  kindLabel,
   channels,
+  pick,
+  required,
+  loading,
+  onEdit,
+  onSkip,
   emptyHint,
-  value,
-  onChange,
-  disabled,
 }: {
+  kind: ModelPickerKind;
   label: string;
+  kindLabel: string;
   channels: NewapiChannel[];
+  pick: ModelPickState | null;
+  required?: boolean;
+  loading: boolean;
+  onEdit: () => void;
+  onSkip?: () => void;
   emptyHint: string;
-  value: ModelPickState | null;
-  onChange: (v: ModelPickState | null) => void;
-  disabled?: boolean;
 }) {
-  if (channels.length === 0) {
-    return (
-      <div className="space-y-1">
-        <Label>{label}</Label>
-        <p className="text-xs text-tp-ink-3">{emptyHint}</p>
-      </div>
-    );
-  }
-  const selectedChannel = channels.find((c) => c.id === value?.channel_id);
-  const models = selectedChannel
-    ? selectedChannel.models.split(",").map((m) => m.trim()).filter(Boolean)
-    : [];
+  const { t } = useTranslation();
+  const hasPick = !!pick && !!pick.model;
+  const noChannels = !loading && channels.length === 0;
+
   return (
-    <div className="space-y-2">
-      <Label>{label}</Label>
-      <div className="flex gap-2">
-        <select
-          className="flex-1 rounded-md border bg-background px-2 py-1.5 text-sm"
-          value={value?.channel_id ?? channels[0].id}
-          disabled={disabled}
-          onChange={(e) => {
-            const id = Number(e.target.value);
-            const ch = channels.find((c) => c.id === id);
-            if (!ch) return;
-            onChange({
-              channel_id: id,
-              model: ch.models.split(",")[0].trim(),
-            });
-          }}
-        >
-          {channels.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-        <select
-          className="flex-1 rounded-md border bg-background px-2 py-1.5 text-sm font-mono"
-          value={value?.model ?? models[0]}
-          disabled={disabled || !selectedChannel}
-          onChange={(e) =>
-            value &&
-            onChange({ channel_id: value.channel_id, model: e.target.value })
-          }
-        >
-          {models.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
+    <div className="space-y-1.5 rounded-md border border-tp-glass-edge bg-tp-glass-inner/40 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <Label>{label}</Label>
+        {!required && onSkip && hasPick ? (
+          <button
+            type="button"
+            onClick={onSkip}
+            className="text-xs text-tp-ink-3 hover:underline"
+            data-testid={`model-row-skip-${kind}`}
+          >
+            {t("auth.onboardModelsSkip")}
+          </button>
+        ) : null}
       </div>
+      {noChannels ? (
+        <p className="text-xs text-tp-ink-3">{emptyHint}</p>
+      ) : (
+        <div className="flex items-center justify-between gap-2">
+          {hasPick ? (
+            <p className="min-w-0 truncate font-mono text-sm">
+              {t("auth.onboardModelsCurrentlyPicked", { model: pick.model })}
+            </p>
+          ) : (
+            <p className="text-xs italic text-tp-ink-3">
+              {t("auth.onboardModelsChoose", { kind: kindLabel })}
+            </p>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onEdit}
+            disabled={loading || channels.length === 0}
+            data-testid={`model-row-edit-${kind}`}
+          >
+            {hasPick ? (
+              t("auth.onboardModelsEdit")
+            ) : (
+              <>
+                {t("auth.onboardModelsChoose", { kind: kindLabel })}
+                <ChevronRight className="ml-0.5 h-3 w-3" />
+              </>
+            )}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -667,15 +881,16 @@ function ConfirmStep({
   embPick,
   ttsPick,
   onBack,
+  onFinished,
 }: {
   newapi: NewapiState;
   llmPick: ModelPickState | null;
   embPick: ModelPickState | null;
   ttsPick: TtsPickState | null;
   onBack: () => void;
+  onFinished: (result: FinishResult) => void;
 }) {
   const { t } = useTranslation();
-  const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -707,7 +922,11 @@ function ConfirmStep({
             }
           : undefined,
       });
-      router.replace("/login");
+      onFinished({
+        kind: "real",
+        provider: newapi.base_url || "newapi",
+        model: llmPick.model,
+      });
     } catch (err) {
       if (err instanceof CorlinmanApiError) {
         setError(
@@ -764,6 +983,69 @@ function ConfirmStep({
         </Button>
       </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Success card — shared between mock-skip and real-finalize paths
+// ---------------------------------------------------------------------------
+
+function SuccessCard({ result }: { result: FinishResult }) {
+  const { t } = useTranslation();
+  const router = useRouter();
+
+  const subtitle =
+    result.kind === "mock"
+      ? t("auth.onboardCompleteMockProvider")
+      : t("auth.onboardCompleteRealProvider", { provider: result.provider });
+
+  return (
+    <div
+      className="space-y-5 rounded-md border border-tp-glass-edge bg-tp-glass-inner p-6"
+      data-testid="onboard-success-card"
+    >
+      <div className="flex items-start gap-3">
+        <CheckCircle2
+          className="mt-0.5 h-7 w-7 text-emerald-500"
+          aria-hidden
+        />
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight">
+            {t("auth.onboardCompleteTitle")}
+          </h2>
+          <p
+            className="text-sm text-tp-ink-3"
+            data-testid="onboard-success-subtitle"
+          >
+            {subtitle}
+          </p>
+          {result.kind === "mock" ? (
+            <p className="pt-1 text-xs text-tp-ink-3">
+              {t("auth.onboardSkippedBody")}
+            </p>
+          ) : null}
+        </div>
+      </div>
+      <div className="flex flex-col gap-2">
+        <Button
+          type="button"
+          className="w-full"
+          onClick={() => router.replace("/account/security")}
+          data-testid="onboard-cta-security"
+        >
+          {t("auth.onboardChangeDefaultPassword")}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full"
+          onClick={() => router.replace("/")}
+          data-testid="onboard-cta-dashboard"
+        >
+          {t("auth.onboardGoToDashboard")}
+        </Button>
+      </div>
+    </div>
   );
 }
 

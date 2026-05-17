@@ -32,6 +32,7 @@ dependencies = [
     "corlinman-grpc",
     "corlinman-hooks",
     "corlinman-replay",
+    "tomli-w>=1.2.0",
 ]
 
 [tool.uv.sources]

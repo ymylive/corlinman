@@ -33,6 +33,7 @@ from corlinman_providers.failover import (
     TimeoutError,  # noqa: A004 — intentional shadowing; see failover.TimeoutError
 )
 from corlinman_providers.google_provider import GoogleProvider
+from corlinman_providers.mock import MOCK_PREAMBLE, MockProvider
 from corlinman_providers.openai_compatible import OpenAICompatibleProvider
 from corlinman_providers.openai_provider import OpenAIProvider
 from corlinman_providers.registry import MODEL_PREFIX_DEFAULTS, ProviderRegistry, resolve
@@ -55,6 +56,8 @@ __all__ = [
     "FormatError",
     "GLMProvider",
     "GoogleProvider",
+    "MOCK_PREAMBLE",
+    "MockProvider",
     "ModelNotFoundError",
     "ModelSpec",
     "OpenAICompatibleProvider",

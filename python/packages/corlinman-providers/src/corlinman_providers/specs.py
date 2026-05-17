@@ -55,6 +55,11 @@ class ProviderKind(StrEnum):
     # the named kind exists so the admin UI / inspection commands can
     # document operator intent. See ``docs/design/newapi-integration.md``.
     NEWAPI = "newapi"
+    # Built-in echo provider — zero-config OpenAI-shape adapter that
+    # reverses the last user message. Used by the easy-setup "skip LLM
+    # connection" path (Wave 2.2) so new users can land on a working
+    # agent without configuring real credentials first.
+    MOCK = "mock"
 
 
 class ProviderSpec(BaseModel):
