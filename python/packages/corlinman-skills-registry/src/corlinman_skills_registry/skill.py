@@ -8,9 +8,18 @@ same field-level guarantees with the same field names.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+# Public type aliases for lifecycle vocab. Kept narrow so static checkers
+# can catch typos in callers; the hermes vocabulary is the source of truth
+# (see ``tools/skill_usage.py:52-55`` and ``tools/skill_provenance.py``).
+SkillOrigin = Literal["bundled", "user-requested", "agent-created"]
+SkillState = Literal["active", "stale", "archived"]
 
 
 class SkillRequirements(BaseModel):
@@ -75,5 +84,37 @@ class Skill(BaseModel):
     source_path: Path
     """Absolute path to the file this skill was loaded from."""
 
+    # ------------------------------------------------------------------
+    # Lifecycle metadata (W4 — hermes curator port)
+    # ------------------------------------------------------------------
+    # These fields ride in the SKILL.md frontmatter when present, but every
+    # default is benign so legacy files load unchanged. The curator surface
+    # is what actually mutates them; this package only carries the data and
+    # round-trips it on write.
 
-__all__ = ["Skill", "SkillRequirements"]
+    version: str = "1.0.0"
+    """SemVer version of this skill. Bumped on substantive edits by the
+    curator's patch flow (see hermes ``agent/curator.py``)."""
+
+    origin: SkillOrigin = "user-requested"
+    """Provenance — only ``agent-created`` skills are eligible for the
+    curator's autonomous lifecycle transitions. ``bundled`` skills ship
+    with the repo, ``user-requested`` are hand-authored. Mirrors
+    hermes ``tools/skill_usage.py:154-200``."""
+
+    state: SkillState = "active"
+    """Lifecycle state. Curator transitions: active → stale (30d idle) →
+    archived (90d idle); stale → active on any re-use. See hermes
+    ``agent/curator.py:256-296``."""
+
+    pinned: bool = False
+    """Operator can pin a skill so the curator never archives or rewrites
+    it. Useful for hand-written skills that look unused-but-important."""
+
+    created_at: datetime | None = None
+    """ISO-8601 first-seen timestamp. Populated by the registry on initial
+    load if SKILL.md doesn't carry it; persisted on next write. Stored as
+    ``datetime`` in-memory and serialised as ISO-8601 by pydantic v2."""
+
+
+__all__ = ["Skill", "SkillOrigin", "SkillRequirements", "SkillState"]

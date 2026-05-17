@@ -96,6 +96,28 @@ CREATE TABLE IF NOT EXISTS apply_intent_log (
     failure_reason  TEXT,
     tenant_id       TEXT NOT NULL DEFAULT 'default'
 );
+
+-- Phase 4 W4.2 — per-profile curator-loop bookkeeping. Ported from
+-- hermes ``agent/curator.py`` (the JSON ``.curator_state`` file there);
+-- moved into SQLite so the gateway can query / list across profiles
+-- and tenants. Defaults match the DDL on the dataclass side so a
+-- ``get_curator_state`` for an unknown slug can synthesise a sane
+-- default-valued row without round-tripping through the DB.
+CREATE TABLE IF NOT EXISTS curator_state (
+    profile_slug             TEXT PRIMARY KEY,
+    last_review_at           INTEGER,
+    last_review_duration_ms  INTEGER,
+    last_review_summary      TEXT,
+    run_count                INTEGER NOT NULL DEFAULT 0,
+    paused                   INTEGER NOT NULL DEFAULT 0,
+    interval_hours           INTEGER NOT NULL DEFAULT 168,
+    stale_after_days         INTEGER NOT NULL DEFAULT 30,
+    archive_after_days       INTEGER NOT NULL DEFAULT 90,
+    tenant_id                TEXT NOT NULL DEFAULT 'default'
+);
+
+CREATE INDEX IF NOT EXISTS idx_curator_state_tenant
+    ON curator_state(tenant_id);
 """
 
 # DDL applied *after* SCHEMA_SQL and the MIGRATIONS loop, so it can safely

@@ -41,6 +41,8 @@ from fastapi import APIRouter
 
 from corlinman_server.gateway.routes_admin_b import (
     config as _config,
+    credentials as _credentials,
+    curator as _curator,
     evolution as _evolution,
     federation as _federation,
     logs as _logs,
@@ -73,6 +75,8 @@ def build_router() -> APIRouter:
     root = APIRouter()
     for mod in (
         _config,
+        _credentials,
+        _curator,
         _evolution,
         _federation,
         _logs,

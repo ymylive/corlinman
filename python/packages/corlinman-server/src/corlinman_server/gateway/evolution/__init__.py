@@ -42,3 +42,63 @@ __all__ = [
     "UnsupportedKindError",
     "adapt",
 ]
+
+# ---------------------------------------------------------------------------
+# W4.3 curator surface — additive re-export so sibling agent (W4.4
+# background_review) can append below without rewriting this block.
+# ---------------------------------------------------------------------------
+from corlinman_server.gateway.evolution.curator import (  # noqa: E402
+    CuratorReport,
+    CuratorTransition,
+    apply_lifecycle_transitions,
+    maybe_run_curator,
+)
+
+__all__ += [
+    "CuratorReport",
+    "CuratorTransition",
+    "apply_lifecycle_transitions",
+    "maybe_run_curator",
+]
+
+# ---------------------------------------------------------------------------
+# W4.4 background-review surface — additive re-export. The LLM-driven
+# review fork is an opt-in companion to the deterministic curator above;
+# both share the evolution-store and skills-registry but never call each
+# other.
+# ---------------------------------------------------------------------------
+from corlinman_server.gateway.evolution.background_review import (  # noqa: E402
+    BackgroundReviewReport,
+    ReviewKind,
+    ReviewWriteRecord,
+    spawn_background_review,
+)
+
+__all__ += [
+    "BackgroundReviewReport",
+    "ReviewKind",
+    "ReviewWriteRecord",
+    "spawn_background_review",
+]
+
+# ---------------------------------------------------------------------------
+# W4.5 user-correction surface — additive re-export. The detector +
+# applier route corrective phrases in chat to a background-review fork
+# scoped to ``kind="user-correction"``. Kept in their own modules so
+# config can disable the routing without touching :mod:`.applier`.
+# ---------------------------------------------------------------------------
+from corlinman_server.gateway.evolution.signals.user_correction import (  # noqa: E402
+    CorrectionMatch,
+    detect_correction,
+    register_user_correction_listener,
+)
+from corlinman_server.gateway.evolution.applier_user_correction import (  # noqa: E402
+    UserCorrectionApplier,
+)
+
+__all__ += [
+    "CorrectionMatch",
+    "UserCorrectionApplier",
+    "detect_correction",
+    "register_user_correction_listener",
+]

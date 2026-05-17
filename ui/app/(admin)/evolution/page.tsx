@@ -15,9 +15,19 @@ import {
   fetchBudget,
   fetchEvolutionHistory,
   fetchEvolutionPending,
+  listCuratorProfiles,
+  listProfileSkills,
+  pauseCurator,
+  pinSkill,
+  previewCuratorRun,
+  runCuratorNow,
+  updateCuratorThresholds,
   type BudgetSnapshot,
+  type CuratorReport,
+  type CuratorThresholdsPatch,
   type EvolutionProposal,
   type HistoryEntry,
+  type ProfileCuratorState,
 } from "@/lib/api";
 
 import { EvolutionPageHeader } from "@/components/evolution/PageHeader";
@@ -28,34 +38,40 @@ import { HistoryList } from "@/components/evolution/HistoryList";
 import { MetaList } from "@/components/evolution/MetaList";
 import { EvolutionEmptyState } from "@/components/evolution/EmptyState";
 import { isMetaKind, type Tab } from "@/components/evolution/types";
+import { ProfileCuratorCard } from "@/components/evolution/profile-curator-card";
+import { PreviewDialog } from "@/components/evolution/preview-dialog";
+import { ThresholdEditorDialog } from "@/components/evolution/threshold-editor-dialog";
+import { SkillList } from "@/components/evolution/skill-list";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 
 /**
- * /evolution — Wave 1-D Phase 2 MVP.
+ * /evolution — W4.6 curator surface + existing proposal queue
  *
- * Layout:
- *   [ hero (GlassPanel strong, serif title) ]
- *   [ StatChip × 4 ]
- *   [ FilterChipGroup: Pending(N) · Approved · History ]
- *   [ FilterChipGroup: kind row — All · memory_op · ... ]
- *   [ ProposalCard list  |  Approved/History placeholder ]
+ * Layout (after W4.6):
+ *   [ Hero — Phase 4.6: title + summary count ]
+ *   [ Section: Curator ]
+ *     - one card per profile with status + thresholds + actions
+ *     - skill table for the active profile with state + origin filters
+ *   [ Section: Proposals (legacy Phase 3 surface, preserved verbatim) ]
+ *     - StatsRow + RolledBackChip + the four-tab proposal queue
  *
- * Data:
- *   - React Query polls `/admin/evolution?status=pending&limit=50` every 3s.
- *   - approve / deny use useMutation with optimistic spring-out: the card
- *     fades+scales out for 400ms, then the cache drops it.
- *   - Approved / History tabs render structural placeholders only — Phase 3
- *     wires the real data.
- *
- * Accessibility:
- *   - All buttons carry aria-labels (Approve / Deny / Show detail / etc).
- *   - sr-only LiveRegion announces approve / deny outcomes for screen
- *     readers.
- *   - Mobile: the proposal column is single-column at <md by default; the
- *     stat chips reflow to 2× on small screens.
+ * The two sections live side-by-side under one URL so operators can
+ * triage proposals AND curate skills without page hops. The curator
+ * section polls every 5 s; the proposal queue keeps its existing 3 s
+ * cadence (it's the higher-traffic view).
  */
 export default function EvolutionPage() {
   const { t } = useTranslation();
   const { reduced } = useMotion();
+  const qc = useQueryClient();
 
   const [tab, setTab] = useState<Tab>("pending");
   const [kindFilter, setKindFilter] = useState<string>("__all__");
@@ -66,14 +82,172 @@ export default function EvolutionPage() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [srMessage, setSrMessage] = useState<string | null>(null);
 
-  // Coarse 1s tick for the "Xs ago" labels + held-for prose.
+  // ─── coarse 1s tick (existing) ───────────────────────────────────────
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(id);
   }, []);
 
-  // ─── pending query (3s polling) ───────────────────────────────────────
-  const qc = useQueryClient();
+  // ────────────────────────────────────────────────────────────────────
+  // W4.6: Curator surface
+  // ────────────────────────────────────────────────────────────────────
+
+  const curatorQuery = useQuery({
+    queryKey: ["admin", "curator", "profiles"],
+    queryFn: listCuratorProfiles,
+    refetchInterval: 5_000,
+    retry: false,
+  });
+
+  const profiles = useMemo(
+    () => curatorQuery.data?.profiles ?? [],
+    [curatorQuery.data],
+  );
+
+  const [activeSlug, setActiveSlug] = useState<string | null>(null);
+  // Auto-select the first profile once we know what's available.
+  useEffect(() => {
+    if (activeSlug === null && profiles.length > 0) {
+      setActiveSlug(profiles[0].slug);
+    }
+  }, [activeSlug, profiles]);
+
+  const activeProfile = useMemo(
+    () => profiles.find((p) => p.slug === activeSlug) ?? null,
+    [profiles, activeSlug],
+  );
+
+  // Skill list query — keyed by slug so cache survives profile switches.
+  const skillsQuery = useQuery({
+    queryKey: ["admin", "curator", "skills", activeSlug ?? ""],
+    queryFn: () => listProfileSkills(activeSlug ?? ""),
+    enabled: !!activeSlug,
+    refetchInterval: 8_000,
+    retry: false,
+  });
+
+  // Dialog state
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewReport, setPreviewReport] = useState<CuratorReport | null>(
+    null,
+  );
+  const [previewSlug, setPreviewSlug] = useState<string | null>(null);
+  const [thresholdOpen, setThresholdOpen] = useState(false);
+  const [thresholdProfile, setThresholdProfile] =
+    useState<ProfileCuratorState | null>(null);
+  const [confirmRunSlug, setConfirmRunSlug] = useState<string | null>(null);
+
+  const invalidateCurator = React.useCallback(() => {
+    void qc.invalidateQueries({ queryKey: ["admin", "curator", "profiles"] });
+    if (activeSlug) {
+      void qc.invalidateQueries({
+        queryKey: ["admin", "curator", "skills", activeSlug],
+      });
+    }
+  }, [qc, activeSlug]);
+
+  // Preview button — dry-run, then open the dialog with results.
+  const handlePreview = React.useCallback(
+    async (slug: string) => {
+      setPreviewOpen(true);
+      setPreviewLoading(true);
+      setPreviewSlug(slug);
+      setPreviewReport(null);
+      try {
+        const report = await previewCuratorRun(slug);
+        setPreviewReport(report);
+      } catch (err) {
+        setErrorBanner(
+          t("evolution.curator.previewFailed", {
+            msg: err instanceof Error ? err.message : String(err),
+          }),
+        );
+        setPreviewOpen(false);
+      } finally {
+        setPreviewLoading(false);
+      }
+    },
+    [t],
+  );
+
+  // Real run — used by both the confirm-run dialog AND the "Apply now"
+  // button inside the preview dialog. The two paths converge here.
+  const handleRunNow = React.useCallback(
+    async (slug: string) => {
+      try {
+        await runCuratorNow(slug);
+        invalidateCurator();
+        setPreviewOpen(false);
+        setConfirmRunSlug(null);
+      } catch (err) {
+        setErrorBanner(
+          t("evolution.curator.runFailed", {
+            msg: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      }
+    },
+    [invalidateCurator, t],
+  );
+
+  const pauseMutation = useMutation({
+    mutationFn: ({ slug, paused }: { slug: string; paused: boolean }) =>
+      pauseCurator(slug, paused),
+    onSuccess: () => invalidateCurator(),
+  });
+
+  const thresholdsMutation = useMutation({
+    mutationFn: ({
+      slug,
+      patch,
+    }: {
+      slug: string;
+      patch: CuratorThresholdsPatch;
+    }) => updateCuratorThresholds(slug, patch),
+    onSuccess: () => {
+      invalidateCurator();
+      setThresholdOpen(false);
+    },
+    onError: (err) => {
+      setErrorBanner(
+        t("evolution.curator.thresholdsSaveFailed", {
+          msg: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    },
+  });
+
+  const pinMutation = useMutation({
+    mutationFn: ({
+      slug,
+      name,
+      pinned,
+    }: {
+      slug: string;
+      name: string;
+      pinned: boolean;
+    }) => pinSkill(slug, name, pinned),
+    onSuccess: () => invalidateCurator(),
+  });
+
+  // Summary count (used in hero subtitle)
+  const summary = useMemo(() => {
+    let stale = 0;
+    let archived = 0;
+    let agentCreated = 0;
+    for (const p of profiles) {
+      stale += p.skill_counts.stale;
+      archived += p.skill_counts.archived;
+      agentCreated += p.origin_counts["agent-created"];
+    }
+    return { profiles: profiles.length, stale, archived, agentCreated };
+  }, [profiles]);
+
+  // ────────────────────────────────────────────────────────────────────
+  // Legacy proposal queue (preserved from prior page)
+  // ────────────────────────────────────────────────────────────────────
+
   const queryKey = useMemo(() => ["admin", "evolution", "pending"], []);
   const query = useQuery<EvolutionProposal[]>({
     queryKey,
@@ -85,23 +259,16 @@ export default function EvolutionPage() {
   const pendingRows = useMemo(() => query.data ?? [], [query.data]);
   const pendingLive = !query.isError;
 
-  // Phase 4 W2 B1 iter 6+7: meta count for the tab badge. The Meta tab
-  // itself merges pending+approved meta rows; the badge mirrors what an
-  // operator sees when they switch tabs (pending bucket).
   const metaPendingCount = useMemo(
     () => pendingRows.filter((p) => isMetaKind(p.kind)).length,
     [pendingRows],
   );
 
-  // Non-meta pending rows feed the regular Pending tab — meta is its
-  // own surface so we don't display them twice.
   const nonMetaPendingRows = useMemo(
     () => pendingRows.filter((p) => !isMetaKind(p.kind)),
     [pendingRows],
   );
 
-  // Distinct kinds for the secondary filter row (excludes meta —
-  // meta has its own tab now).
   const kinds = useMemo(() => {
     const set = new Set<string>();
     for (const p of nonMetaPendingRows) set.add(p.kind);
@@ -123,7 +290,6 @@ export default function EvolutionPage() {
     return oldest;
   }, [nonMetaPendingRows, now]);
 
-  // ─── mutations ────────────────────────────────────────────────────────
   const removeFromCache = (id: string) => {
     qc.setQueryData<EvolutionProposal[]>(queryKey, (prev) =>
       prev ? prev.filter((p) => p.id !== id) : prev,
@@ -136,7 +302,6 @@ export default function EvolutionPage() {
       n.add(id);
       return n;
     });
-    // After the spring-out finishes, drop the card from cache.
     window.setTimeout(() => {
       removeFromCache(id);
       setDepartingIds((prev) => {
@@ -156,8 +321,7 @@ export default function EvolutionPage() {
       setSrMessage(t("evolution.tp.srApproved", { id: vars.id }));
       setErrorBanner(null);
     },
-    onError: (err, vars) => {
-      void vars;
+    onError: (err) => {
       setErrorBanner(
         t("evolution.tp.approveFailed", {
           msg: err instanceof Error ? err.message : String(err),
@@ -185,7 +349,6 @@ export default function EvolutionPage() {
 
   const anyMutating = approveMutation.isPending || denyMutation.isPending;
 
-  // ─── filter options ───────────────────────────────────────────────────
   const tabOptions = useMemo(
     () => [
       {
@@ -211,8 +374,6 @@ export default function EvolutionPage() {
         value: "meta",
         label: t("evolution.tp.filterMeta"),
         count: metaPendingCount,
-        // Amber tone whenever there's a self-improvement proposal waiting,
-        // so meta visually pops out from the regular tabs.
         tone:
           metaPendingCount > 0 ? ("warn" as const) : ("neutral" as const),
       },
@@ -236,7 +397,6 @@ export default function EvolutionPage() {
     [kinds, t],
   );
 
-  // Phase 3 W1-C: live from /admin/evolution/budget; falls back to 0/0 on error.
   const budgetQuery = useQuery<BudgetSnapshot>({
     queryKey: ["admin-evolution-budget"],
     queryFn: fetchBudget,
@@ -247,9 +407,6 @@ export default function EvolutionPage() {
   const budgetTotal = budgetQuery.data?.weekly_total.limit ?? 0;
   const budgetUsed = budgetQuery.data?.weekly_total.used ?? 0;
 
-  // Phase 3 W2 (3-2D): history-backed "rolled back this week" counter.
-  // Polls slowly because the History tab itself polls 10s — a separate
-  // query key keeps the chip live regardless of which tab is mounted.
   const historyQuery = useQuery<HistoryEntry[]>({
     queryKey: ["admin", "evolution", "history"],
     queryFn: fetchEvolutionHistory,
@@ -276,99 +433,316 @@ export default function EvolutionPage() {
 
   return (
     <motion.div
-      className="flex flex-col gap-5"
+      className="flex flex-col gap-6"
       initial={reduced ? undefined : { opacity: 0, y: 6 }}
       animate={reduced ? undefined : { opacity: 1, y: 0 }}
       transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
     >
-      <EvolutionPageHeader
-        pendingCount={pendingRows.length}
-        oldestHeldMs={oldestHeldMs}
-        budgetTotal={budgetTotal}
-        budgetUsed={budgetUsed}
-        watching={pendingLive && !query.isPending}
-        onRefresh={refresh}
-        refreshing={query.isFetching}
-      />
+      {/* ───────── W4.6 curator section ───────── */}
+      <section
+        aria-labelledby="curator-heading"
+        data-testid="curator-section"
+        className="flex flex-col gap-4"
+      >
+        <header className="flex flex-col gap-1">
+          <h1
+            id="curator-heading"
+            className="font-serif text-2xl text-tp-ink-1"
+          >
+            {t("evolution.title")}
+          </h1>
+          <p className="text-[13px] text-tp-ink-3">{t("evolution.subtitle")}</p>
+          <p
+            data-testid="curator-summary"
+            className="text-[12px] text-tp-ink-3"
+          >
+            {t("evolution.summaryCount", {
+              profiles: summary.profiles,
+              stale: summary.stale,
+              archived: summary.archived,
+              agentCreated: summary.agentCreated,
+            })}
+          </p>
+        </header>
 
-      <StatsRow
-        pendingCount={pendingRows.length}
-        pendingLive={pendingLive}
-        budgetUsed={budgetUsed}
-        budgetTotal={budgetTotal}
-      />
+        {curatorQuery.isPending ? (
+          <div className="rounded-2xl border border-tp-glass-edge bg-tp-glass-inner/40 px-6 py-10 text-center text-[12.5px] text-tp-ink-3">
+            {t("evolution.curator.loading")}
+          </div>
+        ) : curatorQuery.isError ? (
+          <div className="rounded-2xl border border-tp-err/30 bg-tp-err-soft px-6 py-6 text-center text-[12.5px] text-tp-err">
+            {t("evolution.curator.loadFailed")}
+          </div>
+        ) : profiles.length === 0 ? (
+          <div className="rounded-2xl border border-tp-glass-edge bg-tp-glass-inner/40 px-6 py-6 text-center text-[12.5px] text-tp-ink-3">
+            {t("common.empty")}
+          </div>
+        ) : (
+          <div
+            className="grid gap-3 md:grid-cols-2"
+            data-testid="curator-profile-cards"
+          >
+            {profiles.map((p) => (
+              <ProfileCuratorCard
+                key={p.slug}
+                profile={p}
+                busy={
+                  pauseMutation.isPending || thresholdsMutation.isPending
+                }
+                onPreview={() => handlePreview(p.slug)}
+                onRunNow={() => setConfirmRunSlug(p.slug)}
+                onTogglePause={() =>
+                  pauseMutation.mutate({
+                    slug: p.slug,
+                    paused: !p.paused,
+                  })
+                }
+                onEditThresholds={() => {
+                  setThresholdProfile(p);
+                  setThresholdOpen(true);
+                }}
+              />
+            ))}
+          </div>
+        )}
 
-      {/* Phase 3 W2: rolled-back chip lives between StatsRow and the
-          tab filter so the existing 4-up StatsRow signature stays
-          stable. Renders only when there's actually rollback data. */}
-      {rolledBackThisWeek > 0 ? (
-        <RolledBackChip count={rolledBackThisWeek} />
-      ) : null}
+        {activeProfile ? (
+          <section
+            aria-labelledby="skills-heading"
+            data-testid="curator-skills-section"
+            className="flex flex-col gap-2"
+          >
+            <header className="flex items-center justify-between gap-3">
+              <h2
+                id="skills-heading"
+                className="font-serif text-lg text-tp-ink-1"
+              >
+                {t("evolution.skill.heading")}
+              </h2>
+              <ProfileSwitcher
+                profiles={profiles}
+                value={activeSlug ?? ""}
+                onChange={setActiveSlug}
+              />
+            </header>
+            <SkillList
+              skills={skillsQuery.data?.skills ?? []}
+              loading={skillsQuery.isPending}
+              onTogglePin={(name, nextPinned) =>
+                pinMutation.mutate({
+                  slug: activeProfile.slug,
+                  name,
+                  pinned: nextPinned,
+                })
+              }
+            />
+          </section>
+        ) : null}
+      </section>
 
-      {errorBanner ? (
-        <Banner
-          tone="err"
-          text={errorBanner}
-          onDismiss={() => setErrorBanner(null)}
+      {/* ───────── Legacy proposal queue (unchanged behaviour) ───────── */}
+      <section
+        aria-labelledby="proposals-heading"
+        data-testid="proposals-section"
+        className="flex flex-col gap-5"
+      >
+        <h2 id="proposals-heading" className="sr-only">
+          {t("evolution.tp.title")}
+        </h2>
+
+        <EvolutionPageHeader
+          pendingCount={pendingRows.length}
+          oldestHeldMs={oldestHeldMs}
+          budgetTotal={budgetTotal}
+          budgetUsed={budgetUsed}
+          watching={pendingLive && !query.isPending}
+          onRefresh={refresh}
+          refreshing={query.isFetching}
         />
-      ) : null}
-      {query.isError && !errorBanner ? (
-        <Banner tone="info" text={t("evolution.tp.endpointOfflineBanner")} />
-      ) : null}
 
-      <div className="flex flex-col gap-2.5">
-        <FilterChipGroup
-          label={t("evolution.tp.title")}
-          options={tabOptions}
-          value={tab}
-          onChange={(next) => setTab(next as Tab)}
+        <StatsRow
+          pendingCount={pendingRows.length}
+          pendingLive={pendingLive}
+          budgetUsed={budgetUsed}
+          budgetTotal={budgetTotal}
         />
-        {tab === "pending" && kindOptions.length > 1 ? (
-          <FilterChipGroup
-            label={t("evolution.tp.kindAll")}
-            options={kindOptions}
-            value={kindFilter}
-            onChange={(next) => setKindFilter(next)}
+
+        {rolledBackThisWeek > 0 ? (
+          <RolledBackChip count={rolledBackThisWeek} />
+        ) : null}
+
+        {errorBanner ? (
+          <Banner
+            tone="err"
+            text={errorBanner}
+            onDismiss={() => setErrorBanner(null)}
           />
         ) : null}
-      </div>
+        {query.isError && !errorBanner ? (
+          <Banner
+            tone="info"
+            text={t("evolution.tp.endpointOfflineBanner")}
+          />
+        ) : null}
 
-      {tab === "pending" ? (
-        <section className="flex flex-col gap-3.5">
-          {query.isPending ? (
-            <ListSkeleton />
-          ) : listIsEmpty ? (
-            kindFilter !== "__all__" && nonMetaPendingRows.length > 0 ? (
-              <FilteredEmpty />
+        <div className="flex flex-col gap-2.5">
+          <FilterChipGroup
+            label={t("evolution.tp.title")}
+            options={tabOptions}
+            value={tab}
+            onChange={(next) => setTab(next as Tab)}
+          />
+          {tab === "pending" && kindOptions.length > 1 ? (
+            <FilterChipGroup
+              label={t("evolution.tp.kindAll")}
+              options={kindOptions}
+              value={kindFilter}
+              onChange={(next) => setKindFilter(next)}
+            />
+          ) : null}
+        </div>
+
+        {tab === "pending" ? (
+          <div className="flex flex-col gap-3.5">
+            {query.isPending ? (
+              <ListSkeleton />
+            ) : listIsEmpty ? (
+              kindFilter !== "__all__" && nonMetaPendingRows.length > 0 ? (
+                <FilteredEmpty />
+              ) : (
+                <EvolutionEmptyState tab="pending" />
+              )
             ) : (
-              <EvolutionEmptyState tab="pending" />
-            )
-          ) : (
-            <AnimatePresence initial={false}>
-              {visibleRows.map((proposal) => (
-                <ProposalCard
-                  key={proposal.id}
-                  proposal={proposal}
-                  now={now}
-                  isDeparting={departingIds.has(proposal.id)}
-                  disabled={anyMutating || departingIds.has(proposal.id)}
-                  onApprove={(id) => approveMutation.mutate({ id })}
-                  onDeny={(id, reason) => denyMutation.mutate({ id, reason })}
-                />
-              ))}
-            </AnimatePresence>
-          )}
-        </section>
-      ) : tab === "approved" ? (
-        <ApprovedList />
-      ) : tab === "meta" ? (
-        <MetaList />
-      ) : (
-        <HistoryList />
-      )}
+              <AnimatePresence initial={false}>
+                {visibleRows.map((proposal) => (
+                  <ProposalCard
+                    key={proposal.id}
+                    proposal={proposal}
+                    now={now}
+                    isDeparting={departingIds.has(proposal.id)}
+                    disabled={anyMutating || departingIds.has(proposal.id)}
+                    onApprove={(id) => approveMutation.mutate({ id })}
+                    onDeny={(id, reason) =>
+                      denyMutation.mutate({ id, reason })
+                    }
+                  />
+                ))}
+              </AnimatePresence>
+            )}
+          </div>
+        ) : tab === "approved" ? (
+          <ApprovedList />
+        ) : tab === "meta" ? (
+          <MetaList />
+        ) : (
+          <HistoryList />
+        )}
+      </section>
 
       <LiveRegion politeness="polite">{srMessage}</LiveRegion>
+
+      {/* ───────── W4.6 dialogs ───────── */}
+      <PreviewDialog
+        open={previewOpen}
+        onOpenChange={setPreviewOpen}
+        report={previewReport}
+        loading={previewLoading}
+        onApply={
+          previewSlug ? () => void handleRunNow(previewSlug) : undefined
+        }
+      />
+      <ThresholdEditorDialog
+        open={thresholdOpen}
+        onOpenChange={(o) => {
+          setThresholdOpen(o);
+          if (!o) setThresholdProfile(null);
+        }}
+        profile={thresholdProfile}
+        saving={thresholdsMutation.isPending}
+        onSave={(patch) => {
+          if (!thresholdProfile) return;
+          thresholdsMutation.mutate({
+            slug: thresholdProfile.slug,
+            patch,
+          });
+        }}
+      />
+      <ConfirmRunDialog
+        slug={confirmRunSlug}
+        onClose={() => setConfirmRunSlug(null)}
+        onConfirm={() => {
+          if (confirmRunSlug) void handleRunNow(confirmRunSlug);
+        }}
+      />
     </motion.div>
+  );
+}
+
+function ProfileSwitcher({
+  profiles,
+  value,
+  onChange,
+}: {
+  profiles: ProfileCuratorState[];
+  value: string;
+  onChange: (slug: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <select
+      data-testid="profile-switcher"
+      aria-label={t("evolution.curator.profileLabel")}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+    >
+      {profiles.map((p) => (
+        <option key={p.slug} value={p.slug}>
+          {p.slug}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function ConfirmRunDialog({
+  slug,
+  onClose,
+  onConfirm,
+}: {
+  slug: string | null;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Dialog
+      open={!!slug}
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{t("evolution.confirmRun.title")}</DialogTitle>
+          <DialogDescription>
+            {t("evolution.confirmRun.body")}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            {t("evolution.preview.cancel")}
+          </Button>
+          <Button
+            variant="destructive"
+            data-testid="confirm-run-action"
+            onClick={onConfirm}
+          >
+            {t("evolution.confirmRun.action")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -395,8 +769,6 @@ function RolledBackChip({ count }: { count: number }) {
     </div>
   );
 }
-
-// ─── atomic pieces ────────────────────────────────────────────────────────
 
 function FilteredEmpty() {
   const { t } = useTranslation();

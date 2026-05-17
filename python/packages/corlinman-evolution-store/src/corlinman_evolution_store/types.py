@@ -24,6 +24,39 @@ Json = Any
 DEFAULT_TENANT_ID: str = "default"
 
 
+# ---------------------------------------------------------------------------
+# Curator-loop signal kinds (Phase 4 W4 — hermes port).
+#
+# These are the cross-language wire values written into
+# ``evolution_signals.event_kind``. Kept as module-level ``str`` constants
+# (not an Enum) so they coexist with the existing free-form ``event_kind``
+# convention — the gateway hooks already emit ``engine.run.completed`` /
+# ``tool.call.failed`` / etc. as ad-hoc strings.
+# ---------------------------------------------------------------------------
+
+EVENT_USER_CORRECTION: str = "user.correction"
+"""Signal emitted when a user-correction-detector spots a corrective
+phrase in chat (e.g. ``"stop"``, ``"don't do that"``). ``target`` should
+be the skill name when one is implicated, otherwise the profile slug."""
+
+EVENT_SKILL_UNUSED: str = "skill.unused"
+"""Curator detected a skill has gone unused past the stale threshold.
+Payload carries the new lifecycle state (``"stale"`` or ``"archived"``)."""
+
+EVENT_IDLE_REFLECTION: str = "idle.reflection"
+"""Background curator loop fired because the inactivity interval elapsed.
+``target`` = profile slug. Payload carries the ``CuratorReport``
+(counts of ``marked_stale``, ``archived``, ``reactivated``)."""
+
+EVENT_CURATOR_RUN_COMPLETED: str = "curator.run.completed"
+"""Curator-loop run finished cleanly — analogous to the existing
+``engine.run.completed``."""
+
+EVENT_CURATOR_RUN_FAILED: str = "curator.run.failed"
+"""Curator-loop run aborted with an error — analogous to the existing
+``engine.run.failed``."""
+
+
 # Strongly-typed proposal id. NewType so the type checker keeps it
 # distinct from a plain ``str`` while letting it serialise the same way.
 ProposalId = NewType("ProposalId", str)
@@ -272,6 +305,11 @@ class EvolutionHistory:
 
 __all__ = [
     "DEFAULT_TENANT_ID",
+    "EVENT_CURATOR_RUN_COMPLETED",
+    "EVENT_CURATOR_RUN_FAILED",
+    "EVENT_IDLE_REFLECTION",
+    "EVENT_SKILL_UNUSED",
+    "EVENT_USER_CORRECTION",
     "ClusterThresholdPayload",
     "EngineConfigPayload",
     "EnginePromptPayload",

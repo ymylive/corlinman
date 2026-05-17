@@ -922,8 +922,212 @@ class IntentLogRepo:
         ]
 
 
+# ---------------------------------------------------------------------------
+# Curator state (Phase 4 W4.2)
+# ---------------------------------------------------------------------------
+
+
+# DDL defaults — kept in sync with ``curator_state`` in
+# ``schema.SCHEMA_SQL``. Synthesised onto :class:`CuratorState` rows
+# when no row exists yet, so callers always get a usable struct.
+_CURATOR_DEFAULT_INTERVAL_HOURS: int = 168
+_CURATOR_DEFAULT_STALE_AFTER_DAYS: int = 30
+_CURATOR_DEFAULT_ARCHIVE_AFTER_DAYS: int = 90
+
+
+@dataclass(frozen=True)
+class CuratorState:
+    """One row of ``curator_state`` — per-profile curator-loop bookkeeping.
+
+    Ported from hermes ``agent/curator.py`` (where the same shape lived
+    in a JSON ``.curator_state`` file). Times stored as unix-millisecond
+    ``int`` at the SQL boundary; surfaced as ``datetime`` here to match
+    Python ergonomics. ``paused`` is the SQL 0/1 surface as ``bool``.
+    """
+
+    profile_slug: str
+    last_review_at: datetime | None
+    last_review_duration_ms: int | None
+    last_review_summary: str | None
+    run_count: int
+    paused: bool
+    interval_hours: int
+    stale_after_days: int
+    archive_after_days: int
+    tenant_id: str = DEFAULT_TENANT_ID
+
+
+def _dt_to_ms(value: datetime | None) -> int | None:
+    """Convert a timezone-aware ``datetime`` to unix milliseconds. Naive
+    inputs are assumed UTC — matches the rest of the codebase's
+    convention (e.g. :func:`iso_week_window`)."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return int(value.timestamp() * 1000)
+
+
+def _ms_to_dt(value: int | None) -> datetime | None:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(int(value) / 1000.0, tz=UTC)
+
+
+def _default_curator_state(profile_slug: str, tenant_id: str) -> CuratorState:
+    """Synthetic default row used when no DB row exists yet. Values
+    mirror the column DEFAULTs in :data:`schema.SCHEMA_SQL`."""
+    return CuratorState(
+        profile_slug=profile_slug,
+        last_review_at=None,
+        last_review_duration_ms=None,
+        last_review_summary=None,
+        run_count=0,
+        paused=False,
+        interval_hours=_CURATOR_DEFAULT_INTERVAL_HOURS,
+        stale_after_days=_CURATOR_DEFAULT_STALE_AFTER_DAYS,
+        archive_after_days=_CURATOR_DEFAULT_ARCHIVE_AFTER_DAYS,
+        tenant_id=tenant_id,
+    )
+
+
+_CURATOR_COLUMNS = (
+    "profile_slug, last_review_at, last_review_duration_ms, "
+    "last_review_summary, run_count, paused, interval_hours, "
+    "stale_after_days, archive_after_days, tenant_id"
+)
+
+
+def _decode_curator_state(row: aiosqlite.Row | tuple[Any, ...]) -> CuratorState:
+    """Decode one SELECT row into :class:`CuratorState`. Column order
+    must match :data:`_CURATOR_COLUMNS`."""
+    return CuratorState(
+        profile_slug=str(row[0]),
+        last_review_at=_ms_to_dt(None if row[1] is None else int(row[1])),
+        last_review_duration_ms=None if row[2] is None else int(row[2]),
+        last_review_summary=None if row[3] is None else str(row[3]),
+        run_count=int(row[4]),
+        paused=bool(int(row[5])),
+        interval_hours=int(row[6]),
+        stale_after_days=int(row[7]),
+        archive_after_days=int(row[8]),
+        tenant_id=str(row[9]),
+    )
+
+
+class CuratorStateRepo:
+    """Async repo for the ``curator_state`` table.
+
+    Used by the curator loop (W4.3) to remember when it last ran for
+    a profile, and by ``/admin/evolution`` (W4.6) to render an overview
+    of every profile's curator status.
+    """
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        self._conn = conn
+
+    async def get(
+        self,
+        profile_slug: str,
+        *,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> CuratorState:
+        """Fetch one profile's curator state. **Never raises**
+        :class:`NotFoundError` — when no row exists yet we synthesise
+        one with the DDL-default values (``paused=False``,
+        ``run_count=0``, ``last_review_at=None``, …) so callers can treat
+        the result as a struct rather than ``Optional[CuratorState]``."""
+        cursor = await self._conn.execute(
+            f"SELECT {_CURATOR_COLUMNS} FROM curator_state "
+            " WHERE profile_slug = ? AND tenant_id = ?",
+            (profile_slug, tenant_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return _default_curator_state(profile_slug, tenant_id)
+        return _decode_curator_state(row)
+
+    async def upsert(self, state: CuratorState) -> None:
+        """``INSERT OR REPLACE`` the full row. Only the curator itself
+        should call this — every column is overwritten."""
+        last_review_ms = _dt_to_ms(state.last_review_at)
+        await self._conn.execute(
+            """INSERT OR REPLACE INTO curator_state
+                 (profile_slug, last_review_at, last_review_duration_ms,
+                  last_review_summary, run_count, paused, interval_hours,
+                  stale_after_days, archive_after_days, tenant_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                state.profile_slug,
+                last_review_ms,
+                state.last_review_duration_ms,
+                state.last_review_summary,
+                int(state.run_count),
+                1 if state.paused else 0,
+                int(state.interval_hours),
+                int(state.stale_after_days),
+                int(state.archive_after_days),
+                state.tenant_id,
+            ),
+        )
+        await self._conn.commit()
+
+    async def mark_run(
+        self,
+        profile_slug: str,
+        *,
+        duration_ms: int,
+        summary: str,
+        now: datetime | None = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> CuratorState:
+        """Bump ``run_count`` by one, stamp ``last_review_at`` /
+        ``last_review_duration_ms`` / ``last_review_summary``. Preserves
+        the operator-tunable thresholds (``interval_hours``,
+        ``stale_after_days``, ``archive_after_days``, ``paused``).
+
+        Returns the post-update :class:`CuratorState`."""
+        when = now if now is not None else datetime.now(tz=UTC)
+        existing = await self.get(profile_slug, tenant_id=tenant_id)
+        updated = CuratorState(
+            profile_slug=profile_slug,
+            last_review_at=when,
+            last_review_duration_ms=int(duration_ms),
+            last_review_summary=summary,
+            run_count=existing.run_count + 1,
+            paused=existing.paused,
+            interval_hours=existing.interval_hours,
+            stale_after_days=existing.stale_after_days,
+            archive_after_days=existing.archive_after_days,
+            tenant_id=tenant_id,
+        )
+        await self.upsert(updated)
+        return updated
+
+    async def list_all(
+        self,
+        *,
+        tenant_id: str = DEFAULT_TENANT_ID,
+    ) -> list[CuratorState]:
+        """Every profile's curator state for a tenant. Sorted by
+        ``profile_slug`` so the admin UI gets a stable order without
+        sorting again client-side."""
+        cursor = await self._conn.execute(
+            f"SELECT {_CURATOR_COLUMNS} FROM curator_state "
+            " WHERE tenant_id = ? "
+            " ORDER BY profile_slug ASC",
+            (tenant_id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [_decode_curator_state(r) for r in rows]
+
+
 __all__ = [
     "ApplyIntent",
+    "CuratorState",
+    "CuratorStateRepo",
     "EvolutionGuardConfig",
     "HistoryRepo",
     "IntentLogRepo",

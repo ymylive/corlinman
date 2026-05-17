@@ -21,6 +21,16 @@ the crate 1:1:
 * :class:`YamlParseError`     — malformed YAML frontmatter
 * :class:`MissingFieldError`  — required field missing/empty
 * :class:`DuplicateNameError` — two files declared the same ``name``
+
+W4 lifecycle additions (curator port from hermes):
+
+* :class:`SkillUsage`         — per-skill ``.usage.json`` sidecar record
+* ``SkillOrigin`` / ``SkillState`` — narrow string types for lifecycle
+* :func:`render_skill_frontmatter`, :func:`write_skill_md`
+                              — round-trip writers for SKILL.md
+* :func:`read_usage`, :func:`write_usage`,
+  :func:`bump_use`, :func:`bump_view`, :func:`bump_patch`
+                              — usage sidecar I/O
 """
 
 from corlinman_skills_registry.errors import (
@@ -30,8 +40,27 @@ from corlinman_skills_registry.errors import (
     SkillLoadError,
     YamlParseError,
 )
+from corlinman_skills_registry.parse import (
+    render_skill_frontmatter,
+    write_skill_md,
+)
 from corlinman_skills_registry.registry import SkillRegistry
-from corlinman_skills_registry.skill import Skill, SkillRequirements
+from corlinman_skills_registry.skill import (
+    Skill,
+    SkillOrigin,
+    SkillRequirements,
+    SkillState,
+)
+from corlinman_skills_registry.usage import (
+    USAGE_FILENAME,
+    SkillUsage,
+    bump_patch,
+    bump_use,
+    bump_view,
+    read_usage,
+    usage_path,
+    write_usage,
+)
 
 __all__ = [
     "DuplicateNameError",
@@ -39,7 +68,19 @@ __all__ = [
     "Skill",
     "SkillIoError",
     "SkillLoadError",
+    "SkillOrigin",
     "SkillRegistry",
     "SkillRequirements",
+    "SkillState",
+    "SkillUsage",
+    "USAGE_FILENAME",
     "YamlParseError",
+    "bump_patch",
+    "bump_use",
+    "bump_view",
+    "read_usage",
+    "render_skill_frontmatter",
+    "usage_path",
+    "write_skill_md",
+    "write_usage",
 ]

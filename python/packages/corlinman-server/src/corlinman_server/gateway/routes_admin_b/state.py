@@ -84,6 +84,33 @@ class AdminState:
     # boot path can wire one-offs without growing the dataclass.
     extras: dict[str, Any] = field(default_factory=dict)
 
+    # -- W4.6: curator UI surface ---------------------------------------
+    #
+    # The ``/admin/curator`` routes consume three handles:
+    #
+    # * ``curator_state_repo`` — :class:`corlinman_evolution_store.
+    #   CuratorStateRepo` (async, over the evolution sqlite). Drives the
+    #   per-profile threshold tunables + pause toggle + run history.
+    # * ``signals_repo`` — :class:`corlinman_evolution_store.SignalsRepo`
+    #   (async, same connection). Curator runs emit ``EVENT_*`` rows so
+    #   the run/preview routes thread it through to
+    #   :func:`maybe_run_curator`.
+    # * ``skill_registry_factory`` — synchronous callable
+    #   ``(profile_slug: str) -> corlinman_skills_registry.SkillRegistry``.
+    #   The bootstrapper wires the factory to read each profile's skills
+    #   dir; the routes only need a way to materialise a *current* view
+    #   of skills for one profile without taking a dependency on the
+    #   skills-loading internals.
+    #
+    # All three are typed loosely (``Any``) so this dataclass stays
+    # importable even when the evolution-store / skills-registry packages
+    # aren't installed at import time (the routes 503 with a typed error
+    # envelope instead).
+    profile_store: Any | None = None
+    curator_state_repo: Any | None = None
+    signals_repo: Any | None = None
+    skill_registry_factory: Any | None = None
+
 
 _state: AdminState | None = None
 
