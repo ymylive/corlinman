@@ -360,3 +360,12 @@ The gateway ships one wire contract for future device-class clients
 - 一张图回答"一个请求花在哪"：`/metrics` 的 `corlinman_chat_stream_duration_seconds` histogram 加 `label=stage`（M7 引入）
 - 当前里程碑进展表：[milestones.md](milestones.md)
 - Canvas Host 协议（B5-BE1，`POST /canvas/session` / `POST /canvas/frame` / SSE `GET /canvas/session/:id/events`）：见 [openapi/canvas.yaml](openapi/canvas.yaml)，默认受 `[canvas] host_endpoint_enabled = false` 屏蔽。
+
+## See also
+
+操作面 doc（W5.2 新增）：
+
+- [Quickstart](quickstart.md) — 60 秒首启动 + 默认密码轮换 + skip-to-mock 路径
+- [Profiles](profiles.md) — 多 agent 隔离实例（persona + memory + skills + state）
+- [Credentials](credentials.md) — provider key 管理页（EnvPage 风格）
+- [Evolution & Curator](evolution-curator.md) — hermes-agent 自我进化机制移植

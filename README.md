@@ -55,6 +55,24 @@ Sunday morning without reverse-engineering twenty repos — that's corlinman.
 
 ---
 
+## Quickstart (60 seconds)
+
+1. `docker compose up` (or `make dev` for native)
+2. Open <http://localhost:6005>
+3. Login with `admin` / `root` — you'll be redirected to **Account & Security** to set a real password
+4. (Optional) Visit `/onboard` to wire a real LLM, or click **Skip — use mock provider** to start chatting immediately
+5. Done.
+
+> **Security**: first-boot credentials are `admin` / `root` and are explicitly intended for local development. The UI forces a password rotation on first login and stamps a banner until you change them.
+
+For multi-agent setups, deeper provider config, and the self-evolution curator, see:
+
+- [Profiles](docs/profiles.md) — isolated agent instances with their own persona/memory/skills
+- [Credentials](docs/credentials.md) — provider keys + EnvPage UI
+- [Evolution & Curator](docs/evolution-curator.md) — how the agent grows with you
+
+---
+
 ## Architecture at a glance
 
 ```
@@ -101,7 +119,7 @@ Deep dive: [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
-## Quickstart
+## Install paths
 
 Two ways in. **Humans pick the one-liner;** **AI agents read [`deploy/AI_DEPLOY.md`](deploy/AI_DEPLOY.md).**
 
@@ -453,6 +471,10 @@ ops/                Grafana dashboard + observability compose
 
 ## Documentation map
 
+- [Quickstart](docs/quickstart.md) — 60-second boot + first-login + skip-to-mock walkthrough
+- [Profiles](docs/profiles.md) — isolated agent instances (persona + memory + skills)
+- [Credentials](docs/credentials.md) — provider keys + EnvPage UI
+- [Evolution & curator](docs/evolution-curator.md) — self-evolution loop ported from hermes-agent
 - [Architecture](docs/architecture.md) — message flow, crate/package graph, gRPC bus
 - [Providers reference](docs/providers.md) — 14 supported `kind`s + recipes (Ollama / OpenRouter / SiliconFlow / Groq)
 - [Plugin authoring](docs/plugin-authoring.md) — write your own sync / async / service plugin
