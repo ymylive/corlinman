@@ -7,7 +7,7 @@
 
 services:
   corlinman:
-    image: ghcr.io/ymylive/corlinman:dev  # placeholder; not pushed
+    image: ghcr.io/ymylive/corlinman:dev  # built locally; override via `docker compose pull`
     build:
       context: ../../
       dockerfile: docker/Dockerfile
@@ -26,14 +26,10 @@ services:
       # — the gateway can dry-run but can't persist mutations back to disk.
       CORLINMAN_CONFIG: /data/config.toml
       CORLINMAN_UI_DIR: /app/ui-static
-    command: ["/app/start.sh"]
     volumes:
-      # Single-container supervisor: bootstrap py-config, start Python agent,
-      # then exec the Rust gateway.
-      - ../start.sh:/app/start.sh:ro
       # Data directory (config.toml / plugins/ / agents/ / knowledge/ / vector/ / logs/)
       - ~/.corlinman:/data
-      # Docker socket for plugin sandbox (read-only; bollard uses it to spawn children)
+      # Docker socket for plugin sandbox (read-only; docker-py uses it to spawn children)
       - /var/run/docker.sock:/var/run/docker.sock:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:6005/health"]

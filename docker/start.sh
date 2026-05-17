@@ -55,7 +55,7 @@ with open("/data/py-config.json","w") as f:
 print(f"py-config bootstrapped: {len(providers)} providers, {len(aliases)} aliases, embedding={bool(emb_out)}")
 PY
 
-# Now boot the agent + gateway in the proven order (python first, gateway second)
+# Now boot the agent sidecar + gateway in order (sidecar first).
 /opt/venv/bin/corlinman-python-server &
 sleep 3
-exec /usr/local/bin/corlinman-gateway --config /data/config.toml
+exec /opt/venv/bin/corlinman-gateway --config /data/config.toml

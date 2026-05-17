@@ -60,21 +60,21 @@ Sunday morning without reverse-engineering twenty repos — that's corlinman.
 ```
                       ┌────────────────────────────────────┐
    HTTP + SSE ──────▶ │        corlinman-gateway           │ ◀─── Next.js admin UI
-   (clients, UI,      │   Rust · axum · tonic · listens    │     (static export,
-    channels)         │   on :6005; routes /v1, /admin,    │      served by nginx)
-                      │   /health, /metrics, /plugin-cb)   │
+   (clients, UI,      │   Python · FastAPI · uvicorn ·     │     (static export,
+    channels)         │   listens on :6005; routes /v1,    │      served by nginx)
+                      │   /admin, /health, /metrics,       │
+                      │   /plugin-cb, /v1/voice WS)        │
                       └──┬──────────┬──────────┬──────────┘
                          │          │          │
-              gRPC bidi  │  gRPC    │  gRPC    │ JSON-RPC / gRPC
+              in-process │ in-proc  │ in-proc  │ JSON-RPC / gRPC
                          ▼          ▼          ▼
                     ┌────────┐  ┌────┐    ┌───────────┐
                     │ agent  │  │emb │    │ plugin    │
                     │ Python │  │(py)│    │ runtimes  │
                     │ loop   │  └────┘    │ (py / node/
-                    │ + LLM  │            │  rust /   │
-                    │ SDKs   │            │  bash +   │
-                    └───┬────┘            │  docker)  │
-                        │                 └───────────┘
+                    │ + LLM  │            │  bash +   │
+                    │ SDKs   │            │  docker)  │
+                    └───┬────┘            └───────────┘
                         ▼
               ┌──────────────────────┐
               │ upstream providers    │
@@ -85,17 +85,17 @@ Sunday morning without reverse-engineering twenty repos — that's corlinman.
 
    Side-bus:
      • corlinman-channels ── QQ / OneBot v11 · Telegram ──▶ internal ChatRequest
-     • corlinman-scheduler ── tokio-cron-scheduler ──────▶ gateway AppState
-     • corlinman-vector ──── HNSW + SQLite FTS5 ─────────▶ /admin/rag + agent memory
+     • corlinman-server.scheduler ── croniter ───────────▶ gateway AppState
+     • corlinman-embedding.vector ─ HNSW (usearch) + SQLite FTS5 ──▶ /admin/rag
 ```
 
-Two runtimes, one bus. **Rust owns the network:** axum gateway, tonic gRPC,
-Docker integration via `bollard`, `notify`-driven hot reload, usearch FFI,
-structured logging, signal-correct shutdown. **Python owns the LLM craft:**
-the provider SDK ecosystem (anthropic, openai, google-genai, etc.), the
-reasoning loop, and fast prompt iteration. The two sides talk exclusively
-over a strongly-typed gRPC bus with W3C `traceparent` propagation, so a
-single request has one span tree end to end.
+One language, one process. **corlinman is a pure Python stack:** FastAPI +
+uvicorn gateway, `grpc.aio` for the agent sidecar, `docker-py` for plugin
+sandboxes, `watchdog`-driven hot reload, `usearch-python` for vector
+search, structlog, signal-correct shutdown. The agent reasoning loop, all
+LLM provider SDKs (anthropic, openai, google-genai, etc.), embedding,
+plugin runtime, channel adapters, CLI and gateway all live under
+`python/packages/` and share one venv.
 
 Deep dive: [`docs/architecture.md`](docs/architecture.md).
 
@@ -103,67 +103,61 @@ Deep dive: [`docs/architecture.md`](docs/architecture.md).
 
 ## Quickstart
 
-### Fastest: one-line installer (recommended)
+Two ways in. **Humans pick the one-liner;** **AI agents read [`deploy/AI_DEPLOY.md`](deploy/AI_DEPLOY.md).**
 
-Two install paths, same `install.sh`, same onboarding wizard at the end.
-As of **v0.6.7** the prebuilt Linux x86_64 binary is built inside
-`manylinux_2_28` (glibc 2.28 baseline), so the **native** mode works on
-every currently-supported mainstream Linux distro — Docker is no longer
-the only portable option.
+### For humans — one-line installer
 
-| Path | One-liner | Where it runs | When to pick it |
-| --- | --- | --- | --- |
-| **Pre-built binary (`--mode native`)** | `curl -fsSL https://raw.githubusercontent.com/ymylive/corlinman/main/deploy/install.sh \| bash -s -- --mode native` | Debian 11+, Ubuntu 20.04+, RHEL/AlmaLinux/Rocky 8+ (glibc ≥ 2.28); macOS aarch64. Installs to `/opt/corlinman/bin`, runs under `systemd`. No Docker on the host. | You want the smallest footprint, native systemd integration, and a single binary you can audit. |
-| **Pre-built docker image (`--mode docker`)** | `curl -fsSL https://raw.githubusercontent.com/ymylive/corlinman/main/deploy/install.sh \| bash -s -- --mode docker` | Anywhere Docker Engine 24+ with the compose v2 plugin runs. Pulls `ghcr.io/ymylive/corlinman:<tag>` and brings up corlinman + newapi together. | You want container isolation, you're on a distro with an unusual or pre-2.28 glibc, or you already manage everything via compose. |
+| Path | One-liner | Notes |
+| --- | --- | --- |
+| **Docker (recommended)** | `curl -fsSL https://raw.githubusercontent.com/ymylive/corlinman/main/deploy/install.sh \| bash -s -- --mode docker` | Builds locally, brings up via `docker compose`. Needs Docker Engine 24+. |
+| **Native (uv + systemd)** | `curl -fsSL https://raw.githubusercontent.com/ymylive/corlinman/main/deploy/install.sh \| bash -s -- --mode native` | Installs `uv`, clones the repo to `/opt/corlinman/repo`, syncs the workspace, registers a systemd unit. No container runtime needed. |
+| **🇨🇳 China network** | append ` --china` to either command above | Switches PyPI → 清华, Docker Hub → 1Panel mirror, github.com raw → ghproxy. Auto-enabled when `pypi.org` is slow. |
 
-> Heads up: **Linux aarch64** (Graviton / Ampere) prebuilts are not yet
-> published — upstream numkong NEON SDOT cross-compile blocker. The
-> installer exits cleanly with a `cargo build --release` instruction on
-> that arch. Use source build (`scripts/build-release.sh`) or the docker
-> image (multi-arch, includes `linux/arm64`).
+Both paths converge on `http://localhost:6005/onboard` — the 4-step wizard
+that writes a complete `config.toml`. After onboarding the admin UI lives
+at `http://localhost:6005/admin`.
 
-On first run either path opens
-`http://localhost:6005/onboard` — the 4-step wizard: admin
-account → newapi connection (token + base URL) → pick default
-LLM / embedding / TTS models → confirm. The wizard writes a
-complete `config.toml` atomically.
+### For AI agents — prompt-driven deploy
 
-See [`deploy/install.sh`](deploy/install.sh) for environment overrides
-(`CORLINMAN_VERSION`, `CORLINMAN_PREFIX`, `CORLINMAN_DATA_DIR`,
-`CORLINMAN_PORT`).
+Paste [`deploy/AI_DEPLOY.md`](deploy/AI_DEPLOY.md) into Claude Code / Cursor /
+Aider and tell it your VPS host + mode. The prompt covers 6 phases
+(inventory → stop old → install → restore config → verify → cleanup) with
+explicit stop conditions. Use this when you want a structured, audit-able
+deploy that you can re-run on multiple hosts.
+
+### Environment overrides
+
+`CORLINMAN_VERSION` (git ref / branch, default `main`),
+`CORLINMAN_PREFIX` (install root, default `/opt/corlinman`),
+`CORLINMAN_DATA_DIR` (data dir, default `$CORLINMAN_PREFIX/data`),
+`CORLINMAN_PORT` (gateway port, default `6005`).
 
 ### From source
 
 ```bash
-# Build locally. Host needs docker + buildx. Output is a single image.
+# Container path
 git clone https://github.com/ymylive/corlinman && cd corlinman
 docker buildx build --platform linux/amd64 \
   -f docker/Dockerfile -t corlinman:latest --target runtime --load .
-
-# Start the stack (gateway + embedded python agent + static admin bundle).
 docker compose -f docker/compose/docker-compose.yml up -d
-```
 
-Visit `http://127.0.0.1:6005/health` to confirm, then open the admin UI.
-On first run, walk the 4-step onboard wizard at `/onboard`, or use the
-CLI wizard:
-
-```bash
+# Visit http://127.0.0.1:6005/health then http://127.0.0.1:6005/onboard.
+# Or run the CLI wizard inside the container:
 docker exec -it corlinman corlinman onboard
 ```
 
 ### Native (build from source)
 
-Requirements: Rust 1.95+, Python 3.12, `uv`, Node 20+, `pnpm`, `protoc`.
+Requirements: Python 3.12, `uv`, Node 20+, `pnpm`, `protoc`.
 
 ```bash
 ./scripts/dev-setup.sh                              # deps + proto + git hooks
-cargo build --release -p corlinman-gateway -p corlinman-cli
-uv sync --frozen
+uv sync --all-packages --frozen
 pnpm -C ui install && pnpm -C ui build
 
-./target/release/corlinman onboard                  # interactive wizard
-./target/release/corlinman dev                      # gateway + python + UI
+uv run corlinman onboard                            # interactive wizard
+uv run corlinman-gateway                            # gateway (FastAPI/uvicorn)
+uv run corlinman-python-server                      # agent sidecar (grpc.aio)
 ```
 
 Data lives in `~/.corlinman/` by default; override with `--data-dir` or
@@ -180,7 +174,7 @@ acme.sh + systemd or docker-compose).
 An agent in corlinman is a Python `reasoning_loop` wrapped around a
 provider SDK. It takes a message history, emits tokens + tool calls,
 consumes tool results, and iterates until the model signals `stop`. The
-Rust gateway owns the transport, multiplexes channels onto it, persists
+Python gateway owns the transport, multiplexes channels onto it, persists
 sessions, and enforces governance (rate limits, approvals, timeouts).
 
 Agents are defined as **frontmatter-headed Markdown**
@@ -201,9 +195,9 @@ tool_call semantics. Three plugin types:
 | `async`   | JSON-RPC stdio + `/plugin-callback` | Spawn → return task_id → webhook back | Long jobs (image gen, LLM sub-calls)    |
 | `service` | gRPC over UDS                     | Long-lived supervised child            | Stateful integrations (DB pools, Git)   |
 
-Plugins can be written in **any language** (Python, Node, Rust, bash,
-Go…) because the contract is stdio/gRPC + JSON, not a Python import
-hook. Optional Docker sandboxing (bollard-driven) enforces memory, CPU,
+Plugins can be written in **any language** (Python, Node, Go, Rust, bash,
+…) because the contract is stdio/gRPC + JSON, not a Python import hook.
+Optional Docker sandboxing (`docker-py`-driven) enforces memory, CPU,
 read-only root, network isolation, and capability drops. Untrusted
 plugins can demand a human approval before every call.
 
@@ -236,9 +230,9 @@ A channel is any producer of `ChatRequest`. corlinman ships with:
   rate limits, and real bindings back to the gateway's session store.
 - **Telegram** — `teloxide`-based long-poll adapter for group + private
   chats.
-- **Scheduler** — `tokio-cron-scheduler` that fires an agent at a cron
-  expression with a canned prompt template (for daily digests, alerting
-  bots, etc.).
+- **Scheduler** — `croniter`-driven cron runner that fires an agent at a
+  cron expression with a canned prompt template (for daily digests,
+  alerting bots, etc.).
 
 Each channel shares the same agent loop — switch models mid-flight with
 a config reload, no channel restart.
@@ -254,8 +248,8 @@ a config reload, no channel restart.
 - **Config live-reload.** `POST /admin/config` accepts a TOML body,
   validates it, and atomically swaps in the new config without restart
   (restart-required fields are flagged in the response).
-- **Observability.** OTel OTLP export (traces + logs; Rust and Python
-  share `traceparent`), Prometheus `/metrics` with 7 metric families
+- **Observability.** OTel OTLP export (traces + logs with `traceparent`
+  propagation across gateway / agent / plugins), Prometheus `/metrics` with 7 metric families
   covering QPS, latency, tool-call rate, backoff, stream inflight,
   RAG stage timings, and plugin execution duration. A bundled
   Grafana dashboard lives in `ops/dashboards/corlinman.json`.
@@ -354,7 +348,7 @@ api_key = { env = "ANTHROPIC_API_KEY" }
 enabled = true
 
 # Need a CN endpoint or a niche aggregator? Add an OpenAI-compat entry
-# with a chosen name — no Rust changes required. See docs/providers.md §3.
+# with a chosen name — no code changes required. See docs/providers.md §3.
 # [providers.openrouter]
 # kind = "openai_compatible"
 # api_key = { env = "OPENROUTER_API_KEY" }
@@ -427,10 +421,7 @@ and rollback procedure: [`docs/runbook.md`](docs/runbook.md).
 corlinman dev
 
 # Full gate (what CI + pre-commit run).
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-uv run ruff check python/packages/
+uv run ruff check .
 uv run mypy python/packages/
 uv run pytest -m "not live_llm and not live_transport"
 pnpm -C ui typecheck
@@ -447,12 +438,11 @@ boundary checks all live in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 ## Repository layout
 
 ```
-rust/crates/*       Rust crates (gateway / plugins / vector / cli / ...)
-python/packages/*   Python packages (providers / agent / embedding / server)
-proto/              Protocol Buffers (cross-language gRPC IDL)
+python/packages/*   Python packages (gateway / agent / providers / embedding / vector / channels / mcp / canvas / plugins / cli / ...)
+proto/              Protocol Buffers (gRPC IDL between agent sidecar and gateway)
 ui/                 Next.js admin console (static export)
 qa/scenarios/       Executable YAML test scenarios
-docker/             Multi-stage Dockerfile + compose profiles
+docker/             Compose profiles (sandbox Dockerfile for plugins)
 docs/               Architecture / plugin authoring / runbook / roadmap
 .git-hooks/         pre-commit (FAST_COMMIT=1 escape hatch)
 scripts/            dev-setup.sh, gen-proto.sh
@@ -532,7 +522,7 @@ MIT. See [`LICENSE`](LICENSE).
 
 **在线 demo**：<https://corlinman.cornna.xyz>
 
-**架构**：Rust 掌网络（axum gateway + tonic + 插件 runtime + 向量引擎 + CLI），Python 掌 LLM（provider SDK + reasoning loop + embedding），两边只通过强类型 gRPC 总线通信，W3C `traceparent` 贯穿全链路。
+**架构**：纯 Python 单语言栈 —— FastAPI/uvicorn gateway + grpc.aio agent sidecar + 插件 runtime + 向量引擎（usearch）+ CLI + provider SDK + reasoning loop + embedding 全部在 `python/packages/` 下，共享一个 venv；W3C `traceparent` 贯穿全链路。
 
 **快速开始**：
 

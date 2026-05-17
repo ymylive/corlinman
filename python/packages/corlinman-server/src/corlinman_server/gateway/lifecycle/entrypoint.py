@@ -290,6 +290,67 @@ class _DegradedAppState:
 
 
 # ---------------------------------------------------------------------------
+# Routes composition (parallel-agent contracts diverge per submodule)
+# ---------------------------------------------------------------------------
+
+
+def _mount_routes(app: Any, state: Any) -> None:
+    """Mount every gateway routes submodule onto ``app``.
+
+    Each W4 submodule exposes a different composition surface; this
+    helper wires them all in one place so ``build_app`` stays compact:
+
+    * ``routes.register.build_app_router(state)`` — top-level / endpoint set
+    * ``routes_voice.mod.router(voice_state)`` — /v1/voice WebSocket
+    * ``routes_admin_a.build_router()`` — admin A bundle (9 sub-routers)
+    * ``routes_admin_b.build_router()`` — admin B bundle (13 sub-routers)
+
+    Missing submodules log a warning and the gateway continues to boot
+    in degraded mode (so a partial port still serves health checks).
+    """
+    routes_top = _lazy_import("corlinman_server.gateway.routes.register")
+    if routes_top is not None:
+        try:
+            gateway_state_cls = getattr(routes_top, "GatewayState", None)
+            build_app_router = getattr(routes_top, "build_app_router", None)
+            if gateway_state_cls is not None and build_app_router is not None:
+                # GatewayState is a dataclass of duck-typed optional deps;
+                # we hand it the AppState handle so route handlers can
+                # downcast as they need.
+                gw_state = (
+                    gateway_state_cls(app_state=state)
+                    if hasattr(gateway_state_cls, "__dataclass_fields__")
+                    and "app_state" in gateway_state_cls.__dataclass_fields__
+                    else gateway_state_cls()
+                )
+                app.include_router(build_app_router(gw_state))
+        except Exception as exc:  # pragma: no cover — sibling-owned
+            logger.warning("gateway.routes.top.mount_failed", error=str(exc))
+
+    routes_voice_mod = _lazy_import("corlinman_server.gateway.routes_voice.mod")
+    if routes_voice_mod is not None:
+        try:
+            voice_router = routes_voice_mod.router()
+            app.include_router(voice_router)
+        except Exception as exc:  # pragma: no cover — sibling-owned
+            logger.warning("gateway.routes_voice.mount_failed", error=str(exc))
+
+    admin_a = _lazy_import("corlinman_server.gateway.routes_admin_a")
+    if admin_a is not None:
+        try:
+            app.include_router(admin_a.build_router())
+        except Exception as exc:  # pragma: no cover — sibling-owned
+            logger.warning("gateway.routes_admin_a.mount_failed", error=str(exc))
+
+    admin_b = _lazy_import("corlinman_server.gateway.routes_admin_b")
+    if admin_b is not None:
+        try:
+            app.include_router(admin_b.build_router())
+        except Exception as exc:  # pragma: no cover — sibling-owned
+            logger.warning("gateway.routes_admin_b.mount_failed", error=str(exc))
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app factory
 # ---------------------------------------------------------------------------
 
@@ -410,16 +471,10 @@ def build_app(
                     "gateway.middleware.install_failed", error=str(exc)
                 )
 
-    routes = _lazy_import("corlinman_server.gateway.routes")
-    if routes is not None:
-        mount = getattr(routes, "mount", None)
-        if mount is not None:
-            try:
-                mount(app, state)
-            except Exception as exc:  # pragma: no cover — sibling-owned
-                logger.warning(
-                    "gateway.routes.mount_failed", error=str(exc)
-                )
+    # Mount every routes submodule. Each submodule exposes a different
+    # composition surface (per the parallel-agent contracts); we wire them
+    # individually here to keep entrypoint.py the single composition root.
+    _mount_routes(app, state)
 
     # Degraded-mode safety net: if the routes sibling didn't land yet,
     # mount a single ``/health`` so liveness probes succeed and the
