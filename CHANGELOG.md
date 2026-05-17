@@ -4,6 +4,35 @@ All notable changes to corlinman are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-05-17 — warm pool
+
+Adds the warm-pool surface that v0.7.0 deferred. Architectural note:
+the Rust gateway talks gRPC to a long-running Python servicer, so the
+literal OpenClaw "container per session" doesn't apply. Instead the
+pool ships Python-side with a boot-time pre-warm hook so the upstream
+provider SDK's auth handshake happens before the first user chat,
+not on the user-facing hot path.
+
+### Added
+
+- **`corlinman_server.runner_pool.RunnerPool[T]`** — bounded warm
+  pool with `max_warm_per_key` + `max_active_total` and oldest-idle
+  eviction. Generic on the pooled type; ships with provider warming
+  as the first caller, designed to grow to per-tenant / sandboxed
+  resources in v0.8.
+- **`CorlinmanAgentServicer.prewarm_providers(model_names)`** —
+  resolve each model alias at boot, park the result warm. Failures
+  log and skip (best-effort; the cold path stays intact).
+- **`pool_stats()`** accessor for operator tooling.
+- env: `CORLINMAN_RUNNER_POOL_WARM` (default 2),
+  `CORLINMAN_RUNNER_POOL_MAX` (default 8).
+
+### Added (v0.7.0 hygiene)
+
+- 4 v0.7 smoke tests: end-to-end orchestrator `spawn_many` round-trip,
+  `parent_tools` threading via the runner's allowlist-escalation
+  reject, and pool prewarm contracts.
+
 ## [0.7.0] — 2026-05-17 — multi-agent
 
 Headline: parallel sibling agents, a shared trace-scoped blackboard,
