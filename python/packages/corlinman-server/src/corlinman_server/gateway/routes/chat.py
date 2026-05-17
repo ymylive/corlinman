@@ -402,7 +402,7 @@ def router(state: ChatState | None = None) -> APIRouter:
     """
     api = APIRouter()
 
-    @api.post("/v1/chat/completions")
+    @api.post("/v1/chat/completions", response_model=None)
     async def handle_chat(
         req: ChatRequest,
         request: Request,

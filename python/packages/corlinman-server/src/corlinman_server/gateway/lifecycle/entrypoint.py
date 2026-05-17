@@ -338,6 +338,13 @@ def _mount_routes(app: Any, state: Any) -> None:
     admin_a = _lazy_import("corlinman_server.gateway.routes_admin_a")
     if admin_a is not None:
         try:
+            admin_a_state_cls = getattr(admin_a, "AdminState", None)
+            set_admin_a = getattr(admin_a, "set_admin_state", None)
+            if admin_a_state_cls is not None and set_admin_a is not None:
+                # Construct a minimal AdminState — all fields optional;
+                # handlers 503 on missing dependencies.
+                data_dir = getattr(state, "data_dir", None)
+                set_admin_a(admin_a_state_cls(data_dir=data_dir))
             app.include_router(admin_a.build_router())
         except Exception as exc:  # pragma: no cover — sibling-owned
             logger.warning("gateway.routes_admin_a.mount_failed", error=str(exc))
@@ -345,6 +352,10 @@ def _mount_routes(app: Any, state: Any) -> None:
     admin_b = _lazy_import("corlinman_server.gateway.routes_admin_b")
     if admin_b is not None:
         try:
+            admin_b_state_cls = getattr(admin_b, "AdminState", None)
+            set_admin_b = getattr(admin_b, "set_admin_state", None)
+            if admin_b_state_cls is not None and set_admin_b is not None:
+                set_admin_b(admin_b_state_cls())
             app.include_router(admin_b.build_router())
         except Exception as exc:  # pragma: no cover — sibling-owned
             logger.warning("gateway.routes_admin_b.mount_failed", error=str(exc))
@@ -476,14 +487,16 @@ def build_app(
     # individually here to keep entrypoint.py the single composition root.
     _mount_routes(app, state)
 
-    # Degraded-mode safety net: if the routes sibling didn't land yet,
-    # mount a single ``/health`` so liveness probes succeed and the
-    # operator can see the process is up.
-    if "/health" not in {r.path for r in app.routes if hasattr(r, "path")}:
+    # Degraded-mode safety net: if no routes module mounted a ``/health``
+    # path, expose a trivial liveness endpoint so probes succeed.
+    _have_health = any(
+        getattr(r, "path", None) == "/health" for r in app.routes
+    )
+    if not _have_health:
 
         @app.get("/health")
         async def _health() -> dict[str, str]:  # pragma: no cover — trivial
-            return {"status": "ok", "mode": "degraded" if routes is None else "ok"}
+            return {"status": "ok", "mode": "degraded"}
 
     return app
 
