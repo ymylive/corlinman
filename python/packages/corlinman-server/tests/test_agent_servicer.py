@@ -390,3 +390,90 @@ async def test_servicer_registry_end_to_end_resolves_alias() -> None:
     assert fake.last_kwargs["model"] == "gpt-4o"
     # alias.temperature (1.3) wins over provider.temperature (0.2).
     assert fake.last_kwargs["temperature"] == pytest.approx(1.3)
+
+
+# ---------------------------------------------------------------------------
+# v0.7 multi-agent: builtin tool interception
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_servicer_dispatches_blackboard_write_in_process(
+    tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The servicer's ``_dispatch_builtin`` handles ``blackboard.write``
+    without going through the gateway plugin runtime. We exercise the
+    method directly because the streaming-loop test fixture is
+    quadratic to set up — the unit-level contract here is enough."""
+    from corlinman_agent.reasoning_loop import ChatStart, ToolCallEvent
+    from corlinman_server.agent_servicer import CorlinmanAgentServicer
+
+    # Point the lazy data dir at an isolated tmp so the test never
+    # writes outside its sandbox.
+    monkeypatch.setenv("CORLINMAN_DATA_DIR", str(tmp_path))
+
+    servicer = CorlinmanAgentServicer(provider_resolver=lambda _m: _FakeProvider([]))
+    start = ChatStart(
+        model="m",
+        messages=[],
+        tools=[],
+        session_key="tenant-x::session-1",
+    )
+    event = ToolCallEvent(
+        call_id="c1",
+        plugin="blackboard",
+        tool="blackboard.write",
+        args_json=b'{"key": "topic", "value": "research the moon"}',
+    )
+
+    result_json = await servicer._dispatch_builtin(
+        event, start, _FakeProvider([])
+    )
+    payload = json.loads(result_json)
+    assert payload["key"] == "topic"
+    assert "error" not in payload
+    # Receipt: an int written_at + the parent agent id as written_by.
+    assert isinstance(payload["written_at"], int)
+    assert "agent" in payload["written_by"] or payload["written_by"] == "m"
+
+    # Read it back via the same method to lock the round-trip.
+    read_event = ToolCallEvent(
+        call_id="c2",
+        plugin="blackboard",
+        tool="blackboard.read",
+        args_json=b'{"key": "topic"}',
+    )
+    read_json = await servicer._dispatch_builtin(
+        read_event, start, _FakeProvider([])
+    )
+    read_payload = json.loads(read_json)
+    assert read_payload == {
+        "key": "topic",
+        "value": "research the moon",
+        "present": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_servicer_builtin_tool_unknown_envelope() -> None:
+    """An unrecognised tool name returns a structured error envelope
+    rather than raising — the model's next round still has something
+    to read."""
+    from corlinman_agent.reasoning_loop import ChatStart, ToolCallEvent
+    from corlinman_server.agent_servicer import CorlinmanAgentServicer
+
+    servicer = CorlinmanAgentServicer(provider_resolver=lambda _m: _FakeProvider([]))
+    start = ChatStart(model="m", messages=[], tools=[], session_key="s")
+    event = ToolCallEvent(
+        call_id="c",
+        plugin="x",
+        tool="blackboard.unknown",
+        args_json=b"{}",
+    )
+    # This tool isn't in BUILTIN_TOOLS so the loop wouldn't normally
+    # call _dispatch_builtin, but the method itself is defensive.
+    result_json = await servicer._dispatch_builtin(
+        event, start, _FakeProvider([])
+    )
+    payload = json.loads(result_json)
+    assert "error" in payload

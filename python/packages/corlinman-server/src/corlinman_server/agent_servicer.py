@@ -46,6 +46,20 @@ from corlinman_agent.reasoning_loop import (
     ToolResult,
 )
 from corlinman_agent.skills import SkillRegistry
+from corlinman_agent.subagent import (
+    SUBAGENT_SPAWN_MANY_TOOL,
+    SUBAGENT_SPAWN_TOOL,
+    ParentContext,
+    dispatch_subagent_spawn,
+    dispatch_subagent_spawn_many,
+)
+from corlinman_agent.subagent.blackboard import (
+    BLACKBOARD_READ_TOOL,
+    BLACKBOARD_WRITE_TOOL,
+    BlackboardStore,
+    dispatch_blackboard_read,
+    dispatch_blackboard_write,
+)
 from corlinman_agent.variables import VariableCascade
 from corlinman_grpc import agent_pb2, agent_pb2_grpc, common_pb2
 from corlinman_providers import registry as provider_registry
@@ -53,6 +67,20 @@ from corlinman_providers.base import CorlinmanProvider, ProviderChunk
 from corlinman_providers.specs import AliasEntry
 
 logger = structlog.get_logger(__name__)
+
+#: Tool names dispatched in-process by the servicer rather than routed
+#: through the Rust plugin registry. These cover the v0.7 multi-agent
+#: surface (subagent fan-out + shared blackboard); adding to this set
+#: is the way to expose a new builtin tool that doesn't fit the plugin
+#: model.
+BUILTIN_TOOLS: frozenset[str] = frozenset(
+    {
+        SUBAGENT_SPAWN_TOOL,
+        SUBAGENT_SPAWN_MANY_TOOL,
+        BLACKBOARD_READ_TOOL,
+        BLACKBOARD_WRITE_TOOL,
+    }
+)
 
 
 class _MockProvider:
@@ -115,6 +143,13 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
             self._resolve = provider_registry.resolve
         self._aliases: dict[str, AliasEntry] = dict(aliases or {})
         self._context_assembler = context_assembler
+        # Builtin-tool runtime state. The agent registry is reused from
+        # the context assembler when one is configured; the blackboard
+        # store is created lazily on the first builtin dispatch so an
+        # operator that never registers the orchestrator agent never
+        # pays for an empty sqlite file.
+        self._builtin_agents: AgentCardRegistry | None = None
+        self._blackboard_store: BlackboardStore | None = None
 
     async def Chat(  # noqa: N802 — gRPC method name
         self,
@@ -173,6 +208,23 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
                     )
                     seq += 1
                 elif isinstance(event, ToolCallEvent):
+                    if event.tool in BUILTIN_TOOLS:
+                        # Builtin tools (subagent.spawn{,_many}, blackboard.*)
+                        # are dispatched in-process. We never emit a ToolCall
+                        # proto frame for them; the loop is fed the result
+                        # directly. Failure here is folded into the loop's
+                        # ToolResult envelope so the model can keep going.
+                        result_json = await self._dispatch_builtin(
+                            event, start, provider
+                        )
+                        loop.feed_tool_result(
+                            ToolResult(
+                                call_id=event.call_id,
+                                content=result_json,
+                                is_error=False,
+                            )
+                        )
+                        continue
                     yield agent_pb2.ServerFrame(
                         tool_call=agent_pb2.ToolCall(
                             call_id=event.call_id,
@@ -198,6 +250,115 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
             inbound_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await inbound_task
+
+    async def _dispatch_builtin(
+        self,
+        event: ToolCallEvent,
+        start: AgentChatStart,
+        provider: CorlinmanProvider,
+    ) -> str:
+        """Route an in-process builtin tool to its handler.
+
+        Returns the JSON-encoded result string that the loop feeds back
+        as ``ToolResult.content``. Never raises — any exception is
+        folded into an ``{"error": "..."}`` envelope so the model's
+        next reasoning round still has something to read.
+
+        The parent context is derived from the chat ``start`` frame:
+        ``session_key`` doubles as ``trace_id`` (the gateway carries a
+        separate W3C ``traceparent`` for cross-service spans, but the
+        evolution observer joins on ``session_key`` regardless) and the
+        tenant_id falls back to a literal sentinel for single-tenant
+        deployments.
+        """
+        tenant_id = start.session_key.split("::")[0] if start.session_key else "default"
+        parent_ctx = ParentContext(
+            tenant_id=tenant_id or "default",
+            parent_agent_id=start.model or "agent",
+            parent_session_key=start.session_key or "session",
+            depth=0,
+            trace_id=start.session_key or "",
+        )
+        try:
+            if event.tool == SUBAGENT_SPAWN_TOOL:
+                registry = self._get_agent_registry()
+                if registry is None:
+                    return json.dumps(
+                        {"error": "agent_registry_unavailable"}
+                    )
+                return await dispatch_subagent_spawn(
+                    args_json=event.args_json,
+                    parent_ctx=parent_ctx,
+                    agent_registry=registry,
+                    provider=provider,
+                    parent_tools=list(start.tools or []),
+                )
+            if event.tool == SUBAGENT_SPAWN_MANY_TOOL:
+                registry = self._get_agent_registry()
+                if registry is None:
+                    return json.dumps(
+                        {"tasks": [], "error": "agent_registry_unavailable"}
+                    )
+                return await dispatch_subagent_spawn_many(
+                    args_json=event.args_json,
+                    parent_ctx=parent_ctx,
+                    agent_registry=registry,
+                    provider=provider,
+                    parent_tools=list(start.tools or []),
+                )
+            if event.tool == BLACKBOARD_READ_TOOL:
+                return dispatch_blackboard_read(
+                    args_json=event.args_json,
+                    store=self._get_blackboard_store(),
+                    trace_id=parent_ctx.trace_id,
+                )
+            if event.tool == BLACKBOARD_WRITE_TOOL:
+                return dispatch_blackboard_write(
+                    args_json=event.args_json,
+                    store=self._get_blackboard_store(),
+                    trace_id=parent_ctx.trace_id,
+                    written_by=parent_ctx.parent_agent_id,
+                )
+        except Exception as exc:
+            logger.exception(
+                "agent.chat.builtin_tool_failed",
+                tool=event.tool,
+                call_id=event.call_id,
+            )
+            return json.dumps({"error": f"builtin_tool_failed: {exc}"})
+        # Unreachable in practice — BUILTIN_TOOLS is the gate above the
+        # dispatch — but return a clean envelope rather than implicit None.
+        return json.dumps({"error": f"unknown_builtin_tool: {event.tool}"})
+
+    def _get_agent_registry(self) -> AgentCardRegistry | None:
+        """Resolve the agent registry from the context assembler or
+        lazy-load from the data dir. Returns ``None`` if no agents/ dir
+        is configured; callers fall back to an error envelope."""
+        if self._builtin_agents is not None:
+            return self._builtin_agents
+        assembler = self._get_context_assembler()
+        if assembler is not None and getattr(assembler, "agents", None) is not None:
+            self._builtin_agents = assembler.agents
+            return self._builtin_agents
+        try:
+            data_dir = _resolve_data_dir()
+            self._builtin_agents = AgentCardRegistry.load_from_dir(
+                data_dir / "agents"
+            )
+            return self._builtin_agents
+        except Exception as exc:
+            logger.warning("agent.chat.agent_registry_load_failed", error=str(exc))
+            return None
+
+    def _get_blackboard_store(self) -> BlackboardStore:
+        """Lazy-init the blackboard store. Single sqlite file under the
+        data dir; created on first use."""
+        if self._blackboard_store is not None:
+            return self._blackboard_store
+        data_dir = _resolve_data_dir()
+        data_dir.mkdir(parents=True, exist_ok=True)
+        self._blackboard_store = BlackboardStore(data_dir / "blackboard.sqlite")
+        return self._blackboard_store
 
     async def _assemble_context(self, start: AgentChatStart) -> AgentChatStart:
         assembler = self._get_context_assembler()
