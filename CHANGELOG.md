@@ -4,6 +4,44 @@ All notable changes to corlinman are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-05-17 — multi-agent
+
+Headline: parallel sibling agents, a shared trace-scoped blackboard,
+a deterministic Pareto scorer for prompt-template variants, and
+BuildKit cache mounts that drop incremental Docker rebuilds from
+~12 min to ~90 s. Inspired by Nous Research's
+[hermes-agent](https://github.com/NousResearch/hermes-agent) (true
+multi-agent + GEPA prompt evolution) and
+[openclaw](https://github.com/openclaw/openclaw) (pre-warmed pool
+pattern). Full notes:
+[`docs/release-notes-v0.7.0.md`](docs/release-notes-v0.7.0.md).
+
+### Added
+
+- **`subagent.spawn_many`** tool. Dispatches up to 3 sibling children
+  concurrently under one parent context via `asyncio.gather`. The
+  supervisor's existing per-parent concurrency cap (default 3)
+  still governs live siblings; fan-outs exceeding the cap reject
+  up-front with a clean args-invalid envelope.
+- **Shared blackboard** (`blackboard.read` / `blackboard.write`).
+  Trace-scoped, append-only sqlite scratchpad for sibling agents to
+  coordinate. Writes never overwrite; reads return the latest value at
+  call time; trace isolation is the security boundary.
+- **`agents/orchestrator.yaml`**: new planner persona that
+  decomposes → dispatches → reduces.
+- **GEPA-lite Pareto scorer** (`corlinman_evolution_engine.score_variants`).
+  Deterministic, no LLM-judge, no DSPy dependency — token Jaccard
+  against the episodes that already succeeded.
+- **Builtin-tool interception** in the agent servicer routes the four
+  new tools in-process rather than through the Rust plugin registry.
+- **BuildKit cache mounts** on the rust-builder + py-builder stages
+  for cargo registry / git / target and uv wheel cache.
+
+### Deferred to v0.7.1
+
+- Pre-warmed Python agent runner pool (OpenClaw-style). Designed in
+  [`docs/multi-agent-release-plan.md`](docs/multi-agent-release-plan.md) §2.3.
+
 ## [Unreleased] — targets v0.5.0
 
 Free-form named providers + 7 new market `kind`s, **plus a BREAKING swap

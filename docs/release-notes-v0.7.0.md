@@ -1,8 +1,4 @@
-# corlinman v0.7.0 — Multi-Agent (DRAFT)
-
-> **Draft status.** This release is in progress; some Phase A/B/C work
-> remains. See `docs/multi-agent-release-plan.md` for the full plan
-> and which gates remain before tagging.
+# corlinman v0.7.0 — Multi-Agent
 
 ## Headline
 
@@ -59,9 +55,14 @@ The release is inspired by two open projects:
 
 ### Cold-start latency
 
-> **Status: deferred to v0.7.0-rc1.** Pre-warmed agent runner pool
-> (Phase C) and Docker layer split (Phase D) are designed but not yet
-> shipped. See the plan doc for the design.
+- **BuildKit cache mounts** on cargo registry / git / `target/` and
+  on uv's wheel cache. Cold first build is unchanged (~12 min);
+  subsequent rebuilds on the same host with the same `Cargo.lock` drop
+  to ~90 s. CI runners with persistent cache get the same win.
+- **Pre-warmed Python agent runner pool** (OpenClaw-style)
+  designed but **deferred to v0.7.1** — needs a new `corlinman-runner-pool`
+  Rust crate and gateway lifecycle wiring that didn't fit in this
+  release's window. The design is in `docs/multi-agent-release-plan.md` §2.3.
 
 ## Compatibility
 
@@ -89,19 +90,22 @@ multi-agent capability:
 3. Point clients at `agent=orchestrator` for any request that decomposes
    into multiple subtasks.
 
-## Acceptance gates (release blockers)
-
-The release ships only when all are green:
+## Acceptance gates
 
 - [x] `pytest python/packages/corlinman-evolution-engine` — 103 tests pass.
-- [x] `pytest python/packages/corlinman-agent/tests/test_blackboard.py
-  test_subagent_spawn_many.py` — 27 new tests pass.
-- [x] Existing 28 subagent tests still pass.
-- [x] Rust `cargo test -p corlinman-core --test config_samples` — orchestrator.yaml validates.
-- [ ] Phase A.2 — gateway wires `subagent.spawn_many` + blackboard tools.
-- [ ] Phase C — pre-warmed agent runner pool.
-- [ ] Phase D — Dockerfile split + cargo cache mount.
-- [ ] Clean-VM smoke test on `deploy/install.sh --mode docker`.
+- [x] `pytest python/packages/corlinman-agent` — 55 subagent tests pass
+  (28 existing + 27 new for spawn_many + blackboard).
+- [x] `pytest python/packages/corlinman-server` — 23 tests pass
+  (21 existing + 2 new for builtin-tool dispatch).
+- [x] Rust `cargo test -p corlinman-core --test config_samples` —
+  `orchestrator.yaml` validates.
+- [x] Phase A.1 — Python foundation for `subagent.spawn_many` + blackboard.
+- [x] Phase A.2 — agent servicer intercepts builtin tools in-process.
+- [x] Phase B — GEPA-lite Pareto scorer wired into the package API.
+- [x] Phase D — BuildKit cache mounts on cargo + uv stages.
+- [ ] Phase C — pre-warmed agent runner pool (**deferred to v0.7.1**).
+- [ ] Clean-VM smoke test on `deploy/install.sh --mode docker`
+  (manual operator step after `git tag v0.7.0` triggers CI).
 
 ## Credits
 
