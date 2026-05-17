@@ -14,6 +14,12 @@ import {
   useMobileDrawer,
 } from "@/components/layout/mobile-drawer-context";
 import { AuroraBackground } from "@/components/ui/aurora-background";
+import { DefaultPasswordBanner } from "@/components/admin/default-password-banner";
+import {
+  MustChangePasswordProvider,
+} from "@/components/admin/must-change-password-context";
+import { MustChangePasswordGuard } from "@/components/admin/must-change-password-guard";
+import { ActiveProfileProvider } from "@/lib/context/active-profile";
 import { cn } from "@/lib/utils";
 
 /**
@@ -78,9 +84,13 @@ export default function AdminLayout({
 
   return (
     <MobileDrawerProvider>
-      <AdminShell user={state.session.user} pathname={pathname ?? "/"}>
-        {children}
-      </AdminShell>
+      <MustChangePasswordProvider session={state.session}>
+        <ActiveProfileProvider>
+          <AdminShell user={state.session.user} pathname={pathname ?? "/"}>
+            <MustChangePasswordGuard>{children}</MustChangePasswordGuard>
+          </AdminShell>
+        </ActiveProfileProvider>
+      </MustChangePasswordProvider>
     </MobileDrawerProvider>
   );
 }
@@ -133,6 +143,10 @@ function AdminShell({
 
       <div className="flex min-w-0 flex-1 flex-col gap-2 md:gap-4">
         <TopNav />
+        {/* Wave 1.3 — top-of-shell alert when the admin is still on the
+            default `admin/root` seed. Renders nothing once the flag
+            flips, so it's free for already-rotated installs. */}
+        <DefaultPasswordBanner />
         <main className="relative flex flex-1 flex-col">
           <div className="mx-auto w-full max-w-[1440px] flex-1 space-y-6">
             <PageTransition>

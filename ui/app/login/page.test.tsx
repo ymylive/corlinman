@@ -66,6 +66,29 @@ describe("LoginPage", () => {
   });
 
   it("calls /admin/login and redirects on success", async () => {
+    // The Wave 1.4 flow does a follow-up /admin/me probe — return a
+    // session that has already rotated so we hit the `/` redirect branch.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("/admin/me")) {
+          return new Response(
+            JSON.stringify({
+              user: "admin",
+              created_at: "2026-05-17T00:00:00Z",
+              expires_at: "2026-05-24T00:00:00Z",
+              must_change_password: false,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({ token: "t", expires_in: 86400 }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+
     render(<LoginPage />);
     fireEvent.change(screen.getByLabelText("用户名"), {
       target: { value: "admin" },
@@ -84,4 +107,54 @@ describe("LoginPage", () => {
       body: JSON.stringify({ username: "admin", password: "secret" }),
     });
   });
+
+  it(
+    "ignores ?redirect= and forces /account/security when " +
+      "must_change_password is true",
+    async () => {
+      // Land with a redirect target. The Wave 1.4 contract says we
+      // *ignore* this whenever the gateway tells us the seed hasn't
+      // been rotated yet.
+      searchParams = new URLSearchParams({ redirect: "/agents" });
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          if (url.includes("/admin/me")) {
+            return new Response(
+              JSON.stringify({
+                user: "admin",
+                created_at: "2026-05-17T00:00:00Z",
+                expires_at: "2026-05-24T00:00:00Z",
+                must_change_password: true,
+              }),
+              {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              },
+            );
+          }
+          return new Response(
+            JSON.stringify({ token: "t", expires_in: 86400 }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }),
+      );
+
+      render(<LoginPage />);
+      fireEvent.change(screen.getByLabelText("用户名"), {
+        target: { value: "admin" },
+      });
+      fireEvent.change(screen.getByLabelText("密码"), {
+        target: { value: "root" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "登录" }));
+
+      await waitFor(() =>
+        expect(replaceMock).toHaveBeenCalledWith("/account/security"),
+      );
+      // Importantly, /agents was NEVER navigated to.
+      expect(replaceMock).not.toHaveBeenCalledWith("/agents");
+    },
+  );
 });

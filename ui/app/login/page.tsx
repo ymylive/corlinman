@@ -17,7 +17,7 @@ import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslation } from "react-i18next";
 
-import { login } from "@/lib/auth";
+import { getSession, login } from "@/lib/auth";
 import { CorlinmanApiError } from "@/lib/api";
 import { BrandMark } from "@/components/layout/brand-mark";
 import { LanguageToggle } from "@/components/layout/language-toggle";
@@ -143,7 +143,21 @@ function LoginForm() {
     setSubmitting(true);
     try {
       await login({ username, password });
-      router.replace(redirect);
+      // Wave 1.4 — fetch /admin/me right after the cookie is set so we
+      // can honour `must_change_password`. The first-run admin/root seed
+      // returns the flag as true; in that case we ignore the `?redirect=`
+      // query (which is usually whatever the auth guard captured) and
+      // hard-bounce to the security page. The admin layout guard would
+      // do this too, but doing it here saves a round-trip flash.
+      let forceRotate = false;
+      try {
+        const me = await getSession();
+        forceRotate = me?.must_change_password === true;
+      } catch {
+        // Swallow — login succeeded so the cookie is good; the admin
+        // layout's own getSession() will re-check and recover.
+      }
+      router.replace(forceRotate ? "/account/security" : redirect);
     } catch (err) {
       if (err instanceof CorlinmanApiError) {
         if (err.status === 503) {

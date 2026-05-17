@@ -57,6 +57,13 @@ class AdminState:
     # ``admin_not_configured``.
     admin_username: str | None = None
     admin_password_hash: str | None = None
+    # ``True`` when the in-memory credentials are still the first-boot
+    # default (``admin``/``root``) and the operator has not yet rotated
+    # them. The ``/admin/me`` payload surfaces this so the UI can force
+    # a redirect to the ``/account/security`` page after login. Flipped
+    # to ``False`` (and persisted) by ``/admin/password`` once a fresh
+    # password is set.
+    must_change_password: bool = False
     # Path of the on-disk config file — used by the onboard + password
     # routes to persist the new hash. ``None`` falls back to in-memory
     # updates only, matching the Rust ``config_path: None`` 503 path.
@@ -134,6 +141,16 @@ class AdminState:
     # ``sessions.py`` against ``data_dir`` so this state field is the
     # operator gate, not the data source.
     sessions_disabled: bool = False
+
+    # -- /admin/profiles --------------------------------------------
+    #
+    # ``corlinman_server.profiles.ProfileStore`` instance backing the
+    # profile registry (Wave 3.1 of PLAN_EASY_SETUP.md). ``None`` ->
+    # all five ``/admin/profiles*`` routes return 503
+    # ``profile_store_missing``. Typed loosely with ``Any`` so this
+    # dataclass stays importable even when the profiles submodule
+    # hasn't landed yet.
+    profile_store: Any | None = None
 
 
 # ---------------------------------------------------------------------------

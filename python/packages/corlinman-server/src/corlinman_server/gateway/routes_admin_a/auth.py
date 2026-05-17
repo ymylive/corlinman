@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import re
 import threading
 from pathlib import Path
 from typing import Annotated, Any
@@ -25,6 +26,10 @@ from argon2.exceptions import VerifyMismatchError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
+from corlinman_server.gateway.lifecycle.admin_seed import (
+    _merge_admin_block,
+    _render_admin_block,
+)
 from corlinman_server.gateway.routes_admin_a._session_store import (
     SESSION_COOKIE_NAME,
     AdminSessionStore,
@@ -37,6 +42,12 @@ from corlinman_server.gateway.routes_admin_a.state import (
 
 # Minimum length operators must use when picking the admin password.
 MIN_PASSWORD_LEN = 8
+
+# Username constraints. Mirrors the slug regex hermes uses for profiles —
+# ASCII alphanumerics + ``_`` + ``-`` only, capped so the UI can render
+# the value without truncation gymnastics.
+USERNAME_MAX_LEN = 64
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Default idle TTL for admin sessions (24 hours). Mirrors
 # ``DEFAULT_SESSION_TTL_SECS`` on the Rust side.
@@ -74,6 +85,13 @@ class MeResponse(BaseModel):
     user: str
     created_at: str
     expires_at: str
+    # ``True`` while the in-memory credentials are still the first-boot
+    # default (``admin``/``root``). The UI watches this flag and force-
+    # redirects to ``/account/security`` after login so the operator
+    # picks a real password before doing anything else. The
+    # ``/admin/password`` endpoint flips it (and persists the flip to
+    # the on-disk ``[admin]`` block) once a fresh password lands.
+    must_change_password: bool = False
 
 
 class OnboardRequest(BaseModel):
@@ -84,6 +102,22 @@ class OnboardRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     old_password: str
     new_password: str
+
+
+class ChangeUsernameRequest(BaseModel):
+    """Wire shape for ``POST /admin/username``.
+
+    Mirrors the rotate-password pattern: the operator authenticates with
+    their *current* password (in addition to the session cookie) before
+    we accept the rename. We never read or rewrite ``new_password`` here
+    — the existing argon2 hash is re-persisted verbatim alongside the
+    new username so a single endpoint covers the "I picked a bad
+    username during onboarding" recovery path without forcing a fresh
+    password rotation.
+    """
+
+    old_password: str
+    new_username: str
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +322,7 @@ def router() -> APIRouter:
             user=session.user,
             created_at=_iso(session.created_at),
             expires_at=_iso(expires_at),
+            must_change_password=bool(state.must_change_password),
         )
 
     @r.post("/admin/onboard", summary="First-run admin bootstrap")
@@ -365,34 +400,146 @@ def router() -> APIRouter:
                     },
                 )
             await _persist_admin_credentials(
-                state, state.admin_username, body.new_password
+                state,
+                state.admin_username,
+                body.new_password,
+                must_change_password=False,
             )
+            # A successful rotation clears the first-boot warning flag
+            # both in-memory (so ``/admin/me`` reflects it immediately)
+            # and on disk (handled inside ``_persist_admin_credentials``
+            # which writes the merged ``[admin]`` block).
+            state.must_change_password = False
         return {"status": "ok"}
+
+    @r.post("/admin/username", summary="Change the admin username")
+    async def change_username(
+        body: ChangeUsernameRequest,
+        request: Request,
+        state: Annotated[AdminState, Depends(get_admin_state)],
+    ) -> dict[str, str]:
+        # Mirror ``change_password``: session cookie first, then critical
+        # section under the admin write lock so the verify-then-persist
+        # transition is atomic against a concurrent rotation.
+        if state.session_store is None:
+            raise _service_unavailable("session_store_missing")
+        token = _read_session_cookie(request)
+        session = (
+            state.session_store.validate(token) if token else None
+        )
+        if session is None:
+            raise _unauthorized("unauthenticated")
+
+        new_username = body.new_username.strip()
+        if not new_username or len(new_username) > USERNAME_MAX_LEN:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error": "invalid_username",
+                    "message": (
+                        f"username must be 1..{USERNAME_MAX_LEN} characters"
+                    ),
+                },
+            )
+        if _USERNAME_RE.match(new_username) is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error": "invalid_username",
+                    "message": (
+                        "username must contain only ASCII letters, "
+                        "digits, underscores, and hyphens"
+                    ),
+                },
+            )
+
+        lock = state.admin_write_lock or _FALLBACK_ADMIN_WRITE_LOCK
+        async with _lock_async(lock):
+            if state.admin_username is None or state.admin_password_hash is None:
+                raise _service_unavailable("admin_not_configured")
+            if session.user != state.admin_username:
+                raise _unauthorized("session_user_mismatch")
+            if not argon2_verify(body.old_password, state.admin_password_hash):
+                raise _unauthorized("invalid_old_password")
+
+            # Idempotent: same username → no-op but still 200 so the FE
+            # can treat the endpoint as "set", not "create".
+            if new_username == state.admin_username:
+                return {"status": "unchanged", "username": new_username}
+
+            # Re-persist the *existing* hash alongside the new username
+            # so we don't force the operator through a password rotation
+            # to rename. The session cookie stays valid — the cookie is
+            # an opaque token, not a username carrier — but the session
+            # row still references the old user. We rename it in place
+            # so ``session_user_mismatch`` doesn't fire on the very next
+            # request.
+            await _persist_admin_credentials(
+                state,
+                new_username,
+                None,
+                precomputed_hash=state.admin_password_hash,
+                must_change_password=state.must_change_password,
+            )
+            _rename_active_session(state, session.user, new_username)
+
+        return {"status": "ok", "username": new_username}
 
     return r
 
 
 async def _persist_admin_credentials(
-    state: AdminState, username: str, plaintext_password: str
+    state: AdminState,
+    username: str,
+    plaintext_password: str | None,
+    *,
+    precomputed_hash: str | None = None,
+    must_change_password: bool = False,
 ) -> None:
     """Hash, swap in-memory snapshot, and (when ``config_path`` is set)
     flush to disk. Mirrors the Rust ``persist_admin_credentials`` helper.
 
+    One of ``plaintext_password`` or ``precomputed_hash`` must be
+    provided. The username-rotation path passes ``precomputed_hash=
+    state.admin_password_hash`` so renaming the operator account
+    doesn't force a fresh password.
+
+    The on-disk write goes through
+    :func:`corlinman_server.gateway.lifecycle.admin_seed._merge_admin_block`
+    so other sections in ``config.toml`` are preserved verbatim — only
+    the ``[admin]`` block is replaced.
+
     Raises an :class:`HTTPException` on any unrecoverable failure so the
-    handler can surface it directly."""
-    try:
-        hashed = hash_password(plaintext_password)
-    except Exception as exc:  # pragma: no cover — argon2 hash rarely fails
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": "hash_failed", "message": str(exc)},
-        ) from exc
+    handler can surface it directly.
+    """
+    if precomputed_hash is not None:
+        hashed = precomputed_hash
+    else:
+        if plaintext_password is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": "hash_missing",
+                    "message": (
+                        "_persist_admin_credentials requires either a "
+                        "plaintext password or a precomputed hash"
+                    ),
+                },
+            )
+        try:
+            hashed = hash_password(plaintext_password)
+        except Exception as exc:  # pragma: no cover — argon2 hash rarely fails
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": "hash_failed", "message": str(exc)},
+            ) from exc
 
     # Mutate the in-memory snapshot first so subsequent requests see
     # the new credentials even if the disk write fails (matches the
     # Rust ``state.config.store(...)`` + ``rewrite_py_config`` order).
     state.admin_username = username
     state.admin_password_hash = hashed
+    state.must_change_password = bool(must_change_password)
 
     if state.config_path is None:
         # No on-disk config to update — mirrors the Rust 503 only if the
@@ -405,18 +552,23 @@ async def _persist_admin_credentials(
         )
 
     try:
-        # The Python port writes a minimal ``[admin]`` block. The Rust
-        # side round-trips the full ``Config`` TOML; reproducing that
-        # would require a dep on the Rust config schema. We persist a
-        # small TOML fragment that's safe to merge into the operator's
-        # config.toml by the bootstrapper. The exact file layout is
-        # the integration TODO documented in the submodule README.
-        toml_text = (
-            f"[admin]\n"
-            f'username = "{_toml_escape(username)}"\n'
-            f'password_hash = "{_toml_escape(hashed)}"\n'
+        existing = ""
+        if state.config_path.exists():
+            try:
+                existing = state.config_path.read_text(encoding="utf-8")
+            except OSError:
+                # Missing-perms or transient read failures — fall back
+                # to a fresh write rather than a 500. The atomic-write
+                # below either succeeds or raises ``OSError`` which we
+                # surface below.
+                existing = ""
+        block = _render_admin_block(
+            username=username,
+            password_hash=hashed,
+            must_change_password=bool(must_change_password),
         )
-        await _atomic_write(state.config_path, toml_text)
+        merged = _merge_admin_block(existing, block)
+        await _atomic_write(state.config_path, merged)
     except OSError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -427,6 +579,44 @@ async def _persist_admin_credentials(
 def _toml_escape(s: str) -> str:
     """Minimal TOML-string escape for the two fields we serialise."""
     return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _rename_active_session(
+    state: AdminState, old_username: str, new_username: str
+) -> None:
+    """Rewrite every active session row that points at ``old_username``
+    so subsequent ``session_user_mismatch`` checks pass.
+
+    The session store is intentionally narrow — it doesn't expose a
+    rename API on the Rust side — so we reach into its internals via
+    duck-typing. Tests that swap in a mock store can pass either a
+    dict-backed ``_sessions`` or a ``rename`` method; we tolerate both.
+    """
+    store = state.session_store
+    if store is None:
+        return
+    rename = getattr(store, "rename", None)
+    if callable(rename):
+        try:
+            rename(old_username, new_username)
+            return
+        except Exception:
+            # Fall through to the duck-typed path so a half-broken
+            # mock still works.
+            pass
+    sessions = getattr(store, "_sessions", None)
+    lock = getattr(store, "_lock", None)
+    if sessions is None:
+        return
+    if lock is not None:
+        with lock:
+            for row in sessions.values():
+                if getattr(row, "user", None) == old_username:
+                    row.user = new_username
+    else:  # pragma: no cover — defensive
+        for row in sessions.values():
+            if getattr(row, "user", None) == old_username:
+                row.user = new_username
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +672,9 @@ def _lock_async(lock: Any) -> _LockAsyncCM:
 __all__ = [
     "DEFAULT_SESSION_TTL_SECS",
     "MIN_PASSWORD_LEN",
+    "USERNAME_MAX_LEN",
     "ChangePasswordRequest",
+    "ChangeUsernameRequest",
     "LoginRequest",
     "LoginResponse",
     "MeResponse",
