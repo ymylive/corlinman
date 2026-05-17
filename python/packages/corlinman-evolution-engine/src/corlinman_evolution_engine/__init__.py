@@ -14,6 +14,11 @@ from corlinman_evolution_engine.engine import (
     EvolutionEngine,
     RunSummary,
 )
+from corlinman_evolution_engine.gepa import (
+    EpisodeSample,
+    VariantScore,
+    score_variants,
+)
 from corlinman_evolution_engine.memory_op import (
     KIND_MEMORY_OP,
     DuplicatePair,
@@ -61,6 +66,7 @@ __all__ = [
     "ConsolidationSummary",
     "DuplicatePair",
     "EngineConfig",
+    "EpisodeSample",
     "EvolutionEngine",
     "EvolutionProposal",
     "KindHandler",
@@ -72,10 +78,12 @@ __all__ = [
     "SkillUpdateHandler",
     "TagRebalanceHandler",
     "ToolPolicyHandler",
+    "VariantScore",
     "cluster_signals",
     "consolidation_run_once",
     "find_near_duplicate_pairs",
     "format_day_prefix",
     "jaccard",
     "mint_proposal_id",
+    "score_variants",
 ]
