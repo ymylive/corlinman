@@ -9,8 +9,8 @@
 #   3. curl both non-streaming and streaming requests; verify fragments;
 #   4. kill both processes; exit 0 on success, non-zero on failure.
 #
-# Intended to run in CI and locally. Timings are tuned for a cold cargo build
-# (gateway binary may take ~1-2 minutes on first run).
+# Intended to run in CI and locally. Timings allow for a first-run uv sync
+# (workspace install may take ~30s on a cold cache).
 
 set -u
 set -o pipefail
@@ -95,16 +95,15 @@ if ! wait_for_tcp "127.0.0.1" "${PY_PORT}" 30; then
 fi
 echo "python server up (pid=${PY_PID})"
 
-echo "== starting rust gateway (port=${GW_PORT}) =="
+echo "== starting gateway (port=${GW_PORT}) =="
 (
   PORT="${GW_PORT}" \
   CORLINMAN_PY_ADDR="127.0.0.1:${PY_PORT}" \
-  RUST_LOG="info" \
-    cargo run -q -p corlinman-gateway --bin corlinman-gateway
+    uv run corlinman-gateway --port "${GW_PORT}"
 ) >"${GW_LOG}" 2>&1 &
 GW_PID=$!
 
-if ! wait_for_http "http://127.0.0.1:${GW_PORT}/health" 180; then
+if ! wait_for_http "http://127.0.0.1:${GW_PORT}/health" 60; then
   echo "FAIL: gateway /health didn't respond within 180s"
   RESULT=1
   exit 1

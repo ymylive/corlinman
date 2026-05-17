@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Generate Python gRPC stubs for corlinman.
-# Rust stubs are produced by tonic-build at `cargo build` time; this script
-# only handles the Python side (grpcio-tools).
+# Generate Python gRPC stubs for corlinman from proto/*.proto via grpcio-tools.
 #
 # Usage: bash scripts/gen-proto.sh
 #

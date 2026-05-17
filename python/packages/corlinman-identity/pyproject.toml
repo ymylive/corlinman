@@ -1,0 +1,19 @@
+[project]
+name = "corlinman-identity"
+version = "0.1.0"
+description = "Cross-channel UserIdentityResolver. Resolves channel-scoped IDs (qq:1234, telegram:9876) to a canonical opaque user_id, with operator-driven verification-phrase protocol for safe cross-channel unification. Per-tenant scoped: each tenant has its own identity graph."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "corlinman contributors" }]
+
+dependencies = [
+    "aiosqlite>=0.20",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/corlinman_identity"]

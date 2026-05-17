@@ -9,90 +9,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Unified workspace gate. Each tool runs as its own job for parallelism so a
-# slow rust-test doesn't block the python lint feedback loop. Commands here
-# mirror the Makefile (`make lint` / `make test`) so CI cannot drift from
+# Unified workspace gate. Each tool runs as its own job for parallelism. Commands
+# here mirror the Makefile (`make lint` / `make test`) so CI cannot drift from
 # local-dev. See docs/ci-status.md for per-job expectations.
 jobs:
-  # ---------------------------------------------------------------------------
-  # Rust plane (fmt / clippy / nextest split into parallel jobs)
-  # ---------------------------------------------------------------------------
-  rust-fmt:
-    name: rust-fmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # rust-toolchain.toml pins the channel (currently 1.95.0) and components
-      # (rustfmt, clippy); dtolnay/rust-toolchain@master honours that file so
-      # workspace + CI never drift.
-      - name: Install Rust (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          components: rustfmt
-
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
-
-  rust-clippy:
-    name: rust-clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install protobuf-compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
-
-      - name: Install Rust (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          components: clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-ci
-          cache-on-failure: true
-
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-  rust-test:
-    name: rust-test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install protobuf-compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
-
-      - name: Install Rust (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-ci
-          cache-on-failure: true
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
-      - name: cargo nextest run
-        # --retries 2: SQLite tests in corlinman-vector / corlinman-memory-host
-        # / corlinman-gateway have a residual catalog-cache race under nextest
-        # parallelism on Linux runners that shows up as `(code: 1) no such
-        # table: chunks`. The PR fixing the migration to use an isolated
-        # single-conn pool collapsed most of the window; the retry handles
-        # the leftover edge cases without masking deterministic bugs.
-        run: cargo nextest run --workspace --retries 2
-
   # ---------------------------------------------------------------------------
   # Python plane (ruff / mypy / pytest split into parallel jobs)
   # ---------------------------------------------------------------------------
@@ -114,7 +34,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: uv sync
-        run: uv sync --dev
+        run: uv sync --all-packages --dev
 
       - name: ruff check
         run: uv run ruff check .
@@ -140,7 +60,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: uv sync
-        run: uv sync --dev
+        run: uv sync --all-packages --dev
 
       # Generated proto stubs are imported by the python plane; without them
       # mypy can't resolve corlinman_grpc symbols.
@@ -171,7 +91,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: uv sync
-        run: uv sync --dev
+        run: uv sync --all-packages --dev
 
       - name: generate Python stubs
         run: bash scripts/gen-proto.sh
@@ -288,8 +208,7 @@ jobs:
         run: pnpm -C ui test
 
   # ---------------------------------------------------------------------------
-  # Auxiliary gates (kept from the previous ci.yml; not part of the 9-job
-  # core gate but still run on every PR + push to main).
+  # Auxiliary gates: run on every PR + push to main.
   # ---------------------------------------------------------------------------
   proto-sync:
     name: proto-sync (generated stubs committed)
@@ -309,7 +228,7 @@ jobs:
         uses: astral-sh/setup-uv@v3
 
       - name: uv sync
-        run: uv sync --dev
+        run: uv sync --all-packages --dev
 
       - name: generate Python stubs
         run: bash scripts/gen-proto.sh
@@ -326,27 +245,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install protobuf-compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
-
-      - name: Install Rust (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-ci
-
-      - name: Install cargo-modules
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-modules
-
-      # `corlinman-gateway` has both lib and bin targets; cargo-modules needs
-      # the target specified explicitly.
-      - name: rust module graph (gateway lib)
-        run: cargo modules structure --package corlinman-gateway --lib --no-fns
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -360,67 +259,20 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: uv sync
-        run: uv sync --dev
+        run: uv sync --all-packages --dev
 
       # Python plane layering contract — see .importlinter at repo root.
       - name: python import-linter
         run: uv run lint-imports
 
-  docker-build:
-    name: docker-build (runtime target, dry-run)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build runtime image (no push)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile
-          target: runtime
-          push: false
-          load: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: corlinman:ci
-
-  # Advisory job; does not gate merges while the crate graph is churning.
-  # Promoted to required once M7's dep-stabilisation work lands.
-  cargo-deny:
-    name: cargo-deny (licenses / advisories — advisory)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny
-
-      - name: cargo deny check
-        run: cargo deny --all-features check
-
   # ---------------------------------------------------------------------------
-  # Aggregator: a single required check that fans-in the 9 core gate jobs so
-  # branch protection only needs one rule. Auxiliary jobs above run alongside
-  # but are not fanned-in here.
+  # Aggregator: a single required check that fans-in the core gate jobs so
+  # branch protection only needs one rule.
   # ---------------------------------------------------------------------------
   gate:
     name: gate (all required checks)
     if: always()
     needs:
-      - rust-fmt
-      - rust-clippy
-      - rust-test
       - py-ruff
       - py-mypy
       - py-test
@@ -435,4 +287,3 @@ jobs:
             echo "One or more required gate jobs failed or were cancelled."
             exit 1
           fi
-          echo "All required gate jobs succeeded."

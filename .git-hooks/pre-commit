@@ -28,14 +28,12 @@ if [[ ${#STAGED[@]} -eq 0 ]]; then
 fi
 
 # Bucket by language
-rust_files=()
 py_files=()
 ts_files=()
 proto_files=()
 
 for f in "${STAGED[@]}"; do
   case "$f" in
-    *.rs)              rust_files+=("$f") ;;
     *.py)              py_files+=("$f") ;;
     *.ts|*.tsx)        ts_files+=("$f") ;;
     *.proto)           proto_files+=("$f") ;;
@@ -43,24 +41,6 @@ for f in "${STAGED[@]}"; do
 done
 
 modified=()
-
-# --- Rust ---
-if [[ ${#rust_files[@]} -gt 0 ]]; then
-  echo "pre-commit: rust (${#rust_files[@]} file(s))"
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "  cargo not found; install rustup" >&2
-    exit 1
-  fi
-  # fmt: run in-place so the modified[] list can re-stage changes
-  cargo fmt --all
-  cargo clippy --workspace --all-targets -- -D warnings
-  # Re-check staged rust files for post-fmt drift
-  for f in "${rust_files[@]}"; do
-    if ! git diff --quiet -- "$f"; then
-      modified+=("$f")
-    fi
-  done
-fi
 
 # --- Python ---
 if [[ ${#py_files[@]} -gt 0 ]]; then

@@ -4,7 +4,7 @@
 #
 # Pre-requisites:
 #   - docker compose available
-#   - corlinman-gateway already built (cargo build --release)
+#   - corlinman workspace installed (uv sync --all-packages)
 #   - jq (for response parsing)
 #   - curl
 #

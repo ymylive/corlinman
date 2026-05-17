@@ -63,10 +63,11 @@ detect_arch() {
             else
                 # Linux aarch64 prebuilts aren't currently published — numkong
                 # cross-compile blocker. Fall back to source build.
-                die "Linux aarch64 prebuilts are not yet published. Build from source:
+                die "Linux aarch64 prebuilts are not yet published. Install from source:
   git clone https://github.com/ymylive/corlinman && cd corlinman
-  cargo build --release -p corlinman-gateway -p corlinman-cli
-See docs/dev/build-fast.md for native build tips."
+  uv sync --all-packages
+  uv run corlinman --help   # validate
+See docs/dev/build-fast.md for tips."
             fi
             ;;
         *) die "unsupported arch: $m" ;;

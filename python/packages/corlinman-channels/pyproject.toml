@@ -1,0 +1,33 @@
+[project]
+name = "corlinman-channels"
+version = "0.1.0"
+description = "Inbound channel adapters: QQ/OneBot v11 WebSocket, LogStream WebSocket, Telegram Bot HTTPS long-poll. Python port of the Rust corlinman-channels crate."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "corlinman contributors" }]
+
+dependencies = [
+    "httpx>=0.27",
+    "websockets>=13.0",
+    "pydantic>=2.7",
+    # NOTE: corlinman-identity (W1) and corlinman-hooks are consumed via
+    # direct import. We avoid declaring them here because the root
+    # workspace pyproject must remain untouched per the port spec and
+    # adding a workspace dep would require a matching ``[tool.uv.sources]``
+    # entry there. Within the corlinman workspace venv both packages are
+    # already installed; standalone publishes should add them as extras.
+    #
+    # The ``corlinman_channels.router`` / ``telegram_webhook`` modules
+    # import ``corlinman_hooks`` lazily inside the codepaths that need
+    # the bus, so a caller who never wires a hook bus never hits the
+    # import — useful when this package is consumed outside the
+    # corlinman workspace.
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/corlinman_channels"]

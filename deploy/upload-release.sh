@@ -32,7 +32,7 @@ SERVICE_NAME="${SERVICE_NAME:-corlinman}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 
-VERSION="$(grep -E '^version' "$ROOT/Cargo.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+VERSION="$(grep -E '^version' "$ROOT/pyproject.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
 ARCHIVE="corlinman-${VERSION}-${TARGET_ARCH}.tar.gz"
 
 if [[ ! -f "$DIST/$ARCHIVE" ]]; then

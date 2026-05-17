@@ -17,6 +17,7 @@ triggering ``TypeError: duplicate symbol``.
 
 from __future__ import annotations
 
+from corlinman_grpc import agent_client
 from corlinman_grpc._generated.corlinman.v1 import (
     agent_pb2,
     agent_pb2_grpc,
@@ -37,6 +38,7 @@ from corlinman_grpc._placeholder import PROTO_VERSION
 
 __all__ = [
     "PROTO_VERSION",
+    "agent_client",
     "agent_pb2",
     "agent_pb2_grpc",
     "common_pb2",

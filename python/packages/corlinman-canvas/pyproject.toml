@@ -1,0 +1,33 @@
+[project]
+name = "corlinman-canvas"
+version = "0.1.0"
+description = "Canvas Host renderer — Tidepool-styled HTML for code, table, latex, sparkline, mermaid artifacts. Python port of the Rust `corlinman-canvas` crate."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "corlinman contributors" }]
+
+# Runtime deps:
+#   - pygments        — syntax highlighting (replaces Rust `syntect`)
+#   - markdown-it-py  — GFM markdown table parsing (replaces `pulldown-cmark`)
+#   - pylatexenc      — TeX -> text macro expansion (replaces `katex-rs`); we
+#                       do not embed JS engines, so KaTeX-quality HTML is not
+#                       produced. Greek-letter macros, fractions-as-text, etc.
+#                       are resolved; output is wrapped in `cn-canvas-katex`
+#                       and stays HTML-escaped.
+#
+# `csv` (stdlib), `hashlib` (stdlib), `json` (stdlib) cover the remaining
+# Rust deps. Mermaid stays a `<pre class="mermaid">` fallback — see
+# `mermaid.py` for the TODO.
+dependencies = [
+    "pygments>=2.18",
+    "markdown-it-py>=3.0",
+    "pylatexenc>=2.10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/corlinman_canvas"]

@@ -1,4 +1,0 @@
-<<<[TOOL_REQUEST]>>>
-tool_name:「始」shell「末」,
-command:「始」ls -la「末」
-<<<[END_TOOL_REQUEST]>>>

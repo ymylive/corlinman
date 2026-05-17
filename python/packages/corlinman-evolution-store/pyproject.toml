@@ -1,0 +1,19 @@
+[project]
+name = "corlinman-evolution-store"
+version = "0.1.0"
+description = "EvolutionLoop persistence — signals / proposals / history / intent log repos backed by SQLite (Python port of the Rust corlinman-evolution crate)."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "corlinman contributors" }]
+
+dependencies = [
+    "aiosqlite>=0.20",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/corlinman_evolution_store"]

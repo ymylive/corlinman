@@ -6,11 +6,9 @@ name: swift-mac
 #   - macOS runners are 10× the minute cost of `ubuntu-latest`. Gating
 #     on `paths:` so this only runs when `apps/swift-mac/**` changes
 #     keeps the burn rate sane.
-#   - The Swift toolchain on `macos-latest` is independent of the Rust
-#     toolchain pinned in `rust-toolchain.toml` and the Python venv
-#     pinned in `python/`. Mixing them in one job means one slow
-#     reinstall blocks the others; separating workflows lets them
-#     parallelise at the GitHub-Actions scheduler level.
+#   - The Swift toolchain on `macos-latest` is independent of the Python
+#     venv pinned in `python/`. Separating workflows lets them parallelise
+#     at the GitHub-Actions scheduler level.
 #   - Snapshot tests (per `docs/design/phase4-w3-c4-design.md:454-458`)
 #     are macOS-only — the LLDB-rendering pipeline behind
 #     `swift-snapshot-testing` doesn't have a Linux equivalent.

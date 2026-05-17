@@ -1,0 +1,25 @@
+[project]
+name = "corlinman-mcp-server"
+version = "0.1.0"
+description = "Model Context Protocol (2024-11-05) server for corlinman. Hosts the /mcp WebSocket endpoint and bridges MCP capabilities (tools/resources/prompts) to corlinman's PluginRegistry / MemoryHost / SkillRegistry. Python port of the Rust corlinman-mcp crate; wire-compatible with the same MCP clients."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "corlinman contributors" }]
+
+dependencies = [
+    "pydantic>=2.10",
+    "websockets>=13",
+    "structlog>=25.1",
+    "corlinman-skills-registry",
+]
+
+[tool.uv.sources]
+corlinman-skills-registry = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/corlinman_mcp_server"]
