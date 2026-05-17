@@ -5,6 +5,7 @@ import { Menu } from "lucide-react";
 import { Breadcrumbs } from "./breadcrumbs";
 import { HealthDot } from "./health-dot";
 import { LanguageToggle } from "./language-toggle";
+import { ProfileSwitcher } from "./profile-switcher";
 import { SearchTrigger } from "./search-trigger";
 import { TenantSwitcher } from "./tenant-switcher";
 import { useMobileDrawer } from "./mobile-drawer-context";
@@ -45,6 +46,7 @@ export function TopNav() {
       <div className="flex items-center gap-1.5 md:gap-2">
         <SearchTrigger />
         <div className="hidden h-5 w-px bg-tp-glass-edge md:block" />
+        <ProfileSwitcher className="hidden md:inline-flex" />
         <TenantSwitcher className="hidden md:inline-flex" />
         <HealthDot className="hidden md:inline-flex" />
         <LanguageToggle />

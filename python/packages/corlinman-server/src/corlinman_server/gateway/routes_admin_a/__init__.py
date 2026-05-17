@@ -46,6 +46,7 @@ from corlinman_server.gateway.routes_admin_a import (
     channels as _channels,
     embedding as _embedding,
     identity as _identity,
+    profiles as _profiles,
     sessions as _sessions,
     tenants as _tenants,
 )
@@ -80,6 +81,7 @@ def build_router() -> APIRouter:
         _channels,
         _embedding,
         _identity,
+        _profiles,
         _sessions,
         _tenants,
     ):
